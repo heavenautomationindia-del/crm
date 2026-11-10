@@ -364,11 +364,11 @@ async function init() {
   await initV2();
   let kp = (await q(`SELECT v FROM settings WHERE k='vapid'`)).rows[0];
   if (!kp) { const k = webpush.generateVAPIDKeys(); await q(`INSERT INTO settings(k,v) VALUES('vapid',$1)`, [JSON.stringify(k)]); kp = { v: JSON.stringify(k) }; }
-  const vk = JSON.parse(kp.v); VAPID_PUB = vk.publicKey; webpush.setVapidDetails('mailto:heavenautomationindia@gmail.com', vk.publicKey, vk.privateKey);
+  const vk = JSON.parse(kp.v); VAPID_PUB = vk.publicKey; webpush.setVapidDetails('mailto:admin@genzy.app', vk.publicKey, vk.privateKey);
   if (!(await q('SELECT 1 FROM users LIMIT 1')).rows.length) {
-    const pw = process.env.ADMIN_PASSWORD || 'Admin123';
+    const pw = process.env.ADMIN_PASSWORD || 'admin123';
     await q('INSERT INTO users(name,role,username,password_hash,permissions) VALUES($1,$2,$3,$4,$5)', ['Super Admin', SUPER, 'admin', hash(pw), ALL_KEYS]);
-    console.log('Created first admin → username: admin' + (process.env.ADMIN_PASSWORD ? ' (password from ADMIN_PASSWORD env)' : ' password: Admin123 (change it!)'));
+    console.log('Created first admin → username: admin' + (process.env.ADMIN_PASSWORD ? ' (password from ADMIN_PASSWORD env)' : ' password: admin123 (change it!)'));
   }
   // Password recovery: when ADMIN_PASSWORD in Render is set to a NEW value, apply it once to the Super Admin
   // (username "admin"). A password changed later in Profile stays until ADMIN_PASSWORD is changed again.
@@ -1242,5 +1242,5 @@ app.post('/api/leave/:id/cancel', wrap(async (req, res) => {
 }));
 app.delete('/api/leave/:id', superOnly, wrap(async (req, res) => { await q('DELETE FROM leave_requests WHERE id=$1', [req.params.id]); res.json({ ok: true }); }));
 
-init().then(() => { setInterval(remindDue, 30000); remindDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
+init().then(() => { setInterval(remindDue, 30000); remindDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Genzy running')))
   .catch(e => { console.error('DB init failed', e.message); process.exit(1); });
