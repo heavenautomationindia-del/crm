@@ -90,7 +90,7 @@ app.post('/api/login', wrap(async (req, res) => {
   if (Date.now() - t.at > 600000) { t.n = 0; t.at = Date.now(); }
   if (t.n >= 8) return res.status(429).json({ error: 'Too many attempts. Try again in 10 minutes.' });
   const { username, password } = req.body || {};
-  const u = (await q('SELECT * FROM users WHERE lower(username)=lower($1) AND active', [String(username || '')])).rows[0];
+  const u = (await q('SELECT * FROM users WHERE lower(username)=lower($1) AND active', [String(username || '').trim()])).rows[0];
   if (!u || !verify(String(password || ''), u.password_hash)) { tries[ip] = { n: t.n + 1, at: t.at }; return res.status(401).json({ error: 'Wrong username or password' }); }
   delete tries[ip];
   if (u.brand_id) u.brand_name = ((await q('SELECT name FROM brands WHERE id=$1', [u.brand_id])).rows[0] || {}).name;
@@ -364,11 +364,28 @@ async function init() {
   await initV2();
   let kp = (await q(`SELECT v FROM settings WHERE k='vapid'`)).rows[0];
   if (!kp) { const k = webpush.generateVAPIDKeys(); await q(`INSERT INTO settings(k,v) VALUES('vapid',$1)`, [JSON.stringify(k)]); kp = { v: JSON.stringify(k) }; }
-  const vk = JSON.parse(kp.v); VAPID_PUB = vk.publicKey; webpush.setVapidDetails('mailto:admin@genzy.app', vk.publicKey, vk.privateKey);
+  const vk = JSON.parse(kp.v); VAPID_PUB = vk.publicKey; webpush.setVapidDetails('mailto:heavenautomationindia@gmail.com', vk.publicKey, vk.privateKey);
   if (!(await q('SELECT 1 FROM users LIMIT 1')).rows.length) {
-    const pw = process.env.ADMIN_PASSWORD || 'admin123';
+    const pw = process.env.ADMIN_PASSWORD || 'Admin123';
     await q('INSERT INTO users(name,role,username,password_hash,permissions) VALUES($1,$2,$3,$4,$5)', ['Super Admin', SUPER, 'admin', hash(pw), ALL_KEYS]);
-    console.log('Created first admin → username: admin' + (process.env.ADMIN_PASSWORD ? ' (password from ADMIN_PASSWORD env)' : ' password: admin123 (change it!)'));
+    console.log('Created first admin → username: admin' + (process.env.ADMIN_PASSWORD ? ' (password from ADMIN_PASSWORD env)' : ' password: Admin123 (change it!)'));
+  }
+  // Password recovery: when ADMIN_PASSWORD in Render is set to a NEW value, apply it once to the Super Admin
+  // (username "admin"). A password changed later in Profile stays until ADMIN_PASSWORD is changed again.
+  const envPw = process.env.ADMIN_PASSWORD;
+  if (envPw) {
+    const fp = crypto.createHash('sha256').update('gz-admin-pw:' + envPw).digest('hex');
+    const done = (await q(`SELECT v FROM settings WHERE k='admin_pw_applied'`)).rows[0];
+    if (!done || done.v !== fp) {
+      let sa = (await q(`SELECT id FROM users WHERE role=$1 ORDER BY (lower(username)='admin') DESC, id LIMIT 1`, [SUPER])).rows[0];
+      if (!sa) sa = (await q(`SELECT id FROM users WHERE lower(username)='admin' LIMIT 1`)).rows[0];
+      if (sa) {
+        const clash = (await q(`SELECT 1 FROM users WHERE lower(username)='admin' AND id<>$1`, [sa.id])).rows.length;
+        await q(`UPDATE users SET password_hash=$1, role=$2, permissions=$3, active=true${clash ? '' : `, username='admin'`} WHERE id=$4`, [hash(envPw), SUPER, ALL_KEYS, sa.id]);
+        console.log('Super Admin password reset from ADMIN_PASSWORD → username: admin');
+      }
+      await q(`INSERT INTO settings(k,v) VALUES('admin_pw_applied',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [fp]);
+    }
   }
 }
 
@@ -1225,5 +1242,5 @@ app.post('/api/leave/:id/cancel', wrap(async (req, res) => {
 }));
 app.delete('/api/leave/:id', superOnly, wrap(async (req, res) => { await q('DELETE FROM leave_requests WHERE id=$1', [req.params.id]); res.json({ ok: true }); }));
 
-init().then(() => { setInterval(remindDue, 30000); remindDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Genzy running')))
+init().then(() => { setInterval(remindDue, 30000); remindDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
   .catch(e => { console.error('DB init failed', e.message); process.exit(1); });

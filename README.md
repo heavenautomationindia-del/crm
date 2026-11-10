@@ -1,10 +1,10 @@
-# Genzy – Heaven Automation
+# Rago CRM – Heaven Automation
 Node + Express + Postgres, installable as a phone app (PWA).
 
 ## Deploy
 1. Push this folder to a GitHub repo.
 2. Render → New → Blueprint → pick the repo (render.yaml creates the web service + Postgres).
-3. Render → genzy service → Environment → copy ADMIN_PASSWORD. Sign in as **admin** with that password.
+3. Sign in as **admin** / **Admin123**, then change the password in Profile → Change password.
 
 ## Roles
 - **Super Admin** – everything, and the only person who can delete anything (tickets, customers, leads, types, brands, members, to-dos, leave requests, old data). Adds brands (Heaven, G Media, …).
@@ -24,7 +24,7 @@ On first start after upgrading, the original `admin` login becomes Super Admin; 
 Calendar colours: Present green, Absent red, Leave purple, Morning permission blue, Evening permission orange, Half day amber, Week off grey, red dot = late in, dashed = waiting for approval.
 
 New team member (name, email, phone, role) → username + password are generated and shown once (copy or send on WhatsApp).
-Local run: `DATABASE_URL=postgres://... npm install && npm start` (first admin: admin / admin123 unless ADMIN_PASSWORD is set).
+Local run: `DATABASE_URL=postgres://... npm install && npm start` (first login: admin / Admin123 — change it in Profile).
 
 ## Job flow
 1. Admin creates ticket (optional Google Maps link) and assigns a technician → technician gets a notification (🔔).
