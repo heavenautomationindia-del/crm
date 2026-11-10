@@ -9,6 +9,7 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL && !/localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL) ? { rejectUnauthorized: false } : false,
 });
+pool.on('connect', c => { c.query("SET TIME ZONE 'Asia/Kolkata'").catch(() => {}); });   // eslint-disable-line   // dates & 'this month' in India time
 const q = (sql, p) => pool.query(sql, p);
 const SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const app = express();
@@ -36,6 +37,7 @@ const PERMS = [
   { k: 'dashboard', l: 'Dashboard', g: 'Menus' }, { k: 'services', l: 'Services & jobs', g: 'Menus' },
   { k: 'customers', l: 'Customers', g: 'Menus' }, { k: 'team', l: 'Team', g: 'Menus' }, { k: 'leads', l: 'Leads', g: 'Menus' },
   { k: 'attendance', l: 'Team attendance, approvals & report (always on for Admin staff)', g: 'Menus' },
+  { k: 'pay_overview', l: 'Service payments & overview (today’s customer payments, status counts)', g: 'Menus' },
   { k: 'service_create', l: 'Create services & jobs', g: 'Actions' }, { k: 'service_assign', l: 'Assign technician', g: 'Actions' },
   { k: 'service_edit', l: 'Edit status & approval', g: 'Actions' }, { k: 'payments', l: 'Add payments & discounts', g: 'Actions' },
   { k: 'view_charges', l: 'See charges', g: 'Actions' }, { k: 'view_phone', l: 'See customer phone', g: 'Actions' },
@@ -77,12 +79,12 @@ const superOnly = (req, res, next) => isSuper(req.user) ? next() : res.status(40
 const techOnly = (req, res, next) => (isTech(req.user) || isSuper(req.user)) ? next() : res.status(403).json({ error: 'Not allowed' });
 const auth = wrap(async (req, res, next) => {
   const d = unsign(cookies(req.headers.cookie).gz);
-  const u = d && (await q('SELECT u.*, b.name brand_name FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.id=$1 AND u.active', [d.id])).rows[0];
+  const u = d && (await q('SELECT u.id,u.name,u.email,u.phone,u.role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at, b.name brand_name FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.id=$1 AND u.active', [d.id])).rows[0];
   if (!u) return res.status(401).json({ error: 'Login required' });
   req.user = u; next();
 });
-const me = u => ({ id: u.id, name: u.name, role: u.role, username: u.username, brand_id: u.brand_id || null, brand: u.brand_name || null, permissions: isSuper(u) ? ALL_KEYS : u.permissions });
-const pub = u => { const { password_hash, ...r } = u; return r; };
+const me = u => ({ id: u.id, name: u.name, role: u.role, username: u.username, brand_id: u.brand_id || null, brand: u.brand_name || null, photo_v: u.photo_v || 0, permissions: isSuper(u) ? ALL_KEYS : u.permissions });
+const pub = u => { const { password_hash, photo, photo_mime, ...r } = u; return r; };
 
 const tries = {};
 app.post('/api/login', wrap(async (req, res) => {
@@ -251,7 +253,7 @@ app.post('/api/leads/:id/convert', need('leads'), wrap(async (req, res) => {
   if (!l) return res.status(404).json({ error: 'Not found' });
   let c; if (l.customer_id) c = (await q('SELECT * FROM customers WHERE id=$1', [l.customer_id])).rows[0];
   if (!c && digits(l.phone).length >= 7) c = (await q(`SELECT * FROM customers WHERE regexp_replace(phone,'[^0-9]','','g')=$1 LIMIT 1`, [digits(l.phone)])).rows[0];
-  if (!c) c = (await q('INSERT INTO customers(name,phone,email,address) VALUES($1,$2,$3,$4) RETURNING *', [l.name, l.phone, l.email, l.address])).rows[0];
+  if (!c) c = (await q('INSERT INTO customers(name,phone,email,address,brand_id) VALUES($1,$2,$3,$4,$5) RETURNING *', [l.name, l.phone, l.email, l.address, req.user.brand_id || null])).rows[0];
   await q(`UPDATE leads SET customer_id=$1, stage='Closed Won', updated_at=now(), last_contact=now() WHERE id=$2`, [c.id, l.id]);
   await leadLog(l.id, req.user.name, l.customer_id ? 'Service requested' : 'Converted to customer · Closed Won');
   res.json({ customer: { id: c.id, name: c.name, phone: c.phone, address: c.address, tickets: 0 } });
@@ -304,7 +306,20 @@ async function initV2() {
   ALTER TABLE attendance ADD COLUMN IF NOT EXISTS out_dist INT;
   ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION;
   ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION;
-  ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS distance INT;`);
+  ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS distance INT;
+  ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS customer_id INT;
+  ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS place TEXT;
+  ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS accuracy INT;
+  ALTER TABLE customers ADD COLUMN IF NOT EXISTS brand_id INT;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS photo BYTEA;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_mime TEXT;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_v INT DEFAULT 0;
+  ALTER TABLE payments ADD COLUMN IF NOT EXISTS received_by TEXT;
+  CREATE TABLE IF NOT EXISTS service_voice (id SERIAL PRIMARY KEY, service_id INT NOT NULL REFERENCES services(id) ON DELETE CASCADE, user_id INT, user_name TEXT, role TEXT,
+    audio BYTEA NOT NULL, mime TEXT, duration INT DEFAULT 0, created_at TIMESTAMPTZ DEFAULT now());
+  CREATE INDEX IF NOT EXISTS idx_sv_service ON service_voice(service_id);
+  CREATE INDEX IF NOT EXISTS idx_pay_date ON payments(paid_on);`);
+
   if (!(await q(`SELECT 1 FROM settings WHERE k='office'`)).rows.length)
     await q(`INSERT INTO settings(k,v) VALUES('office',$1)`, [JSON.stringify(OFFICE_DEFAULT)]);
   if (!(await q('SELECT 1 FROM brands LIMIT 1')).rows.length)
@@ -314,6 +329,8 @@ async function initV2() {
   const heaven = (await q(`SELECT id FROM brands ORDER BY (lower(name)='heaven') DESC, id LIMIT 1`)).rows[0].id;
   await q(`UPDATE services SET brand_id=$1 WHERE brand_id IS NULL`, [heaven]);
   await q(`UPDATE services SET kind='Service' WHERE kind IS NULL`);
+  // customers belong to the brand of their tickets (Heaven staff see Heaven customers; Super Admin sees all)
+  await q(`UPDATE customers c SET brand_id=(SELECT s.brand_id FROM services s WHERE s.customer_id=c.id AND s.brand_id IS NOT NULL ORDER BY s.id DESC LIMIT 1) WHERE c.brand_id IS NULL`);
   // one-time: the first (owner) admin becomes Super Admin; other old admins become Admin staff of Heaven with every permission they had
   if (!(await q(`SELECT 1 FROM users WHERE role=$1 LIMIT 1`, [SUPER])).rows.length) {
     const own = (await q(`SELECT id FROM users WHERE role='Admin' ORDER BY (username='admin') DESC, id LIMIT 1`)).rows[0];
@@ -364,11 +381,11 @@ async function init() {
   await initV2();
   let kp = (await q(`SELECT v FROM settings WHERE k='vapid'`)).rows[0];
   if (!kp) { const k = webpush.generateVAPIDKeys(); await q(`INSERT INTO settings(k,v) VALUES('vapid',$1)`, [JSON.stringify(k)]); kp = { v: JSON.stringify(k) }; }
-  const vk = JSON.parse(kp.v); VAPID_PUB = vk.publicKey; webpush.setVapidDetails('mailto:admin@genzy.app', vk.publicKey, vk.privateKey);
+  const vk = JSON.parse(kp.v); VAPID_PUB = vk.publicKey; webpush.setVapidDetails('mailto:heavenautomationindia@gmail.com', vk.publicKey, vk.privateKey);
   if (!(await q('SELECT 1 FROM users LIMIT 1')).rows.length) {
-    const pw = process.env.ADMIN_PASSWORD || 'admin123';
+    const pw = process.env.ADMIN_PASSWORD || 'Admin123';
     await q('INSERT INTO users(name,role,username,password_hash,permissions) VALUES($1,$2,$3,$4,$5)', ['Super Admin', SUPER, 'admin', hash(pw), ALL_KEYS]);
-    console.log('Created first admin → username: admin' + (process.env.ADMIN_PASSWORD ? ' (password from ADMIN_PASSWORD env)' : ' password: admin123 (change it!)'));
+    console.log('Created first admin → username: admin' + (process.env.ADMIN_PASSWORD ? ' (password from ADMIN_PASSWORD env)' : ' password: Admin123 (change it!)'));
   }
   // Password recovery: when ADMIN_PASSWORD in Render is set to a NEW value, apply it once to the Super Admin
   // (username "admin"). A password changed later in Profile stays until ADMIN_PASSWORD is changed again.
@@ -392,12 +409,12 @@ async function init() {
 // ---------- meta ----------
 // technicians are shared by every brand; `busy` = brands where they have an open job right now
 const techList = async () => {
-  const r = (await q(`SELECT u.id,u.name, s.brand_id, b.name brand, s.ticket_no FROM users u
+  const r = (await q(`SELECT u.id,u.name,u.photo_v, s.brand_id, b.name brand, s.ticket_no FROM users u
     LEFT JOIN services s ON (s.technician_id=u.id OR s.helper_id=u.id) AND s.status=ANY($1::text[])
     LEFT JOIN brands b ON b.id=s.brand_id WHERE u.role='Technician' AND u.active ORDER BY u.name, s.id`, [OPEN_ST])).rows;
   const m = new Map();
   for (const x of r) {
-    const t = m.get(x.id) || { id: x.id, name: x.name, busy: [] }; m.set(x.id, t);
+    const t = m.get(x.id) || { id: x.id, name: x.name, photo_v: x.photo_v, busy: [] }; m.set(x.id, t);
     if (x.brand_id && !t.busy.some(z => z.brand_id === x.brand_id)) t.busy.push({ brand_id: x.brand_id, brand: x.brand, ticket_no: x.ticket_no });
   }
   return [...m.values()];
@@ -440,7 +457,8 @@ app.get('/api/lookup', wrap(async (req, res) => {
   const dg = digits(req.query.phone), out = { customers: [], leads: [] };
   if (dg.length < 5) return res.json(out);
   if (can(req.user, 'customers') || can(req.user, 'service_create'))
-    out.customers = (await q(`SELECT c.id,c.name,c.phone,c.address,(SELECT COUNT(*) FROM services s WHERE s.customer_id=c.id)::int tickets FROM customers c WHERE regexp_replace(COALESCE(c.phone,''),'[^0-9]','','g') LIKE '%'||$1||'%' ORDER BY c.name LIMIT 3`, [dg])).rows;
+  { const p = [dg], sc = custScope(req.user, p);
+    out.customers = (await q(`SELECT c.id,c.name,c.phone,c.address,(SELECT COUNT(*) FROM services s WHERE s.customer_id=c.id)::int tickets FROM customers c WHERE regexp_replace(COALESCE(c.phone,''),'[^0-9]','','g') LIKE '%'||$1||'%' AND ${sc} ORDER BY c.name LIMIT 3`, p)).rows; }
   if (can(req.user, 'leads'))
     out.leads = (await q(`SELECT id,name,phone,stage FROM leads WHERE regexp_replace(COALESCE(phone,''),'[^0-9]','','g') LIKE '%'||$1||'%' ORDER BY id DESC LIMIT 3`, [dg])).rows;
   res.json(out);
@@ -456,7 +474,7 @@ const brandFor = async (role, v) => {
   return { id };
 };
 const manages = (me, role) => isSuper(me) || !['Admin', SUPER].includes(role);
-app.get('/api/users', need('team'), wrap(async (_, res) => res.json((await q('SELECT u.*, b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id ORDER BY u.active DESC, u.role, u.name')).rows.map(pub))));
+app.get('/api/users', need('team'), wrap(async (_, res) => res.json((await q('SELECT u.id,u.name,u.email,u.phone,u.role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at, b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id ORDER BY u.active DESC, u.role, u.name')).rows.map(pub))));
 app.post('/api/users', need('team'), wrap(async (req, res) => {
   const b = req.body || {};
   if (!b.name || !b.email || !b.phone) return res.status(400).json({ error: 'Name, email and phone are required' });
@@ -510,6 +528,12 @@ const scope = (u, p, w) => {
   else if (u.brand_id) { p.push(u.brand_id); w.push(`s.brand_id=$${p.length}`); }
 };
 const brandOK = (u, s) => isTech(u) || !u.brand_id || s.brand_id === u.brand_id;
+// which customers a person may see: Super Admin / no brand → all; brand staff → that brand's customers; technicians → customers of their jobs
+const custScope = (u, p) => {
+  if (isTech(u)) { p.push(u.id); return `EXISTS (SELECT 1 FROM services s2 WHERE s2.customer_id=c.id AND (s2.technician_id=$${p.length} OR s2.helper_id=$${p.length}))`; }
+  if (u.brand_id) { p.push(u.brand_id); return `(c.brand_id=$${p.length} OR EXISTS (SELECT 1 FROM services s2 WHERE s2.customer_id=c.id AND s2.brand_id=$${p.length}))`; }
+  return 'true';
+};
 const shape = (s, u) => {
   if (!can(u, 'view_phone')) { delete s.phone; delete s.email; }
   if (!can(u, 'view_charges')) { delete s.charges_applied; delete s.discount; delete s.given; }
@@ -539,8 +563,16 @@ const mine = async (req, res) => {           // loads a service the caller may t
 };
 
 app.get('/api/customers', need('customers', 'service_create'), wrap(async (req, res) => {
-  res.json((await q(`SELECT c.*, (SELECT COUNT(*)::int FROM services s WHERE s.customer_id=c.id) tickets FROM customers c
-    WHERE c.name ILIKE $1 OR c.phone ILIKE $1 ORDER BY c.name LIMIT 100`, ['%' + (req.query.q || '') + '%'])).rows);
+  const p = ['%' + (req.query.q || '') + '%'], sc = custScope(req.user, p);
+  res.json((await q(`SELECT c.*, b.name brand, (SELECT COUNT(*)::int FROM services s WHERE s.customer_id=c.id) tickets FROM customers c LEFT JOIN brands b ON b.id=c.brand_id
+    WHERE (c.name ILIKE $1 OR c.phone ILIKE $1) AND ${sc} ORDER BY c.name LIMIT 100`, p)).rows);
+}));
+// customer picker for attendance requests (everyone): technicians see customers of their jobs (open jobs first)
+app.get('/api/customers/pick', wrap(async (req, res) => {
+  const p = ['%' + String(req.query.q || '').trim() + '%'], sc = custScope(req.user, p);
+  const tp = isTech(req.user) ? `(SELECT COUNT(*) FROM services s3 WHERE s3.customer_id=c.id AND s3.status=ANY('{${OPEN_ST.join(',')}}') AND (s3.technician_id=${+req.user.id} OR s3.helper_id=${+req.user.id}))` : '0';
+  res.json((await q(`SELECT c.id, c.name, c.phone, c.address, c.city, ${tp}::int open FROM customers c
+    WHERE (c.name ILIKE $1 OR c.phone ILIKE $1 OR c.address ILIKE $1) AND ${sc} ORDER BY open DESC, c.name LIMIT 40`, p)).rows);
 }));
 
 app.get('/api/dashboard', need('dashboard'), wrap(async (req, res) => {
@@ -561,7 +593,7 @@ app.get('/api/dashboard', need('dashboard'), wrap(async (req, res) => {
   const paid = await one(`SELECT COALESCE(SUM(y.amount),0) paid FROM payments y JOIN services s ON s.id=y.service_id WHERE y.approval<>'Rejected'${A}`);
   const pm = await one(`SELECT COALESCE(SUM(y.amount),0) paid FROM payments y JOIN services s ON s.id=y.service_id WHERE y.approval<>'Rejected' AND y.paid_on>=date_trunc('month',now())${A}`);
   const byType = (await q(`SELECT service_type name, COUNT(*)::int n FROM services s ${W} GROUP BY 1 ORDER BY n DESC`, p)).rows;
-  const load = (await q(`SELECT u.name, COUNT(s.id)::int n, string_agg(DISTINCT b.name, ', ') brands FROM users u LEFT JOIN services s ON s.technician_id=u.id AND s.status IN ('Work Not Started','On-Process','Work Pending') LEFT JOIN brands b ON b.id=s.brand_id WHERE u.role='Technician' AND u.active GROUP BY u.id ORDER BY n DESC, u.name`)).rows;
+  const load = (await q(`SELECT u.id, u.name, u.photo_v, COUNT(s.id)::int n, string_agg(DISTINCT b.name, ', ') brands FROM users u LEFT JOIN services s ON s.technician_id=u.id AND s.status IN ('Work Not Started','On-Process','Work Pending') LEFT JOIN brands b ON b.id=s.brand_id WHERE u.role='Technician' AND u.active GROUP BY u.id ORDER BY n DESC, u.name`)).rows;
   const recent = (await q(`${SELECT} ${W} ORDER BY s.submitted_on DESC LIMIT 5`, p)).rows.map(s => shape(s, req.user));
   const out = { ...k, byType, load, recent };
   if (can(req.user, 'view_charges')) Object.assign(out, { paid: paid.paid, paid_month: pm.paid, outstanding: Math.max(0, k.billed - paid.paid) }); else delete out.billed;
@@ -616,7 +648,8 @@ app.get('/api/services/:id', wrap(async (req, res) => {
       previous.forEach(p => { p.history = (by[p.id] || []).slice(-12); });
     }
   } catch (e) { console.error('previous services failed', e.message); previous = []; }
-  res.json({ ...shape(s, req.user), payments: pay.rows, history: hist.rows, photos: ph.rows, previous });
+  const voices = (await q(`SELECT id, user_id, user_name, role, duration, created_at FROM service_voice WHERE service_id=$1 ORDER BY id`, [s.id])).rows;
+  res.json({ ...shape(s, req.user), payments: pay.rows, history: hist.rows, photos: ph.rows, previous, voices });
 }));
 
 app.post('/api/services', need('service_create'), wrap(async (req, res) => {
@@ -627,14 +660,18 @@ app.post('/api/services', need('service_create'), wrap(async (req, res) => {
   let brandId = req.user.brand_id || (Number.isInteger(+b.brand_id) && +b.brand_id > 0 ? +b.brand_id : null);
   if (brandId && !(await q('SELECT 1 FROM brands WHERE id=$1', [brandId])).rows.length) return res.status(400).json({ error: 'Brand not found' });
   if (!brandId) brandId = (await q(`SELECT id FROM brands ORDER BY (lower(name)='heaven') DESC, id LIMIT 1`)).rows[0].id;
-  if (cid) { if (!(await q('SELECT 1 FROM customers WHERE id=$1', [cid])).rows.length) return res.status(400).json({ error: 'Customer not found' }); }
+  if (cid) {
+    const cp = [+cid], csc = custScope(req.user, cp);
+    if (!(await q(`SELECT 1 FROM customers c WHERE c.id=$1 AND ${csc}`, cp)).rows.length) return res.status(400).json({ error: 'Customer not found' });
+    await q('UPDATE customers SET brand_id=COALESCE(brand_id,$2) WHERE id=$1', [+cid, brandId]);
+  }
   if (!cid) {
     b.name = String(b.name || '').trim(); b.phone = String(b.phone || '').trim();
     if (!b.name) return res.status(400).json({ error: 'Customer name is required' });
     if (digits(b.phone).length < 7) return res.status(400).json({ error: 'Enter a valid phone number' });
     const m = /@(-?\d+\.\d+),(-?\d+\.\d+)|[?&](?:q|ll|query)=(-?\d+\.\d+),(-?\d+\.\d+)/.exec(b.map_url || '');
-    cid = (await q('INSERT INTO customers(name,phone,email,address,map_url,lat,lng) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id',
-      [b.name, b.phone, b.email, b.address, b.map_url || null, m ? +(m[1] || m[3]) : null, m ? +(m[2] || m[4]) : null])).rows[0].id;
+    cid = (await q('INSERT INTO customers(name,phone,email,address,map_url,lat,lng,brand_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id',
+      [b.name, b.phone, b.email, b.address, b.map_url || null, m ? +(m[1] || m[3]) : null, m ? +(m[2] || m[4]) : null, brandId])).rows[0].id;
   }
   const ticket = 100000 + crypto.randomInt(899999);
   const r = await q(`INSERT INTO services(ticket_no,customer_id,product,request_details,service_type,visit_type,charges_applied,kind,brand_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
@@ -764,6 +801,7 @@ app.post('/api/services/:id/settle', need('payments'), wrap(async (req, res) => 
   if (bankDue > 0 && !trBank) return res.status(400).json({ error: 'Choose the bank account that received the transfer' });
   if (cashDue > 0) await q(`INSERT INTO payments(service_id,amount,bank,note,approval) VALUES($1,$2,$3,'Cash handed over by technician','Approved')`, [s.id, cashDue, cashBank]);
   if (bankDue > 0) await q(`INSERT INTO payments(service_id,amount,bank,note,approval) VALUES($1,$2,$3,'Bank transfer · screenshot verified','Approved')`, [s.id, bankDue, trBank]);
+  if (cashDue > 0 || bankDue > 0) await q(`UPDATE payments SET received_by=$2 WHERE service_id=$1 AND received_by IS NULL`, [s.id, req.user.name]);
   await q(`UPDATE services SET received_settled=amount_received, bank_settled=COALESCE(bank_amount,0)${close ? `, status='Resolved', resolved_on=now(), approval='Approved'` : ''} WHERE id=$1`, [s.id]);
   const parts = [cashDue > 0 && `cash ₹${cashDue} from technician`, bankDue > 0 && `bank ₹${bankDue} confirmed`].filter(Boolean).join(' + ');
   await log(s.id, req.user.name, (parts ? `Payment received: ${parts}` : 'Free service confirmed') + (close ? ' — work completed' : ''));
@@ -848,7 +886,7 @@ const brandGuard = wrap(async (req, res, next) => {
 });
 app.post('/api/services/:id/payments', need('payments'), brandGuard, wrap(async (req, res) => {
   const b = req.body;
-  await q('INSERT INTO payments(service_id,amount,bank,paid_on,note) VALUES($1,$2,$3,COALESCE($4,CURRENT_DATE),$5)', [req.params.id, b.amount, b.bank, b.paid_on || null, b.note]);
+  await q('INSERT INTO payments(service_id,amount,bank,paid_on,note,received_by) VALUES($1,$2,$3,COALESCE($4,CURRENT_DATE),$5,$6)', [req.params.id, b.amount, b.bank, b.paid_on || null, b.note, req.user.name]);
   await log(req.params.id, req.user.name, `Payment ₹${b.amount} added (${b.bank || 'n/a'})`); res.json({ ok: true });
 }));
 app.post('/api/services/:id/discount', need('payments'), brandGuard, wrap(async (req, res) => {
@@ -1004,6 +1042,84 @@ async function remindDue() {
   } catch (e) { console.error('reminders failed', e.message); } finally { remBusy = false; }
 }
 
+// ---------- payments overview (Dashboard + "Payments" page) ----------
+// Who paid on a day (customer, ticket, amount, mode), day / month totals and ticket status counts — brand-scoped.
+app.get('/api/payments/overview', wrap(async (req, res) => {
+  if (!(can(req.user, 'pay_overview') || (can(req.user, 'dashboard') && can(req.user, 'view_charges')))) return res.status(403).json({ error: 'Not allowed' });
+  const today = await todayIST(), date = isDate(req.query.date) ? req.query.date : today;
+  const p = [], w = []; scope(req.user, p, w);
+  if (!req.user.brand_id && +req.query.brand) { p.push(+req.query.brand); w.push(`s.brand_id=$${p.length}`); }
+  const A = w.length ? ' AND ' + w.join(' AND ') : '', W = w.length ? 'WHERE ' + w.join(' AND ') : '';
+  const dp = [...p, date], di = '$' + dp.length;
+  const list = (await q(`SELECT y.id, y.amount, y.bank, y.note, y.approval, y.received_by, y.created_at, s.id service_id, s.ticket_no, s.kind, s.service_type, c.name customer, c.phone, br.name brand
+    FROM payments y JOIN services s ON s.id=y.service_id LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN brands br ON br.id=s.brand_id
+    WHERE y.approval<>'Rejected' AND y.paid_on=${di}::date${A} ORDER BY y.created_at DESC, y.id DESC LIMIT 300`, dp)).rows;
+  const one = async (sql, pp) => (await q(sql, pp || p)).rows[0];
+  const mp = [...p, date], mi = '$' + mp.length;
+  const month = await one(`SELECT COALESCE(SUM(y.amount),0) total, COUNT(*)::int n FROM payments y JOIN services s ON s.id=y.service_id
+    WHERE y.approval<>'Rejected' AND y.paid_on>=date_trunc('month',${mi}::date) AND y.paid_on<=${mi}::date${A}`, mp);
+  const k = await one(`SELECT COUNT(*) FILTER (WHERE status='New Ticket')::int new_tickets, COUNT(*) FILTER (WHERE status='Work Not Started')::int assigned,
+    COUNT(*) FILTER (WHERE status='On-Process')::int on_process, COUNT(*) FILTER (WHERE status='Work Pending')::int pending,
+    COUNT(*) FILTER (WHERE kind='Job' AND status NOT IN ('Resolved','Cancelled'))::int open_jobs, COUNT(*) FILTER (WHERE status='Awaiting Payment')::int awaiting,
+    COUNT(*) FILTER (WHERE status='Resolved' AND resolved_on>=date_trunc('month',now()))::int resolved_month,
+    COALESCE(SUM(charges_applied-discount) FILTER (WHERE status<>'Cancelled'),0) billed FROM services s ${W}`);
+  const paid = await one(`SELECT COALESCE(SUM(y.amount),0) paid FROM payments y JOIN services s ON s.id=y.service_id WHERE y.approval<>'Rejected'${A}`);
+  const dayTotal = list.reduce((a, x) => a + Number(x.amount), 0), customers = new Set(list.map(x => x.service_id)).size;
+  res.set('Cache-Control', 'no-store').json({ date, today, list, day_total: dayTotal, day_count: list.length, day_customers: customers,
+    month_total: month.total, month_count: month.n, ...k, paid: paid.paid, outstanding: Math.max(0, k.billed - paid.paid) });
+}));
+
+// ---------- profile photos ----------
+app.get('/api/users/:id/photo', wrap(async (req, res) => {
+  const r = (await q('SELECT photo, photo_mime FROM users WHERE id=$1', [req.params.id])).rows[0];
+  if (!r || !r.photo) return res.status(404).end();
+  res.set('Content-Type', r.photo_mime || 'image/jpeg').set('Cache-Control', 'private, max-age=31536000, immutable').send(r.photo);
+}));
+app.post('/api/users/:id/photo', wrap(async (req, res) => {
+  const id = +req.params.id, u = (await q('SELECT id, role FROM users WHERE id=$1', [id])).rows[0];
+  if (!u) return res.status(404).json({ error: 'Not found' });
+  if (id !== req.user.id && !(can(req.user, 'team') && manages(req.user, u.role))) return res.status(403).json({ error: 'Not allowed' });
+  const b = req.body || {};
+  if (b.remove) { await q('UPDATE users SET photo=NULL, photo_mime=NULL, photo_v=0 WHERE id=$1', [id]); return res.json({ ok: true, photo_v: 0 }); }
+  const m = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(String(b.data || ''));
+  if (!m) return res.status(400).json({ error: 'Choose a photo (JPG or PNG)' });
+  const buf = Buffer.from(m[2], 'base64');
+  if (buf.length > 600 * 1024) return res.status(400).json({ error: 'Photo is too large' });
+  const v = (await q('UPDATE users SET photo=$1, photo_mime=$2, photo_v=COALESCE(photo_v,0)+1 WHERE id=$3 RETURNING photo_v', [buf, m[1], id])).rows[0].photo_v;
+  res.json({ ok: true, photo_v: v });
+}));
+
+// ---------- voice notes on services / jobs (admin ↔ technician) ----------
+const voiceAccess = async (req, sid) => {
+  const s = (await q('SELECT id, ticket_no, brand_id, technician_id, helper_id FROM services WHERE id=$1', [sid])).rows[0];
+  if (!s) return { code: 404 };
+  if (isTech(req.user) ? ![s.technician_id, s.helper_id].includes(req.user.id) : (!can(req.user, 'services') || !brandOK(req.user, s))) return { code: 403 };
+  return { s };
+};
+app.post('/api/services/:id/voice', wrap(async (req, res) => {
+  const a = await voiceAccess(req, +req.params.id); if (!a.s) return res.status(a.code).json({ error: a.code === 404 ? 'Not found' : 'Not allowed' });
+  const b = req.body || {}, m = /^data:(audio\/[\w.+-]+)(?:;[\w=.+-]+)*;base64,([A-Za-z0-9+/=]+)$/.exec(String(b.audio || ''));
+  if (!m) return res.status(400).json({ error: 'Record a voice message first' });
+  const buf = Buffer.from(m[2], 'base64'); if (buf.length < 200) return res.status(400).json({ error: 'The recording is empty — try again' });
+  if (buf.length > 6 * 1024 * 1024) return res.status(400).json({ error: 'Recording too long (max 5 minutes)' });
+  const dur = Math.max(1, Math.min(600, Math.round(+b.duration || 0)));
+  const r = await q('INSERT INTO service_voice(service_id,user_id,user_name,role,audio,mime,duration) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id', [a.s.id, req.user.id, req.user.name, req.user.role, buf, m[1], dur]);
+  await log(a.s.id, req.user.name, `🎙 Voice message (${dur}s)`);
+  const to = isTech(req.user) ? [...await admins(a.s.brand_id), a.s.technician_id, a.s.helper_id] : [a.s.technician_id, a.s.helper_id];
+  await notify(to.filter(x => x && x !== req.user.id), '🎙 Voice message', `${req.user.name} · #${a.s.ticket_no}`, a.s.id);
+  res.json({ id: r.rows[0].id });
+}));
+app.get('/api/service-voice/:id', wrap(async (req, res) => {
+  const v = (await q('SELECT service_id, audio, mime FROM service_voice WHERE id=$1', [req.params.id])).rows[0];
+  if (!v) return res.status(404).end();
+  const a = await voiceAccess(req, v.service_id); if (!a.s) return res.status(a.code).end();
+  const buf = v.audio, total = buf.length, range = /bytes=(\d*)-(\d*)/.exec(req.headers.range || '');
+  res.set({ 'Content-Type': v.mime || 'audio/webm', 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, max-age=86400' });
+  if (range) { const st = range[1] ? +range[1] : 0, en = range[2] ? Math.min(+range[2], total - 1) : total - 1; res.status(206).set('Content-Range', `bytes ${st}-${en}/${total}`).send(buf.subarray(st, en + 1)); }
+  else res.send(buf);
+}));
+app.delete('/api/service-voice/:id', superOnly, wrap(async (req, res) => { await q('DELETE FROM service_voice WHERE id=$1', [req.params.id]); res.json({ ok: true }); }));
+
 // ---------- attendance, leave & permission ----------
 // Check in / out works only inside the office radius. Outside (or no GPS) → the person sends an
 // "Attendance request" with the time + reason, and an approver marks it. Leave = full days, Permission = morning / evening.
@@ -1124,24 +1240,24 @@ app.get('/api/attendance/month', wrap(async (req, res) => {
   const today = await todayIST(), m = isMonth(req.query.month) ? req.query.month : today.slice(0, 7);
   const uid = +req.query.user || req.user.id;
   if (uid !== req.user.id && !canAtt(req.user)) return res.status(403).json({ error: 'Not allowed' });
-  const u = (await q('SELECT id,name,role,created_at FROM users WHERE id=$1', [uid])).rows[0];
+  const u = (await q('SELECT id,name,role,created_at,photo_v FROM users WHERE id=$1', [uid])).rows[0];
   if (!u) return res.status(404).json({ error: 'Not found' });
-  res.set('Cache-Control', 'no-store').json({ user: { id: u.id, name: u.name, role: u.role }, month: m, today, ...(await monthFor(u, m, today, await attStart(), await office())) });
+  res.set('Cache-Control', 'no-store').json({ user: { id: u.id, name: u.name, role: u.role, photo_v: u.photo_v }, month: m, today, ...(await monthFor(u, m, today, await attStart(), await office())) });
 }));
 app.get('/api/attendance/report', attNeed, wrap(async (req, res) => {
   const today = await todayIST(), m = isMonth(req.query.month) ? req.query.month : today.slice(0, 7), start = await attStart(), off = await office();
-  const users = (await q(`SELECT u.id,u.name,u.role,u.created_at,b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.active AND u.role<>$1 ORDER BY u.role, u.name`, [SUPER])).rows;
+  const users = (await q(`SELECT u.id,u.name,u.role,u.created_at,u.photo_v,b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.active AND u.role<>$1 ORDER BY u.role, u.name`, [SUPER])).rows;
   const rows = [];
   for (const u of users) {
     const x = await monthFor(u, m, today, start, off), td = x.days.find(d => d.d === today);
-    rows.push({ id: u.id, name: u.name, role: u.role, brand: u.brand, ...x.summary, today: td ? { code: td.code, in: td.in, out: td.out, late: td.late } : null });
+    rows.push({ id: u.id, name: u.name, role: u.role, brand: u.brand, photo_v: u.photo_v, ...x.summary, today: td ? { code: td.code, in: td.in, out: td.out, late: td.late } : null });
   }
   res.set('Cache-Control', 'no-store').json({ month: m, today, rows });
 }));
 // dashboard: who is on leave / permission today, who is in, what is waiting for approval
 app.get('/api/attendance/board', attNeed, wrap(async (req, res) => {
   const today = await todayIST(), off = await office();
-  const staff = (await q(`SELECT u.id,u.name,u.role,b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.active AND u.role<>$1 ORDER BY u.name`, [SUPER])).rows;
+  const staff = (await q(`SELECT u.id,u.name,u.role,u.photo_v,b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.active AND u.role<>$1 ORDER BY u.name`, [SUPER])).rows;
   const att = {}; (await q(`SELECT * FROM attendance WHERE day=$1`, [today])).rows.forEach(r => { att[r.user_id] = r; });
   const tr = (await q(`${LSELR} WHERE r.status='Approved' AND r.kind IN ('Leave','Permission') AND r.from_date<=$1 AND r.to_date>=$1 ORDER BY r.kind, r.session, u.name`, [today])).rows;
   const pending = (await q(`${LSELR} WHERE r.status='Pending' ORDER BY r.created_at LIMIT 20`)).rows;
@@ -1176,7 +1292,8 @@ async function setAtt(uid, date, status, inT, outT, note, by) {
     ${inT ? `, check_in=${ts(inT)}` : ''}${outT ? `, check_out=${ts(outT)}` : ''}`, [uid, date, status, note, by]);
 }
 
-const LSELR = `SELECT r.*, to_char(r.from_date,'YYYY-MM-DD') from_date, to_char(r.to_date,'YYYY-MM-DD') to_date, u.name, u.role FROM leave_requests r JOIN users u ON u.id=r.user_id`;
+const LSELR = `SELECT r.*, to_char(r.from_date,'YYYY-MM-DD') from_date, to_char(r.to_date,'YYYY-MM-DD') to_date, u.name, u.role, u.photo_v, c.name customer, c.phone customer_phone
+  FROM leave_requests r JOIN users u ON u.id=r.user_id LEFT JOIN customers c ON c.id=r.customer_id`;
 const reqWhen = r => r.kind === 'Permission' ? `${r.session} permission on ${fdIN(r.from_date)}${r.from_time ? ` (${r.from_time}${r.to_time ? '–' + r.to_time : ''})` : ''}`
   : r.kind === 'Attendance' ? `attendance on ${fdIN(r.from_date)}: ${[r.from_time && 'in ' + r.from_time, r.to_time && 'out ' + r.to_time].filter(Boolean).join(', ')}`
   : `${r.leave_type || 'Leave'} ${fdIN(r.from_date)}${r.to_date !== r.from_date ? ' → ' + fdIN(r.to_date) : ''}`;
@@ -1195,7 +1312,7 @@ app.post('/api/leave', wrap(async (req, res) => {
   if (to < from) return res.status(400).json({ error: 'The end date is before the start date' });
   if ((new Date(to) - new Date(from)) / 864e5 > 60) return res.status(400).json({ error: 'A leave can be at most 60 days. Apply in parts.' });
   if (!reason) return res.status(400).json({ error: 'Write the reason' });
-  let session = null, ft = null, tt = null, lt = null, lat = null, lng = null, dist = null;
+  let session = null, ft = null, tt = null, lt = null, lat = null, lng = null, dist = null, custId = null, place = null, acc = null;
   if (kind === 'Permission') {
     session = ['Morning', 'Evening'].includes(b.session) ? b.session : null;
     if (!session) return res.status(400).json({ error: 'Choose Morning permission or Evening permission' });
@@ -1206,16 +1323,23 @@ app.post('/api/leave', wrap(async (req, res) => {
     ft = isTime(b.from_time) ? b.from_time : null; tt = isTime(b.to_time) ? b.to_time : null;
     if (!ft && !tt) return res.status(400).json({ error: 'Enter the check-in time, the check-out time, or both' });
     if (ft && tt && tt <= ft) return res.status(400).json({ error: 'Check-out time must be after check-in time' });
-    const off = await office(); lat = isFinite(+b.lat) && b.lat != null ? +b.lat : null; lng = isFinite(+b.lng) && b.lng != null ? +b.lng : null;
-    if (lat != null && lng != null) dist = metres(off.lat, off.lng, lat, lng);
+    const off = await office(); lat = isFinite(+b.lat) && b.lat != null && b.lat !== '' ? +b.lat : null; lng = isFinite(+b.lng) && b.lng != null && b.lng !== '' ? +b.lng : null;
+    if (lat == null || lng == null || Math.abs(lat) > 90 || Math.abs(lng) > 180) return res.status(400).json({ error: 'Your location pin is needed. Turn on GPS / allow location and tap “Get my location”.' });
+    dist = metres(off.lat, off.lng, lat, lng);
+    custId = Number.isInteger(+b.customer_id) && +b.customer_id > 0 ? +b.customer_id : null;
+    place = String(b.place || '').trim().slice(0, 200) || null;
+    if (custId) { const cp = [custId], sc = custScope(req.user, cp); if (!(await q(`SELECT 1 FROM customers c WHERE c.id=$1 AND ${sc}`, cp)).rows.length) return res.status(400).json({ error: 'Customer not found' }); }
+    if (!custId && !place) return res.status(400).json({ error: 'Choose the customer you went to (or type the place)' });
+    acc = Number.isFinite(+b.acc) ? Math.round(+b.acc) : null;
   } else lt = LEAVE_TYPES.includes(b.leave_type) ? b.leave_type : 'Casual Leave';
   const clash = (await q(`SELECT kind, session, to_char(from_date,'DD Mon') f FROM leave_requests WHERE user_id=$1 AND status IN ('Pending','Approved') AND from_date<=$3 AND to_date>=$2
     AND (CASE WHEN $4='Attendance' THEN kind='Attendance' AND status='Pending' ELSE kind<>'Attendance' AND (kind='Leave' OR $4='Leave' OR session=$5) END) LIMIT 1`, [req.user.id, from, to, kind, session])).rows[0];
   if (clash) return res.status(409).json({ error: `You already have a ${clash.kind.toLowerCase()}${clash.session ? ' (' + clash.session + ')' : ''} request on ${clash.f}` });
-  const r = await q(`INSERT INTO leave_requests(user_id,kind,leave_type,session,from_date,to_date,from_time,to_time,reason,lat,lng,distance) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
-    [req.user.id, kind, lt, session, from, to, ft, tt, reason, lat, lng, dist]);
+  const r = await q(`INSERT INTO leave_requests(user_id,kind,leave_type,session,from_date,to_date,from_time,to_time,reason,lat,lng,distance,customer_id,place,accuracy) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+    [req.user.id, kind, lt, session, from, to, ft, tt, reason, lat, lng, dist, custId, place, acc]);
+  const cname = custId ? (await q('SELECT name FROM customers WHERE id=$1', [custId])).rows[0].name : place;
   const title = kind === 'Permission' ? '🕘 Permission request' : kind === 'Attendance' ? '📍 Attendance request' : '🌴 Leave request';
-  await notifyLink((await approvers()).filter(id => id !== req.user.id), title, `${req.user.name}: ${reqWhen({ kind, session, from_date: from, to_date: to, from_time: ft, to_time: tt, leave_type: lt })}${dist != null ? ` (${distTxt(dist)} from office)` : ''} — ${reason}`, 'leave');
+  await notifyLink((await approvers()).filter(id => id !== req.user.id), title, `${req.user.name}: ${reqWhen({ kind, session, from_date: from, to_date: to, from_time: ft, to_time: tt, leave_type: lt })}${kind === 'Attendance' ? ` at ${cname} (${distTxt(dist)} from office)` : ''} — ${reason}`, 'leave');
   res.json({ id: r.rows[0].id });
 }));
 app.post('/api/leave/:id/decide', attNeed, wrap(async (req, res) => {
@@ -1242,5 +1366,5 @@ app.post('/api/leave/:id/cancel', wrap(async (req, res) => {
 }));
 app.delete('/api/leave/:id', superOnly, wrap(async (req, res) => { await q('DELETE FROM leave_requests WHERE id=$1', [req.params.id]); res.json({ ok: true }); }));
 
-init().then(() => { setInterval(remindDue, 30000); remindDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Genzy running')))
+init().then(() => { setInterval(remindDue, 30000); remindDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
   .catch(e => { console.error('DB init failed', e.message); process.exit(1); });
