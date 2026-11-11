@@ -802,7 +802,7 @@ const officePanel=()=>{const o=M.office||{};return `<div class="panel"><div clas
 let OFG=null;function ofGPS(b){b.textContent='Getting location…';getGPS().then(g=>{b.textContent='📍 Use my current location';if(!g)return alert('Could not get location. Turn on GPS.');OFG=g;$('ofU').value=g.lat.toFixed(7)+', '+g.lng.toFixed(7)})}
 async function saveOffice(){const o=M.office||{},u=$('ofU').value.trim(),b={name:$('ofN').value,radius:$('ofR').value,late:$('ofL').value};if(u)b.map_url=u;else{b.lat=o.lat;b.lng=o.lng}
  const r=await api('/api/attendance/office',{m:'POST',b});if(r.error){$('ofE').textContent=r.error;return}toast('Office settings saved ✓');Me()}
-const APPV='Version 5 · 11 Nov 2026';
+const APPV='Version 6 · 11 Nov 2026';
 function shrinkImg(file,size=320){return new Promise((ok,no)=>{const r=new FileReader();r.onerror=no;r.onload=()=>{const im=new Image();im.onerror=()=>no(new Error('bad image'));im.onload=()=>{const s=Math.min(im.width,im.height),c=document.createElement('canvas');c.width=c.height=size;
  c.getContext('2d').drawImage(im,(im.width-s)/2,(im.height-s)/2,s,s,0,0,size,size);ok(c.toDataURL('image/jpeg',.85))};im.src=r.result};r.readAsDataURL(file)})}
 async function upPhoto(id,inp){const f=inp.files&&inp.files[0];if(!f)return;toast('Uploading photo…');let data;try{data=await shrinkImg(f)}catch(e){return toast('Could not read that image')}

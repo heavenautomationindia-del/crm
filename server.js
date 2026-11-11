@@ -140,8 +140,14 @@ const cleanLead = (b, cur = {}) => {
 };
 const insLead = async (o, uid, brandId) => (await q(`INSERT INTO leads(name,phone,email,source,interest,address,priority,stage,assigned_to,value,follow_up,notes,created_by,company,brand_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
   [o.name, o.phone || null, o.email || null, o.source || null, o.interest || null, o.address || null, o.priority || 'Warm', o.stage || 'New Enquiry', o.assigned_to || null, o.value || 0, o.follow_up || null, o.notes || null, uid, o.company || null, brandId || null])).rows[0].id;
-// leads are per brand: Heaven admin / sales see only Heaven leads; Super Admin (no brand) sees all
-const leadScope = (u, p) => { if (!u.brand_id) return 'true'; p.push(u.brand_id); return `l.brand_id=$${p.length}`; };
+// Super Admin sees ALL leads and follow-ups. Everyone else (Admin staff, Sales…) sees only the leads
+// allocated to them or created by them — and, if they belong to a brand, only within that brand.
+const leadScope = (u, p) => {
+  if (u.role === SUPER) return 'true';
+  p.push(u.id); let w = `(l.assigned_to=$${p.length} OR l.created_by=$${p.length})`;
+  if (u.brand_id) { p.push(u.brand_id); w += ` AND l.brand_id=$${p.length}`; }
+  return w;
+};
 const leadBrand = async (u, v) => {
   if (u.brand_id) return u.brand_id;
   if (Number.isInteger(+v) && +v > 0 && (await q('SELECT 1 FROM brands WHERE id=$1', [+v])).rows.length) return +v;
@@ -968,8 +974,7 @@ app.get('/api/todos', wrap(async (req, res) => {
   let leads = [];
   if (can(req.user, 'leads')) {
     const lp = [date]; let lw = `l.stage IN ('New Enquiry','Contacted','Site Visit','Quotation','Negotiation') AND l.follow_up ${isToday ? '<=' : '='} $1::date`;
-    if (!isBoss(req.user)) { lp.push(req.user.id); lw += ` AND (l.assigned_to=$${lp.length} OR l.assigned_to IS NULL)`; }
-    if (req.user.brand_id) { lp.push(req.user.brand_id); lw += ` AND l.brand_id=$${lp.length}`; }
+    lw += ' AND ' + leadScope(req.user, lp);
     leads = (await q(`${LSEL} WHERE ${lw} ORDER BY l.follow_up, l.priority='Hot' DESC, l.id DESC LIMIT 100`, lp)).rows;
   }
   let jobs = [];
@@ -985,10 +990,8 @@ app.get('/api/todos/days', wrap(async (req, res) => {
   (await q(`SELECT to_char(t.due_at AT TIME ZONE '${TZ}','YYYY-MM-DD') d, COUNT(*) FILTER (WHERE NOT t.done)::int n, COUNT(*) FILTER (WHERE t.kind='voice' AND NOT t.done)::int v
     FROM todos t WHERE ${w} AND (t.due_at AT TIME ZONE '${TZ}')::date BETWEEN $1::date AND $2::date GROUP BY 1`, p)).rows.forEach(r => { out[r.d] = { n: r.n, v: r.v, l: 0 }; });
   if (can(req.user, 'leads')) {
-    const lp = [from, to]; let lw = '';
-    if (!isBoss(req.user)) { lp.push(req.user.id); lw = ' AND (assigned_to=$3 OR assigned_to IS NULL)'; }
-    if (req.user.brand_id) { lp.push(req.user.brand_id); lw += ` AND brand_id=$${lp.length}`; }
-    (await q(`SELECT to_char(follow_up,'YYYY-MM-DD') d, COUNT(*)::int n FROM leads WHERE stage IN ('New Enquiry','Contacted','Site Visit','Quotation','Negotiation') AND follow_up BETWEEN $1::date AND $2::date${lw} GROUP BY 1`, lp)).rows
+    const lp = [from, to], lw = ' AND ' + leadScope(req.user, lp);
+    (await q(`SELECT to_char(l.follow_up,'YYYY-MM-DD') d, COUNT(*)::int n FROM leads l WHERE l.stage IN ('New Enquiry','Contacted','Site Visit','Quotation','Negotiation') AND l.follow_up BETWEEN $1::date AND $2::date${lw} GROUP BY 1`, lp)).rows
       .forEach(r => { (out[r.d] = out[r.d] || { n: 0, v: 0, l: 0 }).l = r.n; });
   }
   res.set('Cache-Control', 'no-store').json(out);
@@ -1199,8 +1202,7 @@ app.get('/cal/:tok.ics', wrap(async (req, res) => {
   const perms = u.role === SUPER ? ALL_KEYS : (u.permissions || []);
   if (perms.includes('leads')) {
     const lp = [], w = [`l.follow_up IS NOT NULL`, `l.follow_up >= CURRENT_DATE - 30`, `l.stage IN ('New Enquiry','Contacted','Site Visit','Quotation','Negotiation')`];
-    if (u.role !== SUPER && u.role !== 'Admin') { lp.push(u.id); w.push(`(l.assigned_to=$${lp.length} OR l.assigned_to IS NULL)`); }
-    if (u.brand_id) { lp.push(u.brand_id); w.push(`l.brand_id=$${lp.length}`); }
+    w.push(leadScope(u, lp));
     for (const l of (await q(`SELECT l.id,l.name,l.company,l.phone,l.stage,to_char(l.follow_up,'YYYYMMDD') d FROM leads l WHERE ${w.join(' AND ')} LIMIT 500`, lp)).rows) {
       const nd = new Date(Date.UTC(+l.d.slice(0, 4), +l.d.slice(4, 6) - 1, +l.d.slice(6) + 1)).toISOString().slice(0, 10).replace(/-/g, '');
       ev.push(['BEGIN:VEVENT', `UID:lead-${l.id}-${l.d}@rago-crm`, `DTSTAMP:${stamp}`, `DTSTART;VALUE=DATE:${l.d}`, `DTEND;VALUE=DATE:${nd}`,
