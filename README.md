@@ -38,3 +38,10 @@ Local run: `DATABASE_URL=postgres://... npm install && npm start` (first login: 
 When a lead's stage is **Site Visit** the form and detail screen show a location pin: paste a Google Maps link or tap **Pin my current location**; the lead detail shows the map and an **Open in Maps** button.
 
 Notifications are in-app (checked every 20s); phone alerts show while the app is open/installed and notifications are allowed.
+
+## Calendar, Siri & Google Assistant
+Profile → "Google Calendar · Siri & Google Assistant" → Set up.
+- **Google Calendar:** "Add to Google Calendar" subscribes to your personal calendar link (reminders, lead follow-ups, technicians' open jobs). Google refreshes it every few hours; each reminder also has an instant "📅 Add to Google Calendar" button.
+- **Siri:** make a Shortcut (Dictate Text → Get Contents of URL with your personal link + dictated text → Speak Text) named "Rago reminder". Say "Hey Siri, Rago reminder… tomorrow 10 am call Kumar".
+- **Android / Google Assistant:** long-press the app icon → "Say a reminder", or To-do → 🗣 Say a reminder.
+

@@ -32,7 +32,7 @@ const BANKS = ['HDFC BANK LTD - 50200080113661', 'HDFC BANK LTD - 50200090005267
 // Super Admin = owner: everything, and the ONLY role that can delete anything.
 // Admin staff / Sales staff / Technician staff: Super Admin ticks what each person can use.
 const SUPER = 'Super Admin';
-const ROLES = [SUPER, 'Admin', 'Sales', 'Technician'];
+const ROLES = [SUPER, 'Admin', 'Sales', 'Technician', 'Staff'];   // Staff = drivers, cleaners… attendance only
 const PERMS = [
   { k: 'dashboard', l: 'Dashboard', g: 'Menus' }, { k: 'services', l: 'Services & jobs', g: 'Menus' },
   { k: 'customers', l: 'Customers', g: 'Menus' }, { k: 'team', l: 'Team', g: 'Menus' }, { k: 'leads', l: 'Leads', g: 'Menus' },
@@ -50,7 +50,7 @@ const DEFAULTS = {
   Sales: ['dashboard', 'services', 'customers', 'leads', 'service_create', 'view_charges', 'view_phone'],
   Technician: ['view_phone'],
 };
-const cleanPerms = (role, list) => role === SUPER ? ALL_KEYS : (Array.isArray(list) ? list : DEFAULTS[role] || []).filter(k => (role === 'Technician' ? TECH_KEYS : ALL_KEYS).includes(k));
+const cleanPerms = (role, list) => role === SUPER ? ALL_KEYS : role === 'Staff' ? [] : (Array.isArray(list) ? list : DEFAULTS[role] || []).filter(k => (role === 'Technician' ? TECH_KEYS : ALL_KEYS).includes(k));
 const BRANDS = ['Heaven', 'G Media'];
 const JOB_TYPES = ['New Installation', 'CCTV Camera Fitting', 'Automation Fitting', 'Wiring / Cabling', 'Site Survey', 'AMC Visit', 'Other'];
 const OPEN_ST = ['Work Not Started', 'On-Process', 'Work Pending'];   // a technician with one of these is busy
@@ -116,18 +116,19 @@ app.get('/api/pulse', wrap(async (req, res) => {
 app.get('/api/me', (req, res) => res.json(me(req.user)));
 app.post('/api/password', wrap(async (req, res) => {
   const { current, next } = req.body || {};
-  if (!verify(String(current || ''), req.user.password_hash)) return res.status(400).json({ error: 'Current password is wrong' });
+  const ph = ((await q('SELECT password_hash FROM users WHERE id=$1', [req.user.id])).rows[0] || {}).password_hash;
+  if (!ph || !verify(String(current || ''), ph)) return res.status(400).json({ error: 'Current password is wrong' });
   if (!next || String(next).length < 6) return res.status(400).json({ error: 'New password must be at least 6 characters' });
   await q('UPDATE users SET password_hash=$1 WHERE id=$2', [hash(String(next)), req.user.id]); res.json({ ok: true });
 }));
 
 // ---------- leads (Heaven Automation pipeline) ----------
-const LSEL = `SELECT l.id,l.name,l.phone,l.email,l.source,l.interest,l.address,l.priority,l.stage,l.assigned_to,l.value,to_char(l.follow_up,'YYYY-MM-DD') follow_up,l.last_contact,l.notes,l.lost_reason,l.customer_id,l.created_at,l.lat,l.lng,l.map_url,l.location_by,l.location_on,u.name agent FROM leads l LEFT JOIN users u ON u.id=l.assigned_to`;
+const LSEL = `SELECT l.id,l.name,l.company,l.brand_id,(SELECT name FROM brands WHERE id=l.brand_id) brand,(SELECT COUNT(*)::int FROM lead_voice v WHERE v.lead_id=l.id) voices,l.phone,l.email,l.source,l.interest,l.address,l.priority,l.stage,l.assigned_to,l.value,to_char(l.follow_up,'YYYY-MM-DD') follow_up,l.last_contact,l.notes,l.lost_reason,l.customer_id,l.created_at,l.lat,l.lng,l.map_url,l.location_by,l.location_on,u.name agent FROM leads l LEFT JOIN users u ON u.id=l.assigned_to`;
 const digits = v => String(v || '').replace(/\D/g, '');
 const pickOf = (v, list, d) => list.includes(v) ? v : d;
 const cleanLead = (b, cur = {}) => {
   const o = {}, t = k => { if (b[k] !== undefined) o[k] = String(b[k] ?? '').trim() || null; };
-  ['name', 'phone', 'email', 'address', 'notes', 'lost_reason'].forEach(t);
+  ['name', 'company', 'phone', 'email', 'address', 'notes', 'lost_reason'].forEach(t);
   if (b.source !== undefined) o.source = b.source ? pickOf(b.source, LEAD_SOURCES, 'Other') : null;
   if (b.interest !== undefined) o.interest = b.interest ? pickOf(b.interest, LEAD_INTERESTS, 'Other') : null;
   if (b.priority !== undefined) o.priority = pickOf(b.priority, LEAD_PRIORITIES, cur.priority || 'Warm');
@@ -137,8 +138,21 @@ const cleanLead = (b, cur = {}) => {
   if (b.follow_up !== undefined) o.follow_up = /^\d{4}-\d{2}-\d{2}$/.test(b.follow_up) ? b.follow_up : null;
   return o;
 };
-const insLead = async (o, uid) => (await q(`INSERT INTO leads(name,phone,email,source,interest,address,priority,stage,assigned_to,value,follow_up,notes,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
-  [o.name, o.phone || null, o.email || null, o.source || null, o.interest || null, o.address || null, o.priority || 'Warm', o.stage || 'New Enquiry', o.assigned_to || null, o.value || 0, o.follow_up || null, o.notes || null, uid])).rows[0].id;
+const insLead = async (o, uid, brandId) => (await q(`INSERT INTO leads(name,phone,email,source,interest,address,priority,stage,assigned_to,value,follow_up,notes,created_by,company,brand_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+  [o.name, o.phone || null, o.email || null, o.source || null, o.interest || null, o.address || null, o.priority || 'Warm', o.stage || 'New Enquiry', o.assigned_to || null, o.value || 0, o.follow_up || null, o.notes || null, uid, o.company || null, brandId || null])).rows[0].id;
+// leads are per brand: Heaven admin / sales see only Heaven leads; Super Admin (no brand) sees all
+const leadScope = (u, p) => { if (!u.brand_id) return 'true'; p.push(u.brand_id); return `l.brand_id=$${p.length}`; };
+const leadBrand = async (u, v) => {
+  if (u.brand_id) return u.brand_id;
+  if (Number.isInteger(+v) && +v > 0 && (await q('SELECT 1 FROM brands WHERE id=$1', [+v])).rows.length) return +v;
+  return (await q(`SELECT id FROM brands ORDER BY (lower(name)='heaven') DESC, id LIMIT 1`)).rows[0].id;
+};
+const leadOK = async (req, res, id) => {
+  const p = [+id], sc = leadScope(req.user, p);
+  const l = (await q(`SELECT l.* FROM leads l WHERE l.id=$1 AND ${sc}`, p)).rows[0];
+  if (!l) { res.status(404).json({ error: 'Not found' }); return null; }
+  return l;
+};
 const leadLog = (id, who, text) => q('INSERT INTO lead_activity(lead_id,by_name,text) VALUES($1,$2,$3)', [id, who, text]);
 const MAPRE = /@(-?\d+\.\d+),(-?\d+\.\d+)|[?&](?:q|ll|query)=(-?\d+\.\d+),(-?\d+\.\d+)/;
 // site-visit pin: either GPS (lat,lng) or a pasted Google Maps link; empty link removes the pin
@@ -160,24 +174,30 @@ const locFields = (b, u) => {
 };
 const userName = async id => id ? ((await q('SELECT name FROM users WHERE id=$1', [id])).rows[0] || {}).name || '—' : 'Unassigned';
 
-app.get('/api/leads', need('leads'), wrap(async (_, res) => res.json((await q(`${LSEL} ORDER BY l.last_contact DESC, l.id DESC LIMIT 3000`)).rows)));
+app.get('/api/leads', need('leads'), wrap(async (req, res) => {
+  const p = [], sc = leadScope(req.user, p);
+  if (!req.user.brand_id && +req.query.brand) { p.push(+req.query.brand); }
+  res.json((await q(`${LSEL} WHERE ${sc}${!req.user.brand_id && +req.query.brand ? ` AND l.brand_id=$${p.length}` : ''} ORDER BY l.last_contact DESC, l.id DESC LIMIT 3000`, p)).rows);
+}));
 
 app.post('/api/leads/import', need('leads'), wrap(async (req, res) => {
   const rows = Array.isArray(req.body.rows) ? req.body.rows.slice(0, 2000) : [];
-  const have = new Set((await q(`SELECT regexp_replace(phone,'[^0-9]','','g') d FROM leads WHERE phone IS NOT NULL`)).rows.map(r => r.d));
+  const bId = await leadBrand(req.user, req.body.brand_id);
+  const have = new Set((await q(`SELECT regexp_replace(phone,'[^0-9]','','g') d FROM leads WHERE phone IS NOT NULL AND brand_id=$1`, [bId])).rows.map(r => r.d));
   let added = 0, skipped = 0;
   for (const r of rows) {
     const o = cleanLead(r); delete o.assigned_to;
     if (!o.name) { skipped++; continue; }
     const dg = digits(o.phone);
     if (dg.length >= 7) { if (have.has(dg)) { skipped++; continue; } have.add(dg); }
-    await insLead(o, req.user.id); added++;
+    await insLead(o, req.user.id, bId); added++;
   }
   res.json({ added, skipped });
 }));
 
 app.post('/api/leads/bulk', need('leads'), wrap(async (req, res) => {
-  const ids = (Array.isArray(req.body.ids) ? req.body.ids : []).map(Number).filter(Number.isInteger).slice(0, 500);
+  let ids = (Array.isArray(req.body.ids) ? req.body.ids : []).map(Number).filter(Number.isInteger).slice(0, 500);
+  { const p = [ids], sc = leadScope(req.user, p); ids = (await q(`SELECT l.id FROM leads l WHERE l.id=ANY($1::int[]) AND ${sc}`, p)).rows.map(r => r.id); }
   if (!ids.length) return res.status(400).json({ error: 'Nothing selected' });
   if (req.body.delete) {
     if (!isSuper(req.user)) return res.status(403).json({ error: 'Only the Super Admin can delete' });
@@ -195,14 +215,14 @@ app.post('/api/leads/bulk', need('leads'), wrap(async (req, res) => {
 app.post('/api/leads', need('leads'), wrap(async (req, res) => {
   const o = cleanLead(req.body);
   if (!o.name) return res.status(400).json({ error: 'Enter the lead name' });
-  const dg = digits(o.phone);
+  const dg = digits(o.phone), bId = await leadBrand(req.user, req.body.brand_id);
   if (dg.length >= 7) {
-    const d = (await q(`SELECT name FROM leads WHERE regexp_replace(phone,'[^0-9]','','g')=$1 LIMIT 1`, [dg])).rows[0];
+    const d = (await q(`SELECT name FROM leads WHERE regexp_replace(phone,'[^0-9]','','g')=$1 AND brand_id=$2 LIMIT 1`, [dg, bId])).rows[0];
     if (d) return res.status(409).json({ error: `A lead with this phone already exists (${d.name})` });
   }
   const lf = locFields(req.body, req.user);
   if (lf.error) return res.status(400).json({ error: lf.error });
-  const id = await insLead(o, req.user.id);
+  const id = await insLead(o, req.user.id, bId);
   if (Object.keys(lf).length) { const k = Object.keys(lf); await q(`UPDATE leads SET ${k.map((c, i) => `${c}=$${i + 1}`).join(',')} WHERE id=$${k.length + 1}`, [...k.map(c => lf[c]), id]); }
   await leadLog(id, req.user.name, 'Lead created');
   if (o.assigned_to && o.assigned_to !== req.user.id) notify([o.assigned_to], 'New lead assigned', `${o.name} was assigned to you`, null).catch(() => {});
@@ -210,13 +230,16 @@ app.post('/api/leads', need('leads'), wrap(async (req, res) => {
 }));
 
 app.get('/api/leads/:id', need('leads'), wrap(async (req, res) => {
-  const l = (await q(`${LSEL} WHERE l.id=$1`, [req.params.id])).rows[0];
+  const p = [+req.params.id], sc = leadScope(req.user, p);
+  const l = (await q(`${LSEL} WHERE l.id=$1 AND ${sc}`, p)).rows[0];
   if (!l) return res.status(404).json({ error: 'Not found' });
+  l.voice = (await q('SELECT id, user_id, user_name, role, duration, created_at FROM lead_voice WHERE lead_id=$1 ORDER BY id', [l.id])).rows;
   l.activity = (await q('SELECT by_name, text, created_at FROM lead_activity WHERE lead_id=$1 ORDER BY id DESC LIMIT 100', [l.id])).rows;
   res.json(l);
 }));
 
 app.patch('/api/leads/:id', need('leads'), wrap(async (req, res) => {
+  if (!await leadOK(req, res, req.params.id)) return;
   const cur = (await q('SELECT *, to_char(follow_up,\'YYYY-MM-DD\') fu FROM leads WHERE id=$1', [req.params.id])).rows[0];
   if (!cur) return res.status(404).json({ error: 'Not found' });
   const o = cleanLead(req.body, cur);
@@ -243,17 +266,17 @@ app.patch('/api/leads/:id', need('leads'), wrap(async (req, res) => {
 app.post('/api/leads/:id/note', need('leads'), wrap(async (req, res) => {
   const t = String(req.body.text || '').trim().slice(0, 1000);
   if (!t) return res.status(400).json({ error: 'Write a note first' });
+  if (!await leadOK(req, res, req.params.id)) return;
   const r = await q('UPDATE leads SET last_contact=now(), updated_at=now() WHERE id=$1 RETURNING id', [req.params.id]);
   if (!r.rows[0]) return res.status(404).json({ error: 'Not found' });
   await leadLog(r.rows[0].id, req.user.name, t); res.json({ ok: true });
 }));
 
 app.post('/api/leads/:id/convert', need('leads'), wrap(async (req, res) => {
-  const l = (await q('SELECT * FROM leads WHERE id=$1', [req.params.id])).rows[0];
-  if (!l) return res.status(404).json({ error: 'Not found' });
+  const l = await leadOK(req, res, req.params.id); if (!l) return;
   let c; if (l.customer_id) c = (await q('SELECT * FROM customers WHERE id=$1', [l.customer_id])).rows[0];
   if (!c && digits(l.phone).length >= 7) c = (await q(`SELECT * FROM customers WHERE regexp_replace(phone,'[^0-9]','','g')=$1 LIMIT 1`, [digits(l.phone)])).rows[0];
-  if (!c) c = (await q('INSERT INTO customers(name,phone,email,address,brand_id) VALUES($1,$2,$3,$4,$5) RETURNING *', [l.name, l.phone, l.email, l.address, req.user.brand_id || null])).rows[0];
+  if (!c) c = (await q('INSERT INTO customers(name,phone,email,address,brand_id) VALUES($1,$2,$3,$4,$5) RETURNING *', [l.company ? `${l.name} (${l.company})` : l.name, l.phone, l.email, l.address, l.brand_id || req.user.brand_id || null])).rows[0];
   await q(`UPDATE leads SET customer_id=$1, stage='Closed Won', updated_at=now(), last_contact=now() WHERE id=$2`, [c.id, l.id]);
   await leadLog(l.id, req.user.name, l.customer_id ? 'Service requested' : 'Converted to customer · Closed Won');
   res.json({ customer: { id: c.id, name: c.name, phone: c.phone, address: c.address, tickets: 0 } });
@@ -318,7 +341,13 @@ async function initV2() {
   CREATE TABLE IF NOT EXISTS service_voice (id SERIAL PRIMARY KEY, service_id INT NOT NULL REFERENCES services(id) ON DELETE CASCADE, user_id INT, user_name TEXT, role TEXT,
     audio BYTEA NOT NULL, mime TEXT, duration INT DEFAULT 0, created_at TIMESTAMPTZ DEFAULT now());
   CREATE INDEX IF NOT EXISTS idx_sv_service ON service_voice(service_id);
-  CREATE INDEX IF NOT EXISTS idx_pay_date ON payments(paid_on);`);
+  CREATE INDEX IF NOT EXISTS idx_pay_date ON payments(paid_on);
+  ALTER TABLE leads ADD COLUMN IF NOT EXISTS company TEXT;
+  ALTER TABLE leads ADD COLUMN IF NOT EXISTS brand_id INT;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS cal_token TEXT;
+  CREATE TABLE IF NOT EXISTS lead_voice (id SERIAL PRIMARY KEY, lead_id INT NOT NULL REFERENCES leads(id) ON DELETE CASCADE, user_id INT, user_name TEXT, role TEXT,
+    audio BYTEA NOT NULL, mime TEXT, duration INT DEFAULT 0, created_at TIMESTAMPTZ DEFAULT now());
+  CREATE INDEX IF NOT EXISTS idx_lv_lead ON lead_voice(lead_id);`);
 
   if (!(await q(`SELECT 1 FROM settings WHERE k='office'`)).rows.length)
     await q(`INSERT INTO settings(k,v) VALUES('office',$1)`, [JSON.stringify(OFFICE_DEFAULT)]);
@@ -329,6 +358,7 @@ async function initV2() {
   const heaven = (await q(`SELECT id FROM brands ORDER BY (lower(name)='heaven') DESC, id LIMIT 1`)).rows[0].id;
   await q(`UPDATE services SET brand_id=$1 WHERE brand_id IS NULL`, [heaven]);
   await q(`UPDATE services SET kind='Service' WHERE kind IS NULL`);
+  await q(`UPDATE leads SET brand_id=$1 WHERE brand_id IS NULL`, [heaven]);   // old leads were Heaven Automation's pipeline
   // customers belong to the brand of their tickets (Heaven staff see Heaven customers; Super Admin sees all)
   await q(`UPDATE customers c SET brand_id=(SELECT s.brand_id FROM services s WHERE s.customer_id=c.id AND s.brand_id IS NOT NULL ORDER BY s.id DESC LIMIT 1) WHERE c.brand_id IS NULL`);
   // one-time: the first (owner) admin becomes Super Admin; other old admins become Admin staff of Heaven with every permission they had
@@ -460,14 +490,15 @@ app.get('/api/lookup', wrap(async (req, res) => {
   { const p = [dg], sc = custScope(req.user, p);
     out.customers = (await q(`SELECT c.id,c.name,c.phone,c.address,(SELECT COUNT(*) FROM services s WHERE s.customer_id=c.id)::int tickets FROM customers c WHERE regexp_replace(COALESCE(c.phone,''),'[^0-9]','','g') LIKE '%'||$1||'%' AND ${sc} ORDER BY c.name LIMIT 3`, p)).rows; }
   if (can(req.user, 'leads'))
-    out.leads = (await q(`SELECT id,name,phone,stage FROM leads WHERE regexp_replace(COALESCE(phone,''),'[^0-9]','','g') LIKE '%'||$1||'%' ORDER BY id DESC LIMIT 3`, [dg])).rows;
+  { const lp = [dg], sc = leadScope(req.user, lp);
+    out.leads = (await q(`SELECT l.id,l.name,l.company,l.phone,l.stage FROM leads l WHERE regexp_replace(COALESCE(l.phone,''),'[^0-9]','','g') LIKE '%'||$1||'%' AND ${sc} ORDER BY l.id DESC LIMIT 3`, lp)).rows; }
   res.json(out);
 }));
 
 // ---------- team ----------
 // Super Admin manages everyone. Anybody else with "Team" can only manage Sales and Technician staff.
 const brandFor = async (role, v) => {
-  if (role === SUPER || role === 'Technician') return { id: null };
+  if (role === SUPER || role === 'Technician' || role === 'Staff') return { id: null };
   const id = Number.isInteger(+v) && +v > 0 ? +v : null;
   if (id && !(await q('SELECT 1 FROM brands WHERE id=$1', [id])).rows.length) return { error: 'Brand not found' };
   if (role === 'Admin' && !id) return { error: 'Choose the brand this admin staff works for' };
@@ -689,7 +720,8 @@ app.patch('/api/services/:id', need('service_edit', 'service_assign'), wrap(asyn
     if (!can(req.user, 'service_assign') || !b[k] || String(b[k]) === String(cur[k] || '')) continue;
     const busy = (await q(`SELECT s.ticket_no, br.name brand, u.name FROM services s LEFT JOIN brands br ON br.id=s.brand_id JOIN users u ON u.id=$1
       WHERE (s.technician_id=$1 OR s.helper_id=$1) AND s.status=ANY($2::text[]) AND s.brand_id IS DISTINCT FROM $3 AND s.id<>$4 LIMIT 1`, [+b[k], OPEN_ST, cur.brand_id, cur.id])).rows[0];
-    if (busy) return res.status(409).json({ error: `${busy.name} is already allocated to ${busy.brand || 'another brand'} (job #${busy.ticket_no}). They can be assigned again once that job is done.` });
+    if (busy && !b.force) return res.status(409).json({ busy: true, error: `${busy.name} is already allocated to ${busy.brand || 'another brand'} (job #${busy.ticket_no}). Do you still want to allocate?` });
+    if (busy) b._busyNote = (b._busyNote || []).concat(`${busy.name} is also on ${busy.brand || 'another brand'} job #${busy.ticket_no}`);
   }
   const assignKeys = ['technician_id', 'helper_id'], canEdit = can(req.user, 'service_edit'), canAssign = can(req.user, 'service_assign');
   const fields = ['status', 'approval', 'service_type', 'visit_type', 'product', 'request_details', 'charges_applied', 'location', ...assignKeys];
@@ -715,10 +747,13 @@ app.patch('/api/services/:id', need('service_edit', 'service_assign'), wrap(asyn
     p.push(b[f] === '' ? null : b[f]); sets.push(`${f}=$${p.length}`);
     changes.push(assignKeys.includes(f) ? `${f === 'technician_id' ? 'technician' : 'helper'}: ${names[cur[f]] || '-'} → ${names[b[f]] || '-'}` : `${f}: ${cur[f] ?? '-'} → ${b[f] || '-'}`);
   }
-  if (sets.length) { p.push(id); await q(`UPDATE services SET ${sets.join(',')} WHERE id=$${p.length}`, p); await log(id, req.user.name, changes.join('; ')); }
+  if (sets.length) { p.push(id); await q(`UPDATE services SET ${sets.join(',')} WHERE id=$${p.length}`, p); await log(id, req.user.name, changes.join('; ') + (b._busyNote ? ' (allocated anyway: ' + b._busyNote.join('; ') + ')' : '')); }
   if (newTech || newHelp || removed.length) {
-    const c = (await q('SELECT name FROM customers WHERE id=$1', [cur.customer_id])).rows[0];
-    if (newTech || newHelp) await notify([newTech, newHelp], 'New job assigned', `#${cur.ticket_no} · ${c ? c.name : ''} — open My Jobs to start`, cur.id);
+    const c = (await q('SELECT name FROM customers WHERE id=$1', [cur.customer_id])).rows[0], br = (await q('SELECT name FROM brands WHERE id=$1', [cur.brand_id])).rows[0];
+    const tn = names[fTech] || '—', hn = fHelp ? names[fHelp] : null, where = `#${cur.ticket_no} · ${c ? c.name : ''}${br ? ' · ' + br.name : ''}`;
+    if (newTech) await notify([newTech], 'New job assigned', `${where}${hn ? ' — helper: ' + hn : ''} — open My Jobs to start`, cur.id);
+    if (newHelp) await notify([newHelp], 'You are the helper on a job', `${where} — technician: ${tn}. Open My Jobs to see the work.`, cur.id);
+    if (!newTech && newHelp && fTech) await notify([fTech], 'Helper added', `${hn} will help you on #${cur.ticket_no}`, cur.id);
     if (removed.length) await notify(removed, 'Service reallocated', `#${cur.ticket_no} · ${c ? c.name : ''} — this service was allocated to another person`, null);
   }
   res.json({ ok: true });
@@ -933,7 +968,8 @@ app.get('/api/todos', wrap(async (req, res) => {
   let leads = [];
   if (can(req.user, 'leads')) {
     const lp = [date]; let lw = `l.stage IN ('New Enquiry','Contacted','Site Visit','Quotation','Negotiation') AND l.follow_up ${isToday ? '<=' : '='} $1::date`;
-    if (!isBoss(req.user)) { lp.push(req.user.id); lw += ` AND (l.assigned_to=$2 OR l.assigned_to IS NULL)`; }
+    if (!isBoss(req.user)) { lp.push(req.user.id); lw += ` AND (l.assigned_to=$${lp.length} OR l.assigned_to IS NULL)`; }
+    if (req.user.brand_id) { lp.push(req.user.brand_id); lw += ` AND l.brand_id=$${lp.length}`; }
     leads = (await q(`${LSEL} WHERE ${lw} ORDER BY l.follow_up, l.priority='Hot' DESC, l.id DESC LIMIT 100`, lp)).rows;
   }
   let jobs = [];
@@ -951,6 +987,7 @@ app.get('/api/todos/days', wrap(async (req, res) => {
   if (can(req.user, 'leads')) {
     const lp = [from, to]; let lw = '';
     if (!isBoss(req.user)) { lp.push(req.user.id); lw = ' AND (assigned_to=$3 OR assigned_to IS NULL)'; }
+    if (req.user.brand_id) { lp.push(req.user.brand_id); lw += ` AND brand_id=$${lp.length}`; }
     (await q(`SELECT to_char(follow_up,'YYYY-MM-DD') d, COUNT(*)::int n FROM leads WHERE stage IN ('New Enquiry','Contacted','Site Visit','Quotation','Negotiation') AND follow_up BETWEEN $1::date AND $2::date${lw} GROUP BY 1`, lp)).rows
       .forEach(r => { (out[r.d] = out[r.d] || { n: 0, v: 0, l: 0 }).l = r.n; });
   }
@@ -1041,6 +1078,144 @@ async function remindDue() {
     if (due.length) VER = Math.max(VER + 1, Date.now());
   } catch (e) { console.error('reminders failed', e.message); } finally { remBusy = false; }
 }
+
+// ---------- add extra work to an existing service / job ----------
+app.post('/api/services/:id/extra', need('service_edit', 'service_create'), wrap(async (req, res) => {
+  const cur = (await q('SELECT * FROM services WHERE id=$1', [req.params.id])).rows[0];
+  if (!cur) return res.status(404).json({ error: 'Not found' });
+  if (!brandOK(req.user, cur)) return res.status(403).json({ error: 'This ticket belongs to another brand' });
+  const b = req.body || {}, text = String(b.text || '').trim().slice(0, 1500), charge = can(req.user, 'view_charges') ? Math.max(0, money(b.charge)) : 0;
+  if (!text) return res.status(400).json({ error: 'Describe the extra work' });
+  if (cur.status === 'Cancelled') return res.status(400).json({ error: 'This ticket was cancelled' });
+  const when = new Date().toLocaleString('en-IN', { timeZone: TZ, day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true });
+  const add = `➕ Extra work (${when}, ${req.user.name}): ${text}${charge ? ` — ₹${charge}` : ''}`;
+  let st = cur.status; const reopen = b.reopen !== false && ['Resolved', 'Awaiting Payment'].includes(cur.status);
+  if (reopen) st = cur.technician_id ? 'Work Not Started' : 'New Ticket';
+  await q(`UPDATE services SET request_details=TRIM(BOTH E'\\n' FROM COALESCE(request_details,'') || E'\\n\\n' || $1), charges_applied=charges_applied+$2, status=$3${reopen ? `, approval='Pending', work_status=NULL, resolved_on=NULL` : ''} WHERE id=$4`, [add, charge, st, cur.id]);
+  await log(cur.id, req.user.name, add + (reopen ? ` · reopened (${cur.status} → ${st})` : ''));
+  await notify([cur.technician_id, cur.helper_id].filter(x => x && x !== req.user.id), '➕ Extra work added', `#${cur.ticket_no}: ${text}`, cur.id);
+  res.json({ ok: true, status: st });
+}));
+
+// ---------- voice messages on leads ----------
+app.post('/api/leads/:id/voice', need('leads'), wrap(async (req, res) => {
+  const l = await leadOK(req, res, req.params.id); if (!l) return;
+  const b = req.body || {}, m = /^data:(audio\/[\w.+-]+)(?:;[\w=.+-]+)*;base64,([A-Za-z0-9+/=]+)$/.exec(String(b.audio || ''));
+  if (!m) return res.status(400).json({ error: 'Record a voice message first' });
+  const buf = Buffer.from(m[2], 'base64'); if (buf.length < 200) return res.status(400).json({ error: 'The recording is empty — try again' });
+  if (buf.length > 6 * 1024 * 1024) return res.status(400).json({ error: 'Recording too long (max 5 minutes)' });
+  const dur = Math.max(1, Math.min(600, Math.round(+b.duration || 0)));
+  const r = await q('INSERT INTO lead_voice(lead_id,user_id,user_name,role,audio,mime,duration) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id', [l.id, req.user.id, req.user.name, req.user.role, buf, m[1], dur]);
+  await leadLog(l.id, req.user.name, `🎙 Voice message (${dur}s)`);
+  await q('UPDATE leads SET last_contact=now(), updated_at=now() WHERE id=$1', [l.id]);
+  if (l.assigned_to && l.assigned_to !== req.user.id) notify([l.assigned_to], '🎙 Voice message on lead', `${req.user.name} · ${l.name}`, null).catch(() => {});
+  res.json({ id: r.rows[0].id });
+}));
+app.get('/api/lead-voice/:id', need('leads'), wrap(async (req, res) => {
+  const v = (await q('SELECT lead_id, audio, mime FROM lead_voice WHERE id=$1', [req.params.id])).rows[0];
+  if (!v) return res.status(404).end();
+  const p = [v.lead_id], sc = leadScope(req.user, p);
+  if (!(await q(`SELECT 1 FROM leads l WHERE l.id=$1 AND ${sc}`, p)).rows.length) return res.status(404).end();
+  const buf = v.audio, total = buf.length, range = /bytes=(\d*)-(\d*)/.exec(req.headers.range || '');
+  res.set({ 'Content-Type': v.mime || 'audio/webm', 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, max-age=86400' });
+  if (range) { const st = range[1] ? +range[1] : 0, en = range[2] ? Math.min(+range[2], total - 1) : total - 1; res.status(206).set('Content-Range', `bytes ${st}-${en}/${total}`).send(buf.subarray(st, en + 1)); }
+  else res.send(buf);
+}));
+app.delete('/api/lead-voice/:id', superOnly, wrap(async (req, res) => { await q('DELETE FROM lead_voice WHERE id=$1', [req.params.id]); res.json({ ok: true }); }));
+
+// ---------- speak a reminder: "tomorrow 10 am call Kumar" → a to-do ----------
+// Used by the in-app 🗣 button, Siri Shortcuts and Google Assistant (via the personal link).
+const WD = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const MON = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+function parseReminder(raw, today, nowHM) {
+  let t = ' ' + String(raw || '').toLowerCase().replace(/[,.!?]/g, ' ').replace(/\s+/g, ' ') + ' ';
+  const addDays = (d, n) => { const x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
+  let date = null, time = null; const cuts = [], cut = re => { cuts.push(String(re).trim()); t = t.replace(re, ' '); };
+  let m;
+  if ((m = / in (\d{1,3}) (minute|minutes|min|mins|hour|hours|hr|hrs) /.exec(t))) {
+    const mins = /h/.test(m[2]) ? +m[1] * 60 : +m[1], [h, mi] = nowHM.split(':').map(Number), tot = h * 60 + mi + mins;
+    date = addDays(today, Math.floor(tot / 1440)); time = `${String(Math.floor(tot % 1440 / 60)).padStart(2, '0')}:${String(tot % 60).padStart(2, '0')}`; cut(m[0]);
+  }
+  if (!date && (m = / (day after tomorrow|day after tommorow|day after tmrw|overmorrow) /.exec(t))) { date = addDays(today, 2); cut(m[0]); }
+  if (!date && (m = / (tomorrow|tommorow|tomorow|tommorrow|tmrw|tmr|nalaiku|naalai|kal) /.exec(t))) { date = addDays(today, 1); cut(m[0]); }
+  if (!date && (m = / (today|tonight|this evening|this morning|this afternoon|inniki|aaj) /.exec(t))) { date = today; if (/tonight/.test(m[1])) time = '20:00'; if (/evening/.test(m[1])) time = '18:00'; if (/morning/.test(m[1])) time = '10:00'; if (/afternoon/.test(m[1])) time = '14:00'; cut(m[0]); }
+  if (!date && (m = / in (\d{1,2}) days? /.exec(t))) { date = addDays(today, +m[1]); cut(m[0]); }
+  if (!date && (m = / next week /.exec(t))) { date = addDays(today, 7); cut(m[0]); }
+  if (!date && (m = new RegExp(` (?:on |this |next |coming )?(${WD.join('|')}) `).exec(t))) {
+    const want = WD.indexOf(m[1]), cur = new Date(today + 'T12:00:00Z').getUTCDay(); let n = (want - cur + 7) % 7; if (n === 0 || / next /.test(m[0])) n = n || 7; date = addDays(today, n); cut(m[0]);
+  }
+  if (!date && (m = new RegExp(` (?:on )?(\\d{1,2})(?:st|nd|rd|th)? (?:of )?(${MON.join('|')})[a-z]* `).exec(t) || new RegExp(` (?:on )?(${MON.join('|')})[a-z]* (\\d{1,2})(?:st|nd|rd|th)? `).exec(t))) {
+    const isNumFirst = /^\d/.test(m[1]), day = +(isNumFirst ? m[1] : m[2]), mon = MON.indexOf((isNumFirst ? m[2] : m[1]).slice(0, 3));
+    let y = +today.slice(0, 4), d = `${y}-${String(mon + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`; if (d < today) d = `${y + 1}${d.slice(4)}`; date = d; cut(m[0]);
+  }
+  if (!date && (m = / (?:on )?(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))? /.exec(t))) {
+    let y = m[3] ? (+m[3] < 100 ? 2000 + +m[3] : +m[3]) : +today.slice(0, 4), d = `${y}-${String(+m[2]).padStart(2, '0')}-${String(+m[1]).padStart(2, '0')}`; if (!m[3] && d < today) d = `${y + 1}${d.slice(4)}`; date = d; cut(m[0]);
+  }
+  if (!date && (m = / (?:on )?the (\d{1,2})(?:st|nd|rd|th) /.exec(t))) { let d = `${today.slice(0, 8)}${String(+m[1]).padStart(2, '0')}`; if (d < today) { const x = new Date(today.slice(0, 8) + '01T12:00:00Z'); x.setUTCMonth(x.getUTCMonth() + 1); d = x.toISOString().slice(0, 8) + String(+m[1]).padStart(2, '0'); } date = d; cut(m[0]); }
+  if (!time && (m = / (?:at |by |around )?(\d{1,2})(?:[:.](\d{2}))? ?(am|pm|a m|p m|o'?clock|mani)? /.exec(t)) && (m[3] || m[2] || / (at|by|around) /.test(m[0]))) {
+    let h = +m[1], mi = +(m[2] || 0); const ap = (m[3] || '').replace(' ', '');
+    if (h <= 24 && mi < 60) { if (ap === 'pm' && h < 12) h += 12; if (ap === 'am' && h === 12) h = 0; if (!ap.match(/am|pm/) && h >= 1 && h <= 7) h += 12; time = `${String(h % 24).padStart(2, '0')}:${String(mi).padStart(2, '0')}`; cut(m[0]); }
+  }
+  if (!time && (m = / (?:in the )?(morning|afternoon|evening|night|noon|lunch) /.exec(t))) { time = { morning: '10:00', afternoon: '14:00', evening: '18:00', night: '20:00', noon: '12:00', lunch: '13:00' }[m[1]]; cut(m[0]); }
+  if (!date) date = time && time <= nowHM ? addDays(today, 1) : today;
+  if (!time) { if (date === today) { const [h] = nowHM.split(':').map(Number); time = `${String(Math.min(23, h + 1)).padStart(2, '0')}:00`; } else time = '10:00'; }
+  // keep the person's own capitals (names like Kumar): remove the date/time words from the original text
+  let o = ' ' + String(raw || '').replace(/[,.!?]/g, ' ').replace(/\s+/g, ' ') + ' ';
+  for (const c of cuts) { const re = new RegExp(' ' + c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+') + ' ', 'i'); o = o.replace(re, ' '); }
+  t = o;
+  t = t.replace(/ (hey siri|ok google|okay google|hey google|rago crm|rago) /gi, ' ').replace(/^ *(please )?(set (a |an )?)?(remind(er)?s?( me)?( to| about| for| that)?|add (a )?(reminder|task|todo|to-do)( to| for)?|create (a )?(reminder|task)( to| for)?|note( that)?) /i, ' ')
+    .replace(/ (set|a|an) (reminder|alarm) (for|to)? /gi, ' ').replace(/^ *(to|for|about) /i, ' ').replace(/\s+/g, ' ').trim();
+  const title = t ? t[0].toUpperCase() + t.slice(1) : 'Reminder';
+  return { title: title.slice(0, 200), due_date: date, due_time: time };
+}
+const nowHMIST = () => new Date().toLocaleTimeString('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+const prettyWhen = (d, t) => `${new Date(d + 'T12:00:00Z').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })} at ${(() => { const [h, m] = t.split(':').map(Number); return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'am' : 'pm'}`; })()}`;
+app.post('/api/reminders/parse', wrap(async (req, res) => res.json(parseReminder((req.body || {}).text, await todayIST(), nowHMIST()))));
+const tokenUser = async tok => /^[a-f0-9]{40}$/.test(String(tok || '')) ? (await q('SELECT id,name,role,brand_id,permissions FROM users WHERE cal_token=$1 AND active', [tok])).rows[0] : null;
+app.get('/api/me/links', wrap(async (req, res) => {
+  let tok = ((await q('SELECT cal_token FROM users WHERE id=$1', [req.user.id])).rows[0] || {}).cal_token;
+  if (!tok || req.query.reset) { tok = crypto.randomBytes(20).toString('hex'); await q('UPDATE users SET cal_token=$1 WHERE id=$2', [tok, req.user.id]); }
+  res.set('Cache-Control', 'no-store').json({ token: tok });
+}));
+// Siri Shortcut / Google Assistant: GET or POST /hook/<personal-key>/remind?text=…  → speaks back the confirmation
+app.all('/hook/:tok/remind', express.urlencoded({ extended: false }), wrap(async (req, res) => {
+  const u = await tokenUser(req.params.tok); if (!u) return res.status(404).type('text').send('Link not valid. Copy it again from Rago CRM → Profile.');
+  const text = String((req.body && req.body.text) || req.query.text || '').trim();
+  if (!text) return res.type('text').send('Say what to remind you about, for example: tomorrow 10 am call Kumar.');
+  const r = parseReminder(text, await todayIST(), nowHMIST());
+  await q(`INSERT INTO todos(title,kind,due_at,for_user,created_by) VALUES($1,'task',($2::date + $3::time) AT TIME ZONE '${TZ}',$4,$4)`, [r.title, r.due_date, r.due_time, u.id]);
+  res.type('text').send(`Reminder set in Rago CRM: ${r.title} — ${prettyWhen(r.due_date, r.due_time)}.`);
+}));
+// Google Calendar (or any calendar app): subscribe to /cal/<personal-key>.ics — reminders, lead follow-ups and open jobs
+const icsEsc = v => String(v || '').replace(/\\/g, '\\\\').replace(/;/g, '\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+const icsTs = d => new Date(d).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+app.get('/cal/:tok.ics', wrap(async (req, res) => {
+  const u = await tokenUser(req.params.tok); if (!u) return res.status(404).send('Not found');
+  const host = `${req.protocol}://${req.get('host')}`, ev = [], stamp = icsTs(new Date());
+  const todos = (await q(`SELECT id,title,note,kind,due_at,done FROM todos WHERE for_user=$1 AND due_at > now() - interval '30 days' ORDER BY due_at LIMIT 500`, [u.id])).rows;
+  for (const t of todos) ev.push(['BEGIN:VEVENT', `UID:todo-${t.id}@rago-crm`, `DTSTAMP:${stamp}`, `DTSTART:${icsTs(t.due_at)}`, `DTEND:${icsTs(new Date(t.due_at).getTime() + 15 * 60000)}`,
+    `SUMMARY:${icsEsc((t.done ? '✓ ' : '⏰ ') + (t.title || (t.kind === 'voice' ? 'Voice message' : 'Reminder')))}`, `DESCRIPTION:${icsEsc((t.note || '') + '\nOpen: ' + host + '/?todo=' + t.id)}`, `URL:${host}/?todo=${t.id}`,
+    ...(t.done ? [] : ['BEGIN:VALARM', 'ACTION:DISPLAY', 'DESCRIPTION:Reminder', 'TRIGGER:-PT0M', 'END:VALARM']), 'END:VEVENT'].join('\r\n'));
+  const perms = u.role === SUPER ? ALL_KEYS : (u.permissions || []);
+  if (perms.includes('leads')) {
+    const lp = [], w = [`l.follow_up IS NOT NULL`, `l.follow_up >= CURRENT_DATE - 30`, `l.stage IN ('New Enquiry','Contacted','Site Visit','Quotation','Negotiation')`];
+    if (u.role !== SUPER && u.role !== 'Admin') { lp.push(u.id); w.push(`(l.assigned_to=$${lp.length} OR l.assigned_to IS NULL)`); }
+    if (u.brand_id) { lp.push(u.brand_id); w.push(`l.brand_id=$${lp.length}`); }
+    for (const l of (await q(`SELECT l.id,l.name,l.company,l.phone,l.stage,to_char(l.follow_up,'YYYYMMDD') d FROM leads l WHERE ${w.join(' AND ')} LIMIT 500`, lp)).rows) {
+      const nd = new Date(Date.UTC(+l.d.slice(0, 4), +l.d.slice(4, 6) - 1, +l.d.slice(6) + 1)).toISOString().slice(0, 10).replace(/-/g, '');
+      ev.push(['BEGIN:VEVENT', `UID:lead-${l.id}-${l.d}@rago-crm`, `DTSTAMP:${stamp}`, `DTSTART;VALUE=DATE:${l.d}`, `DTEND;VALUE=DATE:${nd}`,
+        `SUMMARY:${icsEsc(`📞 Follow up: ${l.name}${l.company ? ' (' + l.company + ')' : ''}`)}`, `DESCRIPTION:${icsEsc(`${l.phone || ''} · ${l.stage}`)}`, 'END:VEVENT'].join('\r\n'));
+    }
+  }
+  if (u.role === 'Technician') for (const j of (await q(`SELECT s.id,s.ticket_no,s.service_type,s.assigned_on,s.submitted_on,c.name,c.address FROM services s LEFT JOIN customers c ON c.id=s.customer_id
+      WHERE (s.technician_id=$1 OR s.helper_id=$1) AND s.status=ANY($2::text[]) LIMIT 100`, [u.id, OPEN_ST])).rows) {
+    const st = new Date(j.assigned_on || j.submitted_on);
+    ev.push(['BEGIN:VEVENT', `UID:job-${j.id}@rago-crm`, `DTSTAMP:${stamp}`, `DTSTART:${icsTs(st)}`, `DTEND:${icsTs(st.getTime() + 60 * 60000)}`,
+      `SUMMARY:${icsEsc(`🔧 Job #${j.ticket_no}: ${j.name || ''}`)}`, `LOCATION:${icsEsc(j.address || '')}`, `DESCRIPTION:${icsEsc(j.service_type || '')}`, 'END:VEVENT'].join('\r\n'));
+  }
+  res.set({ 'Content-Type': 'text/calendar; charset=utf-8', 'Cache-Control': 'no-cache' }).send(['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Rago CRM//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
+    `X-WR-CALNAME:Rago CRM · ${u.name}`, 'X-WR-TIMEZONE:Asia/Kolkata', 'REFRESH-INTERVAL;VALUE=DURATION:PT1H', 'X-PUBLISHED-TTL:PT1H', ...ev, 'END:VCALENDAR'].join('\r\n'));
+}));
 
 // ---------- payments overview (Dashboard + "Payments" page) ----------
 // Who paid on a day (customer, ticket, amount, mode), day / month totals and ticket status counts — brand-scoped.
