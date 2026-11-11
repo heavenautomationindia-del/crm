@@ -14,7 +14,7 @@ const q = (sql, p) => pool.query(sql, p);
 const SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const app = express();
 app.set('trust proxy', 1);
-app.use(express.json({ limit: '8mb' }));
+app.use(express.json({ limit: '16mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(e => { console.error(e); res.status(500).json({ error: e.message }); });
 
@@ -241,6 +241,7 @@ app.get('/api/leads/:id', need('leads'), wrap(async (req, res) => {
   const l = (await q(`${LSEL} WHERE l.id=$1 AND ${sc}`, p)).rows[0];
   if (!l) return res.status(404).json({ error: 'Not found' });
   l.voice = (await q('SELECT id, user_id, user_name, role, duration, created_at FROM lead_voice WHERE lead_id=$1 ORDER BY id', [l.id])).rows;
+  l.project_id = ((await q('SELECT id FROM projects WHERE lead_id=$1', [l.id]).catch(() => ({ rows: [] }))).rows[0] || {}).id || null;
   l.activity = (await q('SELECT by_name, text, created_at FROM lead_activity WHERE lead_id=$1 ORDER BY id DESC LIMIT 100', [l.id])).rows;
   res.json(l);
 }));
@@ -299,6 +300,8 @@ app.post('/api/leads/:id/convert', need('leads'), wrap(async (req, res) => {
 }));
 
 app.delete('/api/leads/:id', superOnly, wrap(async (req, res) => {
+  await q('DELETE FROM chats WHERE lead_id=$1', [req.params.id]).catch(() => {});
+  await q('UPDATE projects SET lead_id=NULL WHERE lead_id=$1', [req.params.id]).catch(() => {});
   await q('DELETE FROM leads WHERE id=$1', [req.params.id]); res.json({ ok: true });
 }));
 
@@ -540,7 +543,7 @@ const payFields = (me, b, cur) => {
   if (b.pay_brand_id !== undefined) o.pay_brand_id = Number.isInteger(+b.pay_brand_id) && +b.pay_brand_id > 0 ? +b.pay_brand_id : null;
   return o;
 };
-app.get('/api/users', need('team'), wrap(async (req, res) => res.json((await q(`SELECT u.id,u.name,u.email,u.phone,u.role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at,u.pay_brand_id,to_char(u.join_date,'YYYY-MM-DD') join_date,${isSuper(req.user) ? 'u.salary' : 'NULL salary'}, b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id ORDER BY u.active DESC, u.role, u.name`)).rows.map(pub))));
+app.get('/api/users', need('team'), wrap(async (req, res) => res.json((await q(`SELECT u.id,u.name,u.email,u.phone,u.role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at,u.pay_brand_id,to_char(u.join_date,'YYYY-MM-DD') join_date,${isSuper(req.user) ? 'u.salary' : 'NULL salary'}, COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id ORDER BY u.active DESC, u.role, u.name`)).rows.map(pub))));
 app.post('/api/users', need('team'), wrap(async (req, res) => {
   const b = req.body || {};
   if (!b.name || !b.email || !b.phone) return res.status(400).json({ error: 'Name, email and phone are required' });
@@ -552,6 +555,11 @@ app.post('/api/users', need('team'), wrap(async (req, res) => {
   for (let i = 0; i < 20; i++) { username = base + crypto.randomInt(100, 999); if (!(await q('SELECT 1 FROM users WHERE username=$1', [username])).rows.length) break; }
   const password = randPw();
   const pay = payFields(req.user, b, {});
+  if (!isSuper(req.user) && ['Technician', 'Staff'].includes(b.role) && b.home_brand_id !== undefined) {
+    const hb = Number.isInteger(+b.home_brand_id) && +b.home_brand_id > 0 ? +b.home_brand_id : null;
+    if (req.user.brand_id && hb !== req.user.brand_id) return res.status(403).json({ error: 'You can only choose your own brand' });
+    pay.pay_brand_id = hb;
+  }
   const r = await q('INSERT INTO users(name,email,phone,role,username,password_hash,permissions,brand_id,salary,join_date,pay_brand_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *',
     [b.name.trim(), b.email.trim(), b.phone.trim(), b.role, username, hash(password), cleanPerms(b.role, b.permissions), br.id, pay.salary ?? 0, pay.join_date ?? null, pay.pay_brand_id ?? br.id]);
   res.json({ user: pub(r.rows[0]), credentials: { username, password } });
@@ -564,6 +572,11 @@ app.patch('/api/users/:id', need('team'), wrap(async (req, res) => {
   if (cur.id === req.user.id && (b.active === false || role !== cur.role)) return res.status(400).json({ error: "You can't deactivate yourself or change your own role" });
   const br = await brandFor(role, b.brand_id !== undefined ? b.brand_id : cur.brand_id); if (br.error) return res.status(400).json({ error: br.error });
   const pay = payFields(req.user, b, cur);
+  if (!isSuper(req.user) && ['Technician', 'Staff'].includes(role) && b.home_brand_id !== undefined) {   // admin staff may set the home brand of technicians / support staff
+    const hb = Number.isInteger(+b.home_brand_id) && +b.home_brand_id > 0 ? +b.home_brand_id : null;
+    if (req.user.brand_id && hb !== req.user.brand_id) return res.status(403).json({ error: 'You can only choose your own brand' });
+    pay.pay_brand_id = hb;
+  }
   await q('UPDATE users SET name=$1,email=$2,phone=$3,role=$4,permissions=$5,active=$6,brand_id=$7,salary=$8,join_date=$9,pay_brand_id=$10 WHERE id=$11',
     [b.name || cur.name, b.email ?? cur.email, b.phone ?? cur.phone, role, cleanPerms(role, b.permissions ?? cur.permissions), b.active ?? cur.active, br.id,
      pay.salary ?? cur.salary, pay.join_date !== undefined ? pay.join_date : cur.join_date, pay.pay_brand_id !== undefined ? pay.pay_brand_id : (cur.pay_brand_id ?? br.id), cur.id]);
@@ -898,11 +911,12 @@ app.get('/api/tech/dashboard', techOnly, wrap(async (req, res) => {
 // Super Admin: delete old data (choose what). Team logins, brands, issue & job types stay.
 const WIPE = {
   services: 'TRUNCATE services, customers, payments, service_history, service_photos RESTART IDENTITY CASCADE',
-  leads: 'TRUNCATE leads, lead_activity RESTART IDENTITY CASCADE',
+  leads: 'DELETE FROM chats WHERE lead_id IS NOT NULL; TRUNCATE leads, lead_activity RESTART IDENTITY CASCADE',
   todos: 'TRUNCATE todos RESTART IDENTITY',
   attendance: 'TRUNCATE attendance, leave_requests RESTART IDENTITY',
   notifications: 'TRUNCATE notifications RESTART IDENTITY',
-  chat: `DELETE FROM chats WHERE kind<>'all'; TRUNCATE chat_messages RESTART IDENTITY; UPDATE chat_members SET last_read=0`,
+  projects: `DELETE FROM chats WHERE project_id IS NOT NULL; TRUNCATE projects, project_tasks RESTART IDENTITY`,
+  chat: `DELETE FROM chats WHERE kind NOT IN ('all','project'); TRUNCATE chat_messages RESTART IDENTITY; UPDATE chat_members SET last_read=0`,
   users: 'SELECT 1',   // staff logins: handled below
 };
 app.post('/api/admin/reset-data', superOnly, wrap(async (req, res) => {
@@ -1163,18 +1177,10 @@ app.post('/api/services/:id/extra', need('service_edit', 'service_create'), wrap
 }));
 
 // ---------- voice messages on leads ----------
-app.post('/api/leads/:id/voice', need('leads'), wrap(async (req, res) => {
+app.post('/api/leads/:id/voice', need('leads'), wrap(async (req, res) => {   // voice note on a lead goes into the lead discussion
   const l = await leadOK(req, res, req.params.id); if (!l) return;
-  const b = req.body || {}, m = /^data:(audio\/[\w.+-]+)(?:;[\w=.+-]+)*;base64,([A-Za-z0-9+/=]+)$/.exec(String(b.audio || ''));
-  if (!m) return res.status(400).json({ error: 'Record a voice message first' });
-  const buf = Buffer.from(m[2], 'base64'); if (buf.length < 200) return res.status(400).json({ error: 'The recording is empty — try again' });
-  if (buf.length > 6 * 1024 * 1024) return res.status(400).json({ error: 'Recording too long (max 5 minutes)' });
-  const dur = Math.max(1, Math.min(600, Math.round(+b.duration || 0)));
-  const r = await q('INSERT INTO lead_voice(lead_id,user_id,user_name,role,audio,mime,duration) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id', [l.id, req.user.id, req.user.name, req.user.role, buf, m[1], dur]);
-  await leadLog(l.id, req.user.name, `🎙 Voice message (${dur}s)`);
-  await q('UPDATE leads SET last_contact=now(), updated_at=now() WHERE id=$1', [l.id]);
-  if (l.assigned_to && l.assigned_to !== req.user.id) notify([l.assigned_to], '🎙 Voice message on lead', `${req.user.name} · ${l.name}`, null).catch(() => {});
-  res.json({ id: r.rows[0].id });
+  const c = await leadChat(l), r = await chatPost(req.user, c, { audio: (req.body || {}).audio, duration: (req.body || {}).duration });
+  res.status(r.error ? 400 : 200).json(r);
 }));
 app.get('/api/lead-voice/:id', need('leads'), wrap(async (req, res) => {
   const v = (await q('SELECT lead_id, audio, mime FROM lead_voice WHERE id=$1', [req.params.id])).rows[0];
@@ -1573,7 +1579,7 @@ app.get('/api/attendance/month', wrap(async (req, res) => {
 }));
 app.get('/api/attendance/report', attNeed, wrap(async (req, res) => {
   const today = await todayIST(), m = isMonth(req.query.month) ? req.query.month : today.slice(0, 7), start = await attStart(), off = await office();
-  const users = (await q(`SELECT u.id,u.name,u.role,u.created_at,to_char(u.join_date,'YYYY-MM-DD') join_date,u.photo_v,b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.active AND u.role<>$1 ORDER BY u.role, u.name`, [SUPER])).rows;
+  const users = (await q(`SELECT u.id,u.name,u.role,u.created_at,to_char(u.join_date,'YYYY-MM-DD') join_date,u.photo_v,COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id WHERE u.active AND u.role<>$1 ORDER BY u.role, u.name`, [SUPER])).rows;
   const rows = [];
   for (const u of users) {
     const x = await monthFor(u, m, today, start, off), td = x.days.find(d => d.d === today);
@@ -1584,7 +1590,7 @@ app.get('/api/attendance/report', attNeed, wrap(async (req, res) => {
 // dashboard: who is on leave / permission today, who is in, what is waiting for approval
 app.get('/api/attendance/board', attNeed, wrap(async (req, res) => {
   const today = await todayIST(), off = await office();
-  const staff = (await q(`SELECT u.id,u.name,u.role,u.photo_v,b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.active AND u.role<>$1 ORDER BY u.name`, [SUPER])).rows;
+  const staff = (await q(`SELECT u.id,u.name,u.role,u.photo_v,COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id WHERE u.active AND u.role<>$1 ORDER BY u.name`, [SUPER])).rows;
   const att = {}; (await q(`SELECT * FROM attendance WHERE day=$1`, [today])).rows.forEach(r => { att[r.user_id] = r; });
   const tr = (await q(`${LSELR} WHERE r.status='Approved' AND r.kind IN ('Leave','Permission') AND r.from_date<=$1 AND r.to_date>=$1 ORDER BY r.kind, r.session, u.name`, [today])).rows;
   const pending = (await q(`${LSELR} WHERE r.status='Pending' ORDER BY r.created_at LIMIT 20`)).rows;
@@ -1598,7 +1604,7 @@ app.get('/api/attendance/board', attNeed, wrap(async (req, res) => {
 // MD (Super Admin) overview: everything about the team's attendance on one screen
 app.get('/api/attendance/md', superOnly, wrap(async (req, res) => {
   const today = await todayIST(), m = isMonth(req.query.month) ? req.query.month : today.slice(0, 7), start = await attStart(), off = await office();
-  const users = (await q(`SELECT u.id,u.name,u.role,u.created_at,to_char(u.join_date,'YYYY-MM-DD') join_date,u.photo_v,b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.active AND u.role<>$1 ORDER BY u.name`, [SUPER])).rows;
+  const users = (await q(`SELECT u.id,u.name,u.role,u.created_at,to_char(u.join_date,'YYYY-MM-DD') join_date,u.photo_v,COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id WHERE u.active AND u.role<>$1 ORDER BY u.name`, [SUPER])).rows;
   const days = daysOf(m), daily = Object.fromEntries(days.map(d => [d, { d, present: 0, late: 0, leave: 0, perm: 0, absent: 0, staff: 0 }]));
   const rows = [], todayList = [];
   for (const u of users) {
@@ -1744,6 +1750,7 @@ async function initChat() {
     kind TEXT NOT NULL DEFAULT 'text', body TEXT, mime TEXT, data BYTEA, duration INT, w INT, h INT, mentions INT[] DEFAULT '{}', reply_to INT,
     deleted BOOLEAN DEFAULT false, created_at TIMESTAMPTZ DEFAULT now());
   CREATE INDEX IF NOT EXISTS idx_cm_chat ON chat_messages(chat_id, id);
+  ALTER TABLE chats ADD COLUMN IF NOT EXISTS lead_id INT UNIQUE;
   CREATE INDEX IF NOT EXISTS idx_cmem_user ON chat_members(user_id);
   CREATE TABLE IF NOT EXISTS holidays (id SERIAL PRIMARY KEY, day DATE NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'Festival',
     is_holiday BOOLEAN DEFAULT false, emoji TEXT, greeting TEXT, created_at TIMESTAMPTZ DEFAULT now(), UNIQUE(day, name));`);
@@ -1771,8 +1778,8 @@ const chatUnread = async uid => {
     WHERE x.id>m.last_read AND x.user_id IS DISTINCT FROM $1 AND NOT x.deleted`, [uid])).rows[0].n;
 };
 const MSG_COLS = `x.id, x.chat_id, x.user_id, x.user_name, x.kind, CASE WHEN x.deleted THEN NULL ELSE x.body END body, x.mime, x.duration, x.w, x.h,
-  x.mentions, x.reply_to, x.deleted, x.created_at, u.photo_v, u.role`;
-const preview = m => m.deleted ? 'Message deleted' : m.kind === 'image' ? '📷 Photo' + (m.body ? ' · ' + m.body : '') : m.kind === 'voice' ? `🎤 Voice message (${durTxt(m.duration)})` : (m.body || '');
+  x.mentions, x.reply_to, x.deleted, x.created_at, x.fname, x.fsize, u.photo_v, u.role`;
+const preview = m => m.deleted ? 'Message deleted' : m.kind === 'file' ? '📎 ' + (m.fname || 'File') + (m.body ? ' · ' + m.body : '') : m.kind === 'image' ? '📷 Photo' + (m.body ? ' · ' + m.body : '') : m.kind === 'voice' ? `🎤 Voice message (${durTxt(m.duration)})` : (m.body || '');
 const durTxt = s => `${Math.floor((s || 0) / 60)}:${String((s || 0) % 60).padStart(2, '0')}`;
 
 app.get('/api/chats', wrap(async (req, res) => {
@@ -1789,14 +1796,14 @@ app.get('/api/chats', wrap(async (req, res) => {
   const allN = (await q('SELECT COUNT(*)::int n FROM users WHERE active')).rows[0].n;
   res.set('Cache-Control', 'no-store').json({ items: rows.map(r => {
     const l = last[r.id], o = other[r.id];
-    return { id: r.id, kind: r.kind, name: r.kind === 'dm' ? (o ? o.name : 'Former staff') : r.name, other: o || null, created_by: r.created_by,
+    return { id: r.id, kind: r.kind, lead_id: r.lead_id, project_id: r.project_id, name: r.kind === 'dm' ? (o ? o.name : 'Former staff') : r.name, other: o || null, created_by: r.created_by,
       members: r.kind === 'all' ? allN : r.members, unread: r.unread, tagged: r.tagged, muted: r.muted, last_at: l ? l.created_at : r.last_at,
       last: l ? { who: l.user_id === uid ? 'You' : (l.user_name || '').split(' ')[0], text: preview(l), kind: l.kind } : null };
   }).sort((a, b) => (b.kind === 'all') - (a.kind === 'all') || new Date(b.last_at) - new Date(a.last_at)) });
 }));
 // people you can chat with / tag
 app.get('/api/chat/people', wrap(async (req, res) => {
-  res.json({ items: (await q(`SELECT u.id, u.name, u.role, u.photo_v, b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.active ORDER BY u.name`)).rows });
+  res.json({ items: (await q(`SELECT u.id, u.name, u.role, u.photo_v, COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id WHERE u.active ORDER BY u.name`)).rows });
 }));
 app.post('/api/chats/dm', wrap(async (req, res) => {
   const other = +(req.body || {}).user_id, me = req.user.id;
@@ -1872,7 +1879,7 @@ app.get('/api/chats/:id/messages', wrap(async (req, res) => {
     const mem = c.kind === 'all' ? (await q(`SELECT u.id, u.name, u.role, u.photo_v FROM users u WHERE u.active ORDER BY u.name`)).rows
       : (await q(`SELECT u.id, u.name, u.role, u.photo_v FROM chat_members m JOIN users u ON u.id=m.user_id WHERE m.chat_id=$1 ORDER BY u.name`, [c.id])).rows;
     const other = c.kind === 'dm' ? mem.find(m => m.id !== req.user.id) : null;
-    out.chat = { id: c.id, kind: c.kind, name: c.kind === 'dm' ? (other ? other.name : 'Former staff') : c.name, created_by: c.created_by, other,
+    out.chat = { id: c.id, kind: c.kind, lead_id: c.lead_id, project_id: c.project_id, name: c.kind === 'dm' ? (other ? other.name : 'Former staff') : c.name, created_by: c.created_by, other,
       can_manage: c.kind === 'group' && canManage(req.user, c), muted: !!((await q('SELECT muted FROM chat_members WHERE chat_id=$1 AND user_id=$2', [c.id, req.user.id])).rows[0] || {}).muted };
     out.members = mem;
   }
@@ -1885,62 +1892,95 @@ app.post('/api/chats/:id/read', wrap(async (req, res) => {
   const last = +(req.body || {}).last || 0;
   await q('UPDATE chat_members SET last_read=GREATEST(last_read,$3), seen_at=now() WHERE chat_id=$1 AND user_id=$2', [c.id, req.user.id, last]);
   // the related bell notifications for this chat are read too
-  await q(`UPDATE notifications SET read=true WHERE user_id=$1 AND link=$2 AND NOT read`, [req.user.id, 'chat:' + c.id]);
+  await q(`UPDATE notifications SET read=true WHERE user_id=$1 AND link=ANY($2) AND NOT read`, [req.user.id, ['chat:' + c.id, 'leadchat:' + c.lead_id, 'project:' + c.project_id]]);
   res.json({ ok: true, unread: await chatUnread(req.user.id) });
 }));
 // push + (for DMs / tags / group adds) a bell notification. Skips people who are looking at the chat right now.
-async function notifyChat(ids, title, body, cid, bell) {
+async function notifyChat(ids, title, body, cid, bell, link) {
   for (const id of [...new Set(ids)].filter(Boolean)) {
-    if (bell) await q('INSERT INTO notifications(user_id,title,body,link) VALUES($1,$2,$3,$4)', [id, title, body, 'chat:' + cid]);
-    pushTo(id, title, body, null, { url: '/?chat=' + cid, chat: cid, tag: 'rago-chat-' + cid }).catch(() => {});
+    if (bell) await q('INSERT INTO notifications(user_id,title,body,link) VALUES($1,$2,$3,$4)', [id, title, body, link || 'chat:' + cid]);
+    pushTo(id, title, body, null, link ? { url: '/?att=' + link, att: link, tag: 'rago-chat-' + cid } : { url: '/?chat=' + cid, chat: cid, tag: 'rago-chat-' + cid }).catch(() => {});
   }
 }
-app.post('/api/chats/:id/messages', wrap(async (req, res) => {
-  const c = await chatFor(req.user, +req.params.id); if (!c) return res.status(404).json({ error: 'Not found' });
-  const b = req.body || {}, text = String(b.text || '').replace(/\s+$/, '').slice(0, 4000);
+async function chatPost(u, c, b) {
+  b = b || {}; const text = String(b.text || '').replace(/\s+$/, '').slice(0, 4000);
   let kind = 'text', buf = null, mime = null, dur = null, w = null, h = null;
   if (b.image) {
     const m = /^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/=]+)$/.exec(String(b.image));
-    if (!m) return res.status(400).json({ error: 'Choose a photo (JPG or PNG)' });
-    buf = Buffer.from(m[2], 'base64'); if (buf.length > 3 * 1024 * 1024) return res.status(400).json({ error: 'Photo is too large' });
+    if (!m) return { error: 'Choose a photo (JPG or PNG)' };
+    buf = Buffer.from(m[2], 'base64'); if (buf.length > 3 * 1024 * 1024) return { error: 'Photo is too large' };
     kind = 'image'; mime = m[1]; w = +b.w || null; h = +b.h || null;
   } else if (b.audio) {
     const m = /^data:(audio\/[\w.+-]+)(?:;[\w=.+-]+)*;base64,([A-Za-z0-9+/=]+)$/.exec(String(b.audio));
-    if (!m) return res.status(400).json({ error: 'Record a voice message first' });
-    buf = Buffer.from(m[2], 'base64'); if (buf.length < 200) return res.status(400).json({ error: 'The recording is empty — try again' });
-    if (buf.length > 6 * 1024 * 1024) return res.status(400).json({ error: 'Recording too long (max 5 minutes)' });
+    if (!m) return { error: 'Record a voice message first' };
+    buf = Buffer.from(m[2], 'base64'); if (buf.length < 200) return { error: 'The recording is empty — try again' };
+    if (buf.length > 6 * 1024 * 1024) return { error: 'Recording too long (max 5 minutes)' };
     kind = 'voice'; mime = m[1]; dur = Math.max(1, Math.min(600, Math.round(+b.duration || 0)));
-  } else if (!text.trim()) return res.status(400).json({ error: 'Type a message' });
+  } else if (b.file) {
+    const m = /^data:([\w.+-]+\/[\w.+-]+)?(?:;[\w=.+-]+)*;base64,([A-Za-z0-9+/=]*)$/.exec(String(b.file));
+    if (!m) return { error: 'Choose a file' };
+    buf = Buffer.from(m[2], 'base64'); if (!buf.length) return { error: 'That file is empty' };
+    if (buf.length > 10 * 1024 * 1024) return { error: 'File is too large (max 10 MB)' };
+    kind = 'file'; mime = m[1] || 'application/octet-stream';
+  } else if (!text.trim()) return { error: 'Type a message' };
   // tags: client sends ids; -1 = @everyone. Only people who are in this chat count.
   const members = await chatMemberIds(c);
   let tags = (Array.isArray(b.mentions) ? b.mentions.map(Number) : []).filter(x => x === -1 || members.includes(x));
   if (/(^|\s)@(all|everyone)\b/i.test(text) && !tags.includes(-1)) tags.push(-1);
   tags = [...new Set(tags)];
   const reply = +b.reply_to || null;
-  const r = (await q(`INSERT INTO chat_messages(chat_id,user_id,user_name,kind,body,mime,data,duration,w,h,mentions,reply_to) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id, created_at`,
-    [c.id, req.user.id, req.user.name, kind, text || null, mime, buf, dur, w, h, tags, reply])).rows[0];
+  const fname = kind === 'file' ? (String(b.fname || 'file').replace(/[\\/:*?"<>|\r\n]+/g, '_').trim().slice(0, 120) || 'file') : null;
+  const r = (await q(`INSERT INTO chat_messages(chat_id,user_id,user_name,kind,body,mime,data,duration,w,h,mentions,reply_to,fname,fsize) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id, created_at`,
+    [c.id, u.id, u.name, kind, text || null, mime, buf, dur, w, h, tags, reply, fname, buf ? buf.length : null])).rows[0];
   await q('UPDATE chats SET last_at=now() WHERE id=$1', [c.id]);
-  await q('UPDATE chat_members SET last_read=GREATEST(last_read,$3), seen_at=now() WHERE chat_id=$1 AND user_id=$2', [c.id, req.user.id, r.id]);
+  await q('UPDATE chat_members SET last_read=GREATEST(last_read,$3) WHERE chat_id=$1 AND user_id=$2', [c.id, u.id, r.id]);
   // who to alert
-  const others = members.filter(x => x !== req.user.id);
+  const others = members.filter(x => x !== u.id);
   const st = (await q(`SELECT user_id, muted, (seen_at > now() - interval '12 seconds') here FROM chat_members WHERE chat_id=$1`, [c.id])).rows, S = {};
   st.forEach(x => { S[x.user_id] = x; });
-  const gname = c.kind === 'dm' ? null : c.name, pv = preview({ kind, body: text, duration: dur }).slice(0, 140);
+  const gname = c.kind === 'dm' ? null : c.name, pv = preview({ kind, body: text, duration: dur, fname: b.fname }).slice(0, 140);
   const tagged = tags.includes(-1) ? others : others.filter(x => tags.includes(x));
   const rest = others.filter(x => !tagged.includes(x) && !(S[x] && (S[x].muted || S[x].here)));
-  if (c.kind === 'dm') await notifyChat(others.filter(x => !(S[x] && S[x].here)), `💬 ${req.user.name}`, pv, c.id, true);
+  if (c.kind === 'project') await notifyChat(others.filter(x => !(S[x] && S[x].here) && !(S[x] && S[x].muted && !tagged.includes(x))), `📁 ${u.name} · ${c.name.replace(/^Project · /, '')}`, pv, c.id, true, 'project:' + c.project_id);
+  else if (c.kind === 'lead') await notifyChat(others.filter(x => !(S[x] && S[x].here)), `💬 ${u.name} · ${c.name}`, pv, c.id, true, 'leadchat:' + c.lead_id);
+  else if (c.kind === 'dm') await notifyChat(others.filter(x => !(S[x] && S[x].here)), `💬 ${u.name}`, pv, c.id, true);
   else {
-    await notifyChat(tagged.filter(x => !(S[x] && S[x].here)), `📣 ${req.user.name} tagged you · ${gname}`, pv, c.id, true);
-    await notifyChat(rest, `💬 ${gname}`, `${req.user.name}: ${pv}`, c.id, false);
+    await notifyChat(tagged.filter(x => !(S[x] && S[x].here)), `📣 ${u.name} tagged you · ${gname}`, pv, c.id, true);
+    await notifyChat(rest, `💬 ${gname}`, `${u.name}: ${pv}`, c.id, false);
   }
-  res.json({ id: r.id, created_at: r.created_at });
+  if (c.kind === 'lead') { await q('UPDATE leads SET last_contact=now(), updated_at=now() WHERE id=$1', [c.lead_id]).catch(() => {}); if (kind === 'voice') await leadLog(c.lead_id, u.name, `🎙 Voice message (${dur}s)`).catch(() => {}); }
+  return { id: r.id, created_at: r.created_at };
+}
+app.post('/api/chats/:id/messages', wrap(async (req, res) => {
+  const c = await chatFor(req.user, +req.params.id); if (!c) return res.status(404).json({ error: 'Not found' });
+  const r = await chatPost(req.user, c, req.body); res.status(r.error ? 400 : 200).json(r);
+}));
+// ---------- lead discussion: MD (Super Admin) + the staff who own the lead, inside the lead ----------
+async function leadChat(l) {
+  const name = `Lead · ${l.name}${l.company ? ' (' + l.company + ')' : ''}`.slice(0, 80);
+  let c = (await q('SELECT * FROM chats WHERE lead_id=$1', [l.id])).rows[0];
+  if (!c) {
+    c = (await q(`INSERT INTO chats(kind,name,lead_id,created_by) VALUES('lead',$1,$2,$3) ON CONFLICT (lead_id) DO UPDATE SET name=EXCLUDED.name RETURNING *`, [name, l.id, l.created_by || null])).rows[0];
+    if (!(await q('SELECT 1 FROM chat_messages WHERE chat_id=$1 LIMIT 1', [c.id])).rows.length)   // bring in earlier voice notes of this lead
+      await q(`INSERT INTO chat_messages(chat_id,user_id,user_name,kind,mime,data,duration,created_at) SELECT $1,user_id,user_name,'voice',mime,audio,duration,created_at FROM lead_voice WHERE lead_id=$2 ORDER BY id`, [c.id, l.id]).catch(() => {});
+  } else if (c.name !== name) await q('UPDATE chats SET name=$2 WHERE id=$1', [c.id, name]);
+  const ids = [...new Set([...(await q('SELECT id FROM users WHERE active AND role=$1', [SUPER])).rows.map(r => r.id), l.assigned_to, l.created_by].filter(Boolean))];
+  const act = (await q('SELECT id FROM users WHERE active AND id=ANY($1)', [ids])).rows.map(r => r.id);
+  for (const id of act) await q('INSERT INTO chat_members(chat_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [c.id, id]);
+  await q('DELETE FROM chat_members WHERE chat_id=$1 AND NOT (user_id=ANY($2))', [c.id, act]);
+  return c;
+}
+app.post('/api/leads/:id/chat', need('leads'), wrap(async (req, res) => {
+  const l = await leadOK(req, res, req.params.id); if (!l) return;
+  const c = await leadChat(l); res.json({ id: c.id });
 }));
 app.get('/api/chat-media/:id', wrap(async (req, res) => {
-  const m = (await q('SELECT chat_id, data, mime, deleted FROM chat_messages WHERE id=$1', [req.params.id])).rows[0];
+  const m = (await q('SELECT chat_id, data, mime, deleted, kind, fname FROM chat_messages WHERE id=$1', [req.params.id])).rows[0];
   if (!m || m.deleted || !m.data) return res.status(404).end();
   if (!(await chatFor(req.user, m.chat_id))) return res.status(403).end();
   const buf = m.data, total = buf.length, range = /bytes=(\d*)-(\d*)/.exec(req.headers.range || '');
-  res.set({ 'Content-Type': m.mime || 'application/octet-stream', 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, max-age=604800' });
+  res.set({ 'Content-Type': m.mime || 'application/octet-stream', 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, max-age=604800', 'X-Content-Type-Options': 'nosniff' });
+  if (m.kind === 'file') res.set('Content-Disposition', `${req.query.dl || !/^(application\/pdf|image\/)/.test(m.mime || '') ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(m.fname || 'file')}`);
   if (range) { const s = range[1] ? +range[1] : 0, e = range[2] ? Math.min(+range[2], total - 1) : total - 1; res.status(206).set('Content-Range', `bytes ${s}-${e}/${total}`).send(buf.subarray(s, e + 1)); }
   else res.send(buf);
 }));
@@ -2119,5 +2159,175 @@ async function holidayDue() {
   } catch (e) { console.error('holiday notify', e.message); }
 }
 
-init().then(initChat).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
+
+// =====================================================================
+// ---------- Projects: a lead becomes a project with its own team chat, tasks and files ----------
+// =====================================================================
+const PSTAT = ['Planning', 'In Progress', 'On Hold', 'Completed', 'Cancelled'];
+async function initProjects() {
+  await q(`
+  CREATE TABLE IF NOT EXISTS projects (id SERIAL PRIMARY KEY, lead_id INT UNIQUE, name TEXT NOT NULL, company TEXT, contact TEXT, phone TEXT, email TEXT, address TEXT,
+    lat DOUBLE PRECISION, lng DOUBLE PRECISION, map_url TEXT, brand_id INT, status TEXT DEFAULT 'Planning', value NUMERIC(12,2) DEFAULT 0, start_date DATE, due_date DATE,
+    notes TEXT, source TEXT, interest TEXT, chat_id INT, created_by INT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
+  CREATE TABLE IF NOT EXISTS project_tasks (id SERIAL PRIMARY KEY, project_id INT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, title TEXT NOT NULL, assigned_to INT,
+    due_date DATE, done BOOLEAN DEFAULT false, done_by TEXT, done_at TIMESTAMPTZ, created_by INT, created_at TIMESTAMPTZ DEFAULT now());
+  CREATE INDEX IF NOT EXISTS idx_ptask ON project_tasks(project_id);
+  ALTER TABLE chats ADD COLUMN IF NOT EXISTS project_id INT UNIQUE;
+  ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS fname TEXT;
+  ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS fsize INT;`);
+}
+const PCOLS = `p.*, to_char(p.start_date,'YYYY-MM-DD') start_d, to_char(p.due_date,'YYYY-MM-DD') due_d, (SELECT name FROM brands WHERE id=p.brand_id) brand`;
+const projTeam = async pid => (await q(`SELECT u.id, u.name, u.role, u.photo_v, COALESCE(b.name, pb.name) brand FROM chats c JOIN chat_members m ON m.chat_id=c.id JOIN users u ON u.id=m.user_id
+  LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id WHERE c.project_id=$1 ORDER BY (u.role=$2) DESC, u.name`, [pid, SUPER])).rows;
+// can this user open the project?  Super Admin: always. Others: when they are in the project team.
+const projFor = async (u, id) => {
+  const p = (await q(`SELECT ${PCOLS} FROM projects p WHERE p.id=$1`, [id])).rows[0];
+  if (!p) return null;
+  if (isSuper(u)) { await q('INSERT INTO chat_members(chat_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [p.chat_id, u.id]); return p; }
+  return (await q('SELECT 1 FROM chat_members WHERE chat_id=$1 AND user_id=$2', [p.chat_id, u.id])).rows.length ? p : null;
+};
+const projEdit = u => isSuper(u) || u.role === 'Admin';
+const pDate = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? v : null;
+async function makeProject(u, d, team) {
+  const p = (await q(`INSERT INTO projects(lead_id,name,company,contact,phone,email,address,lat,lng,map_url,brand_id,status,value,start_date,due_date,notes,source,interest,created_by)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'Planning',$12,$13,$14,$15,$16,$17,$18) RETURNING *`,
+    [d.lead_id || null, d.name, d.company || null, d.contact || null, d.phone || null, d.email || null, d.address || null, d.lat ?? null, d.lng ?? null, d.map_url || null,
+     d.brand_id || null, Math.max(0, +d.value || 0), pDate(d.start_date) || await todayIST(), pDate(d.due_date), d.notes || null, d.source || null, d.interest || null, u.id])).rows[0];
+  const c = (await q(`INSERT INTO chats(kind,name,project_id,created_by) VALUES('project',$1,$2,$3) RETURNING id`, [('Project · ' + p.name).slice(0, 80), p.id, u.id])).rows[0];
+  await q('UPDATE projects SET chat_id=$2 WHERE id=$1', [p.id, c.id]);
+  const ids = [...new Set([...(await q('SELECT id FROM users WHERE active AND role=$1', [SUPER])).rows.map(r => r.id), u.id, ...team].filter(Boolean))];
+  const act = (await q('SELECT id FROM users WHERE active AND id=ANY($1)', [ids])).rows.map(r => r.id);
+  for (const id of act) await q('INSERT INTO chat_members(chat_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [c.id, id]);
+  return { ...p, chat_id: c.id, team: act };
+}
+const projNote = (ids, title, body, pid) => notifyLink(ids, title, body, 'project:' + pid);
+
+app.get('/api/projects', wrap(async (req, res) => {
+  const u = req.user, sup = isSuper(u);
+  const rows = (await q(`SELECT ${PCOLS}, m.last_read,
+      (SELECT COUNT(*)::int FROM chat_messages x WHERE x.chat_id=p.chat_id AND x.id>COALESCE(m.last_read,0) AND x.user_id IS DISTINCT FROM $1 AND NOT x.deleted) unread,
+      (SELECT COUNT(*)::int FROM project_tasks t WHERE t.project_id=p.id) tasks, (SELECT COUNT(*)::int FROM project_tasks t WHERE t.project_id=p.id AND t.done) done,
+      (SELECT COUNT(*)::int FROM chat_members mm WHERE mm.chat_id=p.chat_id) team_n,
+      (SELECT MAX(created_at) FROM chat_messages x WHERE x.chat_id=p.chat_id) last_at
+    FROM projects p LEFT JOIN chat_members m ON m.chat_id=p.chat_id AND m.user_id=$1
+    WHERE ${sup ? 'TRUE' : 'm.user_id IS NOT NULL'} ORDER BY (p.status IN ('Completed','Cancelled')), COALESCE((SELECT MAX(created_at) FROM chat_messages x WHERE x.chat_id=p.chat_id), p.updated_at) DESC`, [u.id])).rows;
+  const ids = rows.map(r => r.id), team = {};
+  if (ids.length) (await q(`SELECT c.project_id, u.id, u.name, u.photo_v FROM chats c JOIN chat_members m ON m.chat_id=c.id JOIN users u ON u.id=m.user_id WHERE c.project_id=ANY($1) AND u.role<>$2 ORDER BY u.name`, [ids, SUPER])).rows
+    .forEach(t => { (team[t.project_id] = team[t.project_id] || []).push({ id: t.id, name: t.name, photo_v: t.photo_v }); });
+  res.set('Cache-Control', 'no-store').json({ statuses: PSTAT, items: rows.map(r => ({ ...r, start_date: r.start_d, due_date: r.due_d, team: team[r.id] || [] })) });
+}));
+app.post('/api/projects', wrap(async (req, res) => {
+  if (!isSuper(req.user)) return res.status(403).json({ error: 'Only the Super Admin can start a project' });
+  const b = req.body || {}, name = String(b.name || '').trim().slice(0, 100);
+  if (!name) return res.status(400).json({ error: 'Give the project a name' });
+  const brand = Number.isInteger(+b.brand_id) && +b.brand_id > 0 ? +b.brand_id : (await q(`SELECT id FROM brands ORDER BY (lower(name)='heaven') DESC, id LIMIT 1`)).rows[0].id;
+  const team = Array.isArray(b.team) ? b.team.map(Number) : [];
+  const p = await makeProject(req.user, { ...b, name, brand_id: brand }, team);
+  await sysMsg(p.chat_id, `${req.user.name} started the project “${name}”`);
+  await projNote(p.team.filter(x => x !== req.user.id), '📁 Added to a project', `${req.user.name} added you to “${name}”`, p.id);
+  res.json({ id: p.id });
+}));
+// lead → project (keeps all the lead details and brings the lead discussion along)
+app.post('/api/leads/:id/project', need('leads'), wrap(async (req, res) => {
+  const l = await leadOK(req, res, req.params.id); if (!l) return;
+  const ex = (await q('SELECT id FROM projects WHERE lead_id=$1', [l.id])).rows[0];
+  if (ex) return res.json({ id: ex.id, existed: true });
+  const p = await makeProject(req.user, { lead_id: l.id, name: (l.company || l.name).slice(0, 100), company: l.company, contact: l.name, phone: l.phone, email: l.email, address: l.address,
+    lat: l.lat, lng: l.lng, map_url: l.map_url, brand_id: l.brand_id, value: l.value, notes: l.notes, source: l.source, interest: l.interest }, [l.assigned_to, l.created_by]);
+  const lc = (await q('SELECT id FROM chats WHERE lead_id=$1', [l.id])).rows[0];
+  if (lc) await q(`INSERT INTO chat_messages(chat_id,user_id,user_name,kind,body,mime,data,duration,w,h,mentions,deleted,created_at,fname,fsize)
+    SELECT $1,user_id,user_name,kind,body,mime,data,duration,w,h,mentions,deleted,created_at,fname,fsize FROM chat_messages WHERE chat_id=$2 AND kind<>'system' ORDER BY id`, [p.chat_id, lc.id]);
+  await sysMsg(p.chat_id, `📁 ${req.user.name} converted the lead “${l.name}${l.company ? ' · ' + l.company : ''}” into this project${lc ? ' — the lead discussion is above' : ''}`);
+  await leadLog(l.id, req.user.name, '📁 Converted to a project');
+  await projNote(p.team.filter(x => x !== req.user.id), '📁 New project', `${req.user.name} converted the lead “${l.name}” into a project`, p.id);
+  res.json({ id: p.id });
+}));
+app.get('/api/projects/:id', wrap(async (req, res) => {
+  const p = await projFor(req.user, +req.params.id); if (!p) return res.status(404).json({ error: 'Not found' });
+  const tasks = (await q(`SELECT t.*, to_char(t.due_date,'YYYY-MM-DD') due_d, u.name assigned_name, u.photo_v FROM project_tasks t LEFT JOIN users u ON u.id=t.assigned_to WHERE t.project_id=$1 ORDER BY t.done, t.id`, [p.id])).rows;
+  const lead = p.lead_id ? (await q(`SELECT id, name, stage, priority, follow_up, created_at, (SELECT name FROM users WHERE id=assigned_to) agent, (SELECT name FROM users WHERE id=created_by) by FROM leads WHERE id=$1`, [p.lead_id])).rows[0] || null : null;
+  const activity = p.lead_id ? (await q('SELECT by_name, text, created_at FROM lead_activity WHERE lead_id=$1 ORDER BY id DESC LIMIT 40', [p.lead_id])).rows : [];
+  const ur = (await q(`SELECT COUNT(*)::int n FROM chat_messages x JOIN chat_members m ON m.chat_id=x.chat_id AND m.user_id=$2 WHERE x.chat_id=$1 AND x.id>m.last_read AND x.user_id IS DISTINCT FROM $2 AND NOT x.deleted`, [p.chat_id, req.user.id])).rows[0].n;
+  const lm = (await q(`SELECT ${MSG_COLS} FROM chat_messages x LEFT JOIN users u ON u.id=x.user_id WHERE x.chat_id=$1 AND x.kind<>'system' ORDER BY x.id DESC LIMIT 3`, [p.chat_id])).rows.reverse();
+  res.set('Cache-Control', 'no-store').json({ ...p, start_date: p.start_d, due_date: p.due_d, statuses: PSTAT, unread: ur, recent: lm.map(m => ({ who: m.user_id === req.user.id ? 'You' : m.user_name, text: preview(m), at: m.created_at })), team: await projTeam(p.id), tasks: tasks.map(t => ({ ...t, due_date: t.due_d })), lead, activity,
+    can_edit: projEdit(req.user), can_team: isSuper(req.user), creator: (await q('SELECT name FROM users WHERE id=$1', [p.created_by])).rows[0]?.name || '' });
+}));
+app.patch('/api/projects/:id', wrap(async (req, res) => {
+  const p = await projFor(req.user, +req.params.id); if (!p) return res.status(404).json({ error: 'Not found' });
+  if (!projEdit(req.user)) return res.status(403).json({ error: 'Only the Super Admin or admin staff can change project details' });
+  const b = req.body || {}, set = [], val = [p.id], add = (k, v) => { val.push(v); set.push(`${k}=$${val.length}`); };
+  if (b.name !== undefined) { const n = String(b.name).trim().slice(0, 100); if (!n) return res.status(400).json({ error: 'Give the project a name' }); add('name', n); }
+  for (const k of ['company', 'contact', 'phone', 'email', 'address', 'map_url', 'notes']) if (b[k] !== undefined) add(k, String(b[k] || '').trim().slice(0, 2000) || null);
+  if (b.value !== undefined) add('value', Math.max(0, +b.value || 0));
+  if (b.start_date !== undefined) add('start_date', pDate(b.start_date));
+  if (b.due_date !== undefined) add('due_date', pDate(b.due_date));
+  if (b.brand_id !== undefined && isSuper(req.user)) add('brand_id', +b.brand_id || null);
+  let stMsg = null;
+  if (b.status !== undefined) { if (!PSTAT.includes(b.status)) return res.status(400).json({ error: 'Choose a status' }); if (b.status !== p.status) { add('status', b.status); stMsg = b.status; } }
+  if (!set.length) return res.json({ ok: true });
+  await q(`UPDATE projects SET ${set.join(',')}, updated_at=now() WHERE id=$1`, val);
+  if (b.name) await q('UPDATE chats SET name=$2 WHERE id=$1', [p.chat_id, ('Project · ' + String(b.name).trim()).slice(0, 80)]);
+  if (stMsg) {
+    await sysMsg(p.chat_id, `${req.user.name} changed the status to “${stMsg}”`);
+    await projNote((await projTeam(p.id)).map(t => t.id).filter(x => x !== req.user.id), `📁 ${p.name}: ${stMsg}`, `${req.user.name} changed the project status to ${stMsg}`, p.id);
+  }
+  res.json({ ok: true });
+}));
+app.post('/api/projects/:id/team', wrap(async (req, res) => {
+  if (!isSuper(req.user)) return res.status(403).json({ error: 'Only the Super Admin can add or remove people' });
+  const p = await projFor(req.user, +req.params.id); if (!p) return res.status(404).json({ error: 'Not found' });
+  const b = req.body || {}, add = Array.isArray(b.add) ? b.add.map(Number) : [], rem = Array.isArray(b.remove) ? b.remove.map(Number) : [];
+  if (add.length) {
+    const ok = (await q('SELECT id, name FROM users WHERE active AND id=ANY($1) AND id NOT IN (SELECT user_id FROM chat_members WHERE chat_id=$2)', [add, p.chat_id])).rows;
+    for (const x of ok) await q(`INSERT INTO chat_members(chat_id,user_id,last_read) VALUES($1,$2,0) ON CONFLICT DO NOTHING`, [p.chat_id, x.id]);
+    if (ok.length) { await sysMsg(p.chat_id, `${req.user.name} added ${ok.map(x => x.name).join(', ')}`); await projNote(ok.map(x => x.id), '📁 Added to a project', `${req.user.name} added you to “${p.name}”`, p.id); }
+  }
+  if (rem.length) {
+    const gone = (await q(`DELETE FROM chat_members m USING users u WHERE u.id=m.user_id AND m.chat_id=$1 AND m.user_id=ANY($2) AND u.role<>$3 RETURNING u.name`, [p.chat_id, rem, SUPER])).rows;
+    if (gone.length) await sysMsg(p.chat_id, `${req.user.name} removed ${gone.map(x => x.name).join(', ')}`);
+  }
+  res.json({ ok: true, team: await projTeam(p.id) });
+}));
+app.delete('/api/projects/:id', superOnly, wrap(async (req, res) => {
+  const p = (await q('SELECT chat_id FROM projects WHERE id=$1', [req.params.id])).rows[0];
+  if (!p) return res.status(404).json({ error: 'Not found' });
+  await q('DELETE FROM chats WHERE id=$1', [p.chat_id]); await q('DELETE FROM projects WHERE id=$1', [req.params.id]); res.json({ ok: true });
+}));
+// tasks / checklist
+app.post('/api/projects/:id/tasks', wrap(async (req, res) => {
+  const p = await projFor(req.user, +req.params.id); if (!p) return res.status(404).json({ error: 'Not found' });
+  const b = req.body || {}, title = String(b.title || '').trim().slice(0, 300);
+  if (!title) return res.status(400).json({ error: 'Write the task' });
+  const team = (await projTeam(p.id)).map(t => t.id), to = team.includes(+b.assigned_to) ? +b.assigned_to : null;
+  const r = await q('INSERT INTO project_tasks(project_id,title,assigned_to,due_date,created_by) VALUES($1,$2,$3,$4,$5) RETURNING id', [p.id, title, to, pDate(b.due_date), req.user.id]);
+  await sysMsg(p.chat_id, `✅ ${req.user.name} added a task: ${title}${to ? ' → ' + ((await q('SELECT name FROM users WHERE id=$1', [to])).rows[0] || {}).name : ''}`);
+  if (to && to !== req.user.id) await projNote([to], `📌 New task · ${p.name}`, `${req.user.name}: ${title}`, p.id);
+  res.json({ id: r.rows[0].id });
+}));
+app.patch('/api/project-tasks/:id', wrap(async (req, res) => {
+  const t = (await q('SELECT * FROM project_tasks WHERE id=$1', [req.params.id])).rows[0]; if (!t) return res.status(404).json({ error: 'Not found' });
+  const p = await projFor(req.user, t.project_id); if (!p) return res.status(404).json({ error: 'Not found' });
+  const b = req.body || {};
+  if (b.done !== undefined) {
+    await q('UPDATE project_tasks SET done=$2, done_by=$3, done_at=CASE WHEN $2 THEN now() END WHERE id=$1', [t.id, !!b.done, b.done ? req.user.name : null]);
+    if (b.done && !t.done) {
+      await sysMsg(p.chat_id, `☑️ ${req.user.name} finished: ${t.title}`);
+      const who = [t.created_by].filter(x => x && x !== req.user.id); if (who.length) await projNote(who, `☑️ Task done · ${p.name}`, `${req.user.name} finished: ${t.title}`, p.id);
+    }
+  }
+  if (b.title !== undefined && String(b.title).trim()) await q('UPDATE project_tasks SET title=$2 WHERE id=$1', [t.id, String(b.title).trim().slice(0, 300)]);
+  res.json({ ok: true });
+}));
+app.delete('/api/project-tasks/:id', wrap(async (req, res) => {
+  const t = (await q('SELECT * FROM project_tasks WHERE id=$1', [req.params.id])).rows[0]; if (!t) return res.status(404).json({ error: 'Not found' });
+  if (!isSuper(req.user) && t.created_by !== req.user.id) return res.status(403).json({ error: 'Only the Super Admin or the person who added it can delete a task' });
+  await q('DELETE FROM project_tasks WHERE id=$1', [t.id]); res.json({ ok: true });
+}));
+// every photo and file shared in a chat (used by the project Files tab)
+app.get('/api/chats/:id/files', wrap(async (req, res) => {
+  const c = await chatFor(req.user, +req.params.id); if (!c) return res.status(404).json({ error: 'Not found' });
+  res.set('Cache-Control', 'no-store').json({ items: (await q(`SELECT id, kind, body, mime, fname, fsize, w, h, user_name, created_at FROM chat_messages WHERE chat_id=$1 AND kind IN ('image','file') AND NOT deleted ORDER BY id DESC`, [c.id])).rows });
+}));
+
+init().then(initChat).then(initProjects).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
   .catch(e => { console.error('DB init failed', e.message); process.exit(1); });

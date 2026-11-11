@@ -59,3 +59,23 @@ Profile → "Google Calendar · Siri & Google Assistant" → Set up.
 - Office holidays show as **Holiday** in attendance, so no one is marked absent.
 - Everyone gets a wish at 8 am on the day, and a reminder after 5 pm the day before an office holiday.
 - The first time each person opens the app each day, they see a short greeting: the festival wish, work anniversary, holiday notice, a thought for the day, and their tasks for the day.
+
+## Lead discussion
+- Every lead has a **Discussion** inside its pop-up for the Super Admin (MD) and the staff who created the lead or are assigned to it. You can send messages, voice messages and photos there.
+- Each message alerts the others on the lead. Tapping the alert opens the lead at the discussion. Lead discussions also appear in **Chat**.
+- Voice notes recorded in the New lead form, and earlier voice notes on a lead, appear in that lead's discussion.
+
+## Projects (Version 10)
+- **Projects** menu (all except support staff). Open a lead and tap **📁 Convert to project**. The lead's details and its discussion move into the project. The Super Admin can also start a blank project.
+- Each project has:
+  - **Chat** with messages, @tags, voice messages, photos and **files** (PDF, Word, Excel and so on, up to 10 MB).
+  - **Details**: customer, call, WhatsApp, map, value, dates and the original lead data.
+  - **Tasks**: a checklist with an assigned person and a due date.
+  - **Files**: every photo and document shared in the chat.
+  - **Team**.
+- Only the **Super Admin** adds or removes people (admin staff, technicians, anyone). Everyone in the team is notified about new messages, tasks and status changes.
+- Status: Planning → In Progress → On Hold → Completed / Cancelled. The Super Admin and admin staff can change it.
+- Files can now be sent in every chat, not only in projects.
+
+## Brand for technicians and support staff
+- When adding or editing a team member, technicians and support staff now have a **Brand** (their home brand, used for salary and lists). Any brand can still allocate a technician.
