@@ -465,6 +465,15 @@ body.dark .att-today{background:#1d1a12;border:1px solid rgba(240,189,74,.25)}
 
 .sayb{float:right;margin:4px 0 0 10px}.saybox{display:flex;flex-direction:column;align-items:center;gap:6px;padding:8px 0}
 .steps2{margin:6px 0 10px 18px;padding:0;color:var(--dim);font-size:14px;line-height:1.6}.steps2 b{color:var(--text)}
+
+.mdgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}.mdgrid.two{margin:16px 0}
+.mdc{--c:var(--text);background:var(--s2);border-radius:20px;padding:12px 14px;border-top:3px solid var(--c)}.mdc .bp{padding:6px 0}
+.mdh{display:flex;align-items:baseline;gap:8px;margin-bottom:4px}.mdh b{font-size:24px;color:var(--c);line-height:1}.mdh span{font-weight:700;font-size:13px;letter-spacing:.04em;text-transform:uppercase;color:var(--dim)}
+.mdk{margin:16px 0}.mdk .kpi .v{font-size:28px}
+.dchart{display:flex;gap:3px;align-items:flex-end;height:150px;padding-top:6px;overflow-x:auto}.dc{flex:1 0 14px;display:flex;flex-direction:column;align-items:center;gap:4px;height:100%}
+.dcb{flex:1;width:100%;position:relative;background:var(--s2);border-radius:6px;overflow:hidden}.dcb i,.dcb em{position:absolute;left:0;right:0;bottom:0;background:#1f9255;border-radius:6px 6px 0 0}.dcb em{background:#d6322c;opacity:.85}
+.dc small{font-size:10px;color:var(--faint)}.dc.sun .dcb{background:repeating-linear-gradient(45deg,var(--s2),var(--s2) 3px,transparent 3px,transparent 6px)}.dc.fut{opacity:.35}
+.mdt td{vertical-align:middle}.mdt small{font-size:11.5px}
 </style></head><body>
 <div class="shell">
 <aside class="sidebar"><button class="rl" title="Home" onclick="nav(menu()[0][0])"><img src="/mark.png" alt="Rago"></button><div class="rdiv"></div><nav class="nav" id="snav"></nav><div class="rfoot"><button class="ni" id="sset" title="Profile" onclick="nav('me')"></button></div></aside>
@@ -527,7 +536,7 @@ function nav(v,t){if(!menu().some(m=>m[0]==v))v=menu()[0][0];view=v;if(t)tab=t;
  $('sset').className='ni'+(v=='me'?' on':'');$('sset').innerHTML=ic('cog',22);
  bottomNav(v);
  $('avt').innerHTML=ME.photo_v?`<img src="/api/users/${ME.id}/photo?v=${ME.photo_v}" alt="">`:esc(ini(ME.name));$('gsb').style.display=ME.role=='Technician'?'none':'';
- const canAdd=v=='todo'||v=='att'||(v=='leads'?can('leads'):can('service_create'))&&['dash','services','customers','leads'].includes(v);$('topbtn').style.display=canAdd?'':'none';$('fab').style.display=canAdd?'':'none';$('fab').innerHTML=ic(v=='todo'?'mic':'plus',26);$('fab').setAttribute('aria-label',v=='todo'?'Record voice message':v=='att'?'Apply leave or permission':'Create new');
+ const canAdd=v=='todo'||(v=='att'&&!SUP())||(v=='leads'?can('leads'):can('service_create'))&&['dash','services','customers','leads'].includes(v);$('topbtn').style.display=canAdd?'':'none';$('fab').style.display=canAdd?'':'none';$('fab').innerHTML=ic(v=='todo'?'mic':'plus',26);$('fab').setAttribute('aria-label',v=='todo'?'Record voice message':v=='att'?'Apply leave or permission':'Create new');
  $('mtitle').innerHTML=`<img class="blogo" src="/mark.png" alt="Rago"><span>${menu().find(n=>n[0]==v)[1]}</span>`;
  $('page').style.animation='none';$('page').offsetHeight;$('page').style.animation='';
  ({tdash:TDash,dash:Dash,services:Services,customers:Customers,team:Team,leads:Leads,jobs:Jobs,me:Me,todo:Todo,att:Att,pay:Pay})[v]();scrollTo(0,0)}
@@ -793,7 +802,7 @@ const officePanel=()=>{const o=M.office||{};return `<div class="panel"><div clas
 let OFG=null;function ofGPS(b){b.textContent='Getting location…';getGPS().then(g=>{b.textContent='📍 Use my current location';if(!g)return alert('Could not get location. Turn on GPS.');OFG=g;$('ofU').value=g.lat.toFixed(7)+', '+g.lng.toFixed(7)})}
 async function saveOffice(){const o=M.office||{},u=$('ofU').value.trim(),b={name:$('ofN').value,radius:$('ofR').value,late:$('ofL').value};if(u)b.map_url=u;else{b.lat=o.lat;b.lng=o.lng}
  const r=await api('/api/attendance/office',{m:'POST',b});if(r.error){$('ofE').textContent=r.error;return}toast('Office settings saved ✓');Me()}
-const APPV='Version 4 · 11 Nov 2026';
+const APPV='Version 5 · 11 Nov 2026';
 function shrinkImg(file,size=320){return new Promise((ok,no)=>{const r=new FileReader();r.onerror=no;r.onload=()=>{const im=new Image();im.onerror=()=>no(new Error('bad image'));im.onload=()=>{const s=Math.min(im.width,im.height),c=document.createElement('canvas');c.width=c.height=size;
  c.getContext('2d').drawImage(im,(im.width-s)/2,(im.height-s)/2,s,s,0,0,size,size);ok(c.toDataURL('image/jpeg',.85))};im.src=r.result};r.readAsDataURL(file)})}
 async function upPhoto(id,inp){const f=inp.files&&inp.files[0];if(!f)return;toast('Uploading photo…');let data;try{data=await shrinkImg(f)}catch(e){return toast('Could not read that image')}
@@ -1255,7 +1264,7 @@ const istClock=()=>{const d=new Date(),o={timeZone:'Asia/Kolkata'};return d.toLo
 const hm=h=>{const m=Math.round(h*60);return Math.floor(m/60)+'h '+String(m%60).padStart(2,'0')+'m'};
 const openAttLink=k=>{ATab=k=='leave'&&canAtt()?'req':'me';AREQ='Pending';AU=null;closeM();nav('att')};
 const getGPS=onUpd=>bestGPS(onUpd,{want:30,soft:5000,max:12000});
-async function Att(){if(!AM)AM=ymd(new Date()).slice(0,7);const boss=canAtt();if(!boss&&ATab!='me')ATab='me';
+async function Att(){if(!AM)AM=ymd(new Date()).slice(0,7);if(SUP())return AttMD();const boss=canAtt();if(!boss&&ATab!='me')ATab='me';
  const [t,pend]=await Promise.all([api('/api/attendance/today'),boss?api('/api/leave?all=1&status=Pending'):Promise.resolve([])]);AT=t;const pc=Array.isArray(pend)?pend.filter(r=>r.user_id!=ME.id||SUP()).length:0;
  const body=ATab=='team'?await attTeam():ATab=='req'?await attReqs():await attCal(AU||ME.id);
  const inn=!!t.check_in,out=!!t.check_out,worked=inn?hrs2(t.check_in,t.check_out||new Date()):0;
@@ -1370,6 +1379,40 @@ async function saveLeave(){const P=LVK=='Permission',b={kind:LVK,from_date:$('lf
  if(!b.from_date){$('lerr').textContent='Choose the date';return}if(!b.reason){$('lerr').textContent='Write the reason';return}
  $('lsb').disabled=true;const r=await api('/api/leave',{m:'POST',b});if(r.error){$('lsb').disabled=false;$('lerr').textContent=r.error;return}
  closeM();toast('Sent for approval ✓');AM=b.from_date.slice(0,7);ATab='me';AU=null;if(view=='att')Att();else nav('att')}
+/* ---------- MD (Super Admin) attendance overview — no check-in for the MD, maximum information instead ---------- */
+let MDS='pct';
+async function AttMD(){if(!['md','team','req'].includes(ATab))ATab='md';
+ const tabs=async()=>{const pend=await api('/api/leave?all=1&status=Pending');const pc=Array.isArray(pend)?pend.length:0;return `<div class="seg" style="max-width:560px">${[['md','MD overview'],['team','Team report'],['req','Requests'+(pc?` (${pc})`:'')]].map(([k,l])=>`<button class="${ATab==k&&!AU?'on':''}" onclick="ATab='${k}';AU=null;Att()">${l}</button>`).join('')}</div>`};
+ let body;if(AU)body=await attCal(AU);else if(ATab=='team')body=await attTeam();else if(ATab=='req')body=await attReqs();else body=await mdBody();
+ $('page').innerHTML=head('Attendance','MD overview — the whole team at a glance.')+await tabs()+body}
+async function mdBody(){const d=await api('/api/attendance/md?month='+AM);if(d.error)return `<div class="empty">${esc(d.error)}</div>`;window._MD=d;const isNow=AM==d.today.slice(0,7),TL=d.today_list,t=d.totals;
+ const grp=k=>TL.filter(k),inn=grp(x=>x.in&&!x.late),late=grp(x=>x.in&&x.late),lv=grp(x=>x.code=='leave'),pm=grp(x=>x.perm.length),notIn=grp(x=>x.code=='today'&&!x.pending),off=grp(x=>['off','holiday','absent'].includes(x.code)&&!x.in);
+ const P=(u,ex)=>`<div class="bp" onclick="AU=${u.user_id||u.id};Att()" style="cursor:pointer">${avH(u.user_id||u.id,u.name,u.photo_v,'sm')}<div class="sp" style="min-width:0"><b>${esc(u.name)}</b><small>${ex}</small></div></div>`;
+ const box=(t,c,list,f,empty)=>`<div class="mdc" style="--c:${c}"><div class="mdh"><b>${list.length}</b><span>${t}</span></div>${list.map(f).join('')||`<div class="dim" style="font-size:13px">${empty}</div>`}</div>`;
+ const fieldIds=new Set(d.field.map(r=>r.user_id));
+ const today=isNow?`<div class="panel"><div class="pt"><h3>Today · ${dW(d.today)}</h3><span class="dim" id="mdclk">${istClock()}</span></div>
+  <div class="mdgrid">
+   ${box('In on time','#1f9255',inn,u=>P(u,`In ${u.in}${u.out?' · Out '+u.out:''}${u.in_dist!=null?' · '+distT(u.in_dist):''}`),'Nobody yet')}
+   ${box('Late in','#d6322c',late,u=>P(u,`In <b style="color:#d6322c;display:inline">${u.in}</b> (after ${t12(d.office.late)})`),'No one late 👍')}
+   ${box('At customer site','#0f8b8d',d.field,r=>P(r,`${esc(r.customer||r.place||'')} · ${[r.from_time&&'in '+t12(r.from_time),r.to_time&&'out '+t12(r.to_time)].filter(Boolean).join(' · ')} · ${r.status=='Pending'?'<span style="color:var(--warn)">waiting</span>':'approved'}`),'No field check-ins')}
+   ${box('On leave','#7c4dff',lv,u=>P(u,esc(u.leave||'Leave')),'Nobody on leave')}
+   ${box('Permission','#2f6fe4',pm,u=>P(u,u.perm.map(p=>`${p.session}${p.from?' '+t12(p.from)+(p.to?'–'+t12(p.to):''):''}`).join(', ')),'No permissions')}
+   ${box('Not in yet','#a86a00',notIn.filter(u=>!fieldIds.has(u.id)),u=>P(u,RL[u.role]||u.role),'Everyone is accounted for ✓')}
+  </div></div>`:'';
+ const K=(l,v,c,s)=>`<div class="kpi"><div class="l">${l}</div><div class="v" style="color:${c||'inherit'}">${v}</div>${s?`<div class="s">${s}</div>`:''}</div>`;
+ const kp=`<div class="kpis mdk">${K('Attendance',t.pct==null?'—':t.pct+'%','#1f9255',`${d.staff} people · ${mLabel(AM)}`)}${K('Late arrivals',t.late,'#d6322c')}${K('Absent days',t.absent,'#d6322c')}${K('Leave days',t.leave,'#7c4dff')}${K('Permissions',t.perm,'#2f6fe4')}${K('Hours worked',Math.round(t.hours),'',`${d.rows.length?(t.hours/Math.max(1,d.rows.reduce((a,r)=>a+r.present,0))).toFixed(1):0} h per present day`)}</div>`;
+ const mx=Math.max(1,...d.daily.map(x=>x.staff));
+ const chart=`<div class="panel"><div class="pt"><h3>Daily attendance · ${mLabel(AM)}</h3><span class="dim">present of team</span></div><div class="dchart">${d.daily.map(x=>{const sun=new Date(x.d+'T12:00:00').getDay()==0,fut=x.d>d.today;return `<div class="dc ${sun?'sun':''} ${fut?'fut':''}" title="${dW(x.d)}: ${x.present} present, ${x.late} late, ${x.leave} on leave, ${x.absent} absent"><div class="dcb"><i style="height:${x.staff?x.present/mx*100:0}%"></i>${x.late?`<em style="height:${x.late/mx*100}%"></em>`:''}</div><small>${+x.d.slice(8)}</small></div>`}).join('')}</div><div class="legend"><span><i style="--c:#1f9255" class="c-present"></i>Present</span><span><i style="--c:#d6322c" class="c-absent"></i>Late (part of present)</span></div></div>`;
+ const sorted=[...d.rows].sort(MDS=='late'?(a,b)=>b.late-a.late:MDS=='absent'?(a,b)=>b.absent-a.absent:MDS=='hours'?(a,b)=>b.hours-a.hours:MDS=='name'?(a,b)=>a.name.localeCompare(b.name):(a,b)=>(b.pct??-1)-(a.pct??-1));
+ const pc=v=>v==null?'—':`<b style="color:${v>=90?'#1f9255':v>=75?'#c79a2b':'#d6322c'}">${v}%</b>`;
+ const table=`<div class="panel"><div class="pt"><h3>Team ranking</h3><div class="row" style="padding:0;gap:6px"><select onchange="MDS=this.value;Att()" style="width:auto">${[['pct','Best attendance'],['late','Most late'],['absent','Most absent'],['hours','Most hours'],['name','Name']].map(([k,l])=>`<option value="${k}" ${MDS==k?'selected':''}>${l}</option>`).join('')}</select><button class="btn g sm" onclick="expMD()">⬇ CSV</button></div></div>
+  <div class="tw2"><table class="alog mdt"><thead><tr><th>Person</th><th>Attendance</th><th>Present</th><th>Absent</th><th>Leave</th><th>Late</th><th>Perm.</th><th>Avg in</th><th>Avg hrs</th></tr></thead><tbody>${sorted.map(r=>`<tr onclick="AU=${r.id};Att()"><td><div class="row" style="padding:0;gap:8px">${avH(r.id,r.name,r.photo_v,'sm')}<div><b>${esc(r.name)}</b><small class="dim" style="display:block">${esc(RL[r.role]||r.role)}${r.brand?' · '+esc(r.brand):''}</small></div></div></td><td>${pc(r.pct)}</td><td>${r.present}${r.half?' +'+r.half+'½':''}/${r.working}</td><td>${r.absent||'—'}</td><td>${r.leave||'—'}</td><td class="${r.late?'red':''}">${r.late||'—'}</td><td>${r.perm_m+r.perm_e||'—'}</td><td>${r.avg_in?t12(r.avg_in):'—'}</td><td>${r.avg_hours||'—'}</td></tr>`).join('')||'<tr><td colspan="9" class="dim">No team members yet</td></tr>'}</tbody></table></div></div>`;
+ const top=(t,l,f)=>l.length?`<div class="mdc"><div class="mdh"><span>${t}</span></div>${l.map(f).join('')}</div>`:'';
+ const watch=`<div class="mdgrid two">${top('⚠️ Most late this month',d.rows.filter(r=>r.late).sort((a,b)=>b.late-a.late).slice(0,5),r=>P(r,`${r.late} late day${r.late==1?'':'s'}${r.avg_in?' · avg in '+t12(r.avg_in):''}`))}${top('🚫 Most absent',d.rows.filter(r=>r.absent).sort((a,b)=>b.absent-a.absent).slice(0,5),r=>P(r,`${r.absent} absent day${r.absent==1?'':'s'}`))}${top('📅 Coming up (next 14 days)',d.upcoming,r=>P(r,`${r.kind=='Leave'?'🌴 '+esc(r.leave_type||'Leave'):(r.session=='Morning'?'🌅':'🌇')+' '+r.session+' permission'} · ${rqWhen(r)}`))}</div>`;
+ const pend=d.pending.length?sect('Waiting for your approval',`${d.pending.length}`,d.pending.map(r=>reqCard(r,false)).join('')):'';
+ setTimeout(()=>{clearInterval(_aclk);_aclk=setInterval(()=>{const c=$('mdclk');if(!c)return clearInterval(_aclk);c.textContent=istClock()},1000)},50);
+ return `${mNav('Att()')}${today}${pend}${kp}${chart}${watch}${table}`}
+function expMD(){const d=window._MD;if(!d)return;dlCSV(`attendance-md-${d.month}.csv`,[['Name','Role','Brand','Attendance %','Working days','Present','Half days','Absent','Leave','Late','Morning perm','Evening perm','Avg check-in','Avg hours/day','Total hours'],...d.rows.map(r=>[r.name,RL[r.role]||r.role,r.brand||'',r.pct??'',r.working,r.present,r.half,r.absent,r.leave,r.late,r.perm_m,r.perm_e,r.avg_in||'',r.avg_hours,r.hours])]);toast('Exported')}
 /* dashboard: today's attendance board for Super Admin / Admin staff */
 async function attBoard(){if(!canAtt())return '';const b=await api('/api/attendance/board').catch(()=>null);if(!b||b.error)return '';
  const P=(u,extra)=>`<div class="bp">${avH(u.user_id||u.id,u.name,u.photo_v,'sm')}<div class="sp" style="min-width:0"><b>${esc(u.name)}</b><small>${extra}</small></div></div>`;

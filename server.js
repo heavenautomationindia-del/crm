@@ -1442,6 +1442,35 @@ app.get('/api/attendance/board', attNeed, wrap(async (req, res) => {
   const notIn = sunday ? [] : staff.filter(u => !(att[u.id] && att[u.id].check_in) && !away.has(u.id) && !(att[u.id] && ['Week Off', 'Holiday', 'Absent'].includes(att[u.id].status)));
   res.set('Cache-Control', 'no-store').json({ today, total: staff.length, inn, notIn, leave, perm, pending, late: off.late });
 }));
+// MD (Super Admin) overview: everything about the team's attendance on one screen
+app.get('/api/attendance/md', superOnly, wrap(async (req, res) => {
+  const today = await todayIST(), m = isMonth(req.query.month) ? req.query.month : today.slice(0, 7), start = await attStart(), off = await office();
+  const users = (await q(`SELECT u.id,u.name,u.role,u.created_at,u.photo_v,b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.active AND u.role<>$1 ORDER BY u.name`, [SUPER])).rows;
+  const days = daysOf(m), daily = Object.fromEntries(days.map(d => [d, { d, present: 0, late: 0, leave: 0, perm: 0, absent: 0, staff: 0 }]));
+  const rows = [], todayList = [];
+  for (const u of users) {
+    const x = await monthFor(u, m, today, start, off), ins = x.days.filter(d => d.in24).map(d => +d.in24.slice(0, 2) * 60 + +d.in24.slice(3));
+    for (const d of x.days) {
+      const D = daily[d.d]; if (!d.counts || d.sun) continue; D.staff++;
+      if (['present', 'perm-m', 'perm-e', 'perm-both', 'half'].includes(d.code) && (d.in || d.status)) D.present++;
+      if (d.late) D.late++; if (d.code === 'leave') D.leave++; if (d.perm.length) D.perm++; if (d.code === 'absent') D.absent++;
+    }
+    const S = x.summary, eff = S.present + S.half * 0.5, pct = S.working ? Math.round(eff / S.working * 100) : null, worked = x.days.filter(d => d.hours > 0);
+    const avgIn = ins.length ? Math.round(ins.reduce((a, b) => a + b, 0) / ins.length) : null;
+    rows.push({ id: u.id, name: u.name, role: u.role, brand: u.brand, photo_v: u.photo_v, ...S, pct,
+      avg_in: avgIn == null ? null : `${String(Math.floor(avgIn / 60)).padStart(2, '0')}:${String(avgIn % 60).padStart(2, '0')}`,
+      avg_hours: worked.length ? +(worked.reduce((a, d) => a + d.hours, 0) / worked.length).toFixed(1) : 0 });
+    const td = x.days.find(d => d.d === today);
+    if (td && m === today.slice(0, 7)) todayList.push({ id: u.id, name: u.name, role: u.role, brand: u.brand, photo_v: u.photo_v, code: td.code, in: td.in, out: td.out, late: td.late, hours: td.hours, leave: td.leave, perm: td.perm, in_dist: td.in_dist, pending: td.pending });
+  }
+  const field = (await q(`${LSELR} WHERE r.kind='Attendance' AND r.from_date=$1 AND r.status IN ('Pending','Approved') ORDER BY r.created_at DESC`, [today])).rows;
+  const pending = (await q(`${LSELR} WHERE r.status='Pending' ORDER BY r.created_at LIMIT 30`)).rows;
+  const upcoming = (await q(`${LSELR} WHERE r.status='Approved' AND r.kind IN ('Leave','Permission') AND r.from_date>$1 AND r.from_date<=$1::date + 14 ORDER BY r.from_date LIMIT 30`, [today])).rows;
+  const tot = rows.reduce((a, r) => ({ working: a.working + r.working, eff: a.eff + r.present + r.half * 0.5, late: a.late + r.late, leave: a.leave + r.leave, perm: a.perm + r.perm_m + r.perm_e, absent: a.absent + r.absent, hours: a.hours + r.hours }), { working: 0, eff: 0, late: 0, leave: 0, perm: 0, absent: 0, hours: 0 });
+  res.set('Cache-Control', 'no-store').json({ month: m, today, office: off, staff: users.length, rows, today_list: todayList, daily: Object.values(daily), field, pending, upcoming,
+    totals: { ...tot, hours: +tot.hours.toFixed(1), pct: tot.working ? Math.round(tot.eff / tot.working * 100) : null } });
+}));
+
 app.post('/api/attendance/mark', attNeed, wrap(async (req, res) => {
   const b = req.body || {}, uid = +b.user_id;
   if (!isDate(b.date)) return res.status(400).json({ error: 'Choose the date' });
