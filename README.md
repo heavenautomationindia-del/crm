@@ -79,3 +79,9 @@ Profile → "Google Calendar · Siri & Google Assistant" → Set up.
 
 ## Brand for technicians and support staff
 - When adding or editing a team member, technicians and support staff now have a **Brand** (their home brand, used for salary and lists). Any brand can still allocate a technician.
+
+## Titles and company names
+- New lead and New service both have a **title** (Mr. / Ms. / Mrs. / Miss / Dr. / M/s.) next to the name. New forms start with **Mr.**
+- New service has a **Company name** for new customers. For an existing customer, the company can be added or changed when you create the ticket.
+- The company shows on ticket cards, on the ticket, and on the Customers list. Customers can be searched by company.
+- When a lead is won, its company is kept on the customer.

@@ -286,7 +286,8 @@ async function leadCustomer(l, brandFallback) {
   let c; if (l.customer_id) c = (await q('SELECT * FROM customers WHERE id=$1', [l.customer_id])).rows[0];
   const br = l.brand_id || brandFallback || null;
   if (!c && digits(l.phone).length >= 7) c = (await q(`SELECT * FROM customers WHERE regexp_replace(phone,'[^0-9]','','g')=$1 AND (brand_id IS NOT DISTINCT FROM $2 OR brand_id IS NULL) ORDER BY (brand_id IS NOT DISTINCT FROM $2) DESC LIMIT 1`, [digits(l.phone), br])).rows[0];
-  if (!c) c = (await q('INSERT INTO customers(name,phone,email,address,brand_id,lat,lng,map_url) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *', [l.company ? `${l.name} (${l.company})` : l.name, l.phone, l.email, l.address, br, l.lat ?? null, l.lng ?? null, l.map_url || null])).rows[0];
+  if (!c) c = (await q('INSERT INTO customers(name,phone,email,address,brand_id,lat,lng,map_url,company) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *', [l.name, l.phone, l.email, l.address, br, l.lat ?? null, l.lng ?? null, l.map_url || null, l.company || null])).rows[0];
+  else if (l.company && !c.company) await q('UPDATE customers SET company=$1 WHERE id=$2', [l.company, c.id]);
   else if (!c.brand_id && br) await q('UPDATE customers SET brand_id=$1 WHERE id=$2', [br, c.id]);
   if (l.customer_id !== c.id) await q('UPDATE leads SET customer_id=$1 WHERE id=$2', [c.id, l.id]);
   return c;
@@ -421,6 +422,7 @@ async function init() {
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION;
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION;
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS map_url TEXT;
+  ALTER TABLE customers ADD COLUMN IF NOT EXISTS company TEXT;
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS location_by TEXT;
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS location_on TIMESTAMPTZ;
   CREATE TABLE IF NOT EXISTS notifications (id SERIAL PRIMARY KEY, user_id INT NOT NULL, title TEXT, body TEXT, service_id INT, read BOOLEAN DEFAULT false, created_at TIMESTAMPTZ DEFAULT now());
@@ -599,7 +601,7 @@ app.delete('/api/users/:id', superOnly, wrap(async (req, res) => {
 }));
 
 // ---------- services ----------
-const SELECT = `SELECT s.*, c.name customer, c.phone, c.email, c.address, c.city, c.lat, c.lng, c.map_url, c.location_by, c.location_on, t.name technician, h.name helper,
+const SELECT = `SELECT s.*, c.name customer, c.company customer_company, c.phone, c.email, c.address, c.city, c.lat, c.lng, c.map_url, c.location_by, c.location_on, t.name technician, h.name helper,
   COALESCE(pp.given,0) given, br.name brand
   FROM services s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN brands br ON br.id=s.brand_id
   LEFT JOIN (SELECT service_id, SUM(amount) given FROM payments WHERE approval<>'Rejected' GROUP BY service_id) pp ON pp.service_id=s.id
@@ -647,7 +649,7 @@ const mine = async (req, res) => {           // loads a service the caller may t
 app.get('/api/customers', need('customers', 'service_create'), wrap(async (req, res) => {
   const p = ['%' + (req.query.q || '') + '%'], sc = custScope(req.user, p);
   res.json((await q(`SELECT c.*, b.name brand, (SELECT COUNT(*)::int FROM services s WHERE s.customer_id=c.id) tickets FROM customers c LEFT JOIN brands b ON b.id=c.brand_id
-    WHERE (c.name ILIKE $1 OR c.phone ILIKE $1) AND ${sc} ORDER BY c.name LIMIT 100`, p)).rows);
+    WHERE (c.name ILIKE $1 OR c.phone ILIKE $1 OR c.company ILIKE $1) AND ${sc} ORDER BY c.name LIMIT 100`, p)).rows);
 }));
 // customer picker for attendance requests (everyone): technicians see customers of their jobs (open jobs first)
 app.get('/api/customers/pick', wrap(async (req, res) => {
@@ -746,14 +748,15 @@ app.post('/api/services', need('service_create'), wrap(async (req, res) => {
     const cp = [+cid], csc = custScope(req.user, cp);
     if (!(await q(`SELECT 1 FROM customers c WHERE c.id=$1 AND ${csc}`, cp)).rows.length) return res.status(400).json({ error: 'Customer not found' });
     await q('UPDATE customers SET brand_id=COALESCE(brand_id,$2) WHERE id=$1', [+cid, brandId]);
+    if (b.company !== undefined && String(b.company || '').trim()) await q('UPDATE customers SET company=$2 WHERE id=$1', [+cid, String(b.company).trim().slice(0, 120)]);
   }
   if (!cid) {
     b.name = String(b.name || '').trim(); b.phone = String(b.phone || '').trim();
     if (!b.name) return res.status(400).json({ error: 'Customer name is required' });
     if (digits(b.phone).length < 7) return res.status(400).json({ error: 'Enter a valid phone number' });
     const m = /@(-?\d+\.\d+),(-?\d+\.\d+)|[?&](?:q|ll|query)=(-?\d+\.\d+),(-?\d+\.\d+)/.exec(b.map_url || '');
-    cid = (await q('INSERT INTO customers(name,phone,email,address,map_url,lat,lng,brand_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id',
-      [b.name, b.phone, b.email, b.address, b.map_url || null, m ? +(m[1] || m[3]) : null, m ? +(m[2] || m[4]) : null, brandId])).rows[0].id;
+    cid = (await q('INSERT INTO customers(name,phone,email,address,map_url,lat,lng,brand_id,company) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id',
+      [b.name, b.phone, b.email, b.address, b.map_url || null, m ? +(m[1] || m[3]) : null, m ? +(m[2] || m[4]) : null, brandId, String(b.company || '').trim().slice(0, 120) || null])).rows[0].id;
   }
   const ticket = 100000 + crypto.randomInt(899999);
   const r = await q(`INSERT INTO services(ticket_no,customer_id,product,request_details,service_type,visit_type,charges_applied,kind,brand_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
@@ -852,13 +855,12 @@ app.post('/api/services/:id/done', techOnly, wrap(async (req, res) => {
     if (!['Cash', 'Bank'].includes(mode)) return res.status(400).json({ error: 'Choose how the customer paid: Cash or Bank' });
     amt = money(b.amount);
     if (amt <= 0) return res.status(400).json({ error: mode === 'Cash' ? 'Enter the cash amount received' : 'Enter the amount transferred' });
-    if (mode === 'Bank' && !(await q(`SELECT 1 FROM service_photos WHERE service_id=$1 AND stage='Payment' LIMIT 1`, [s.id])).rows.length)
-      return res.status(400).json({ error: 'Upload the bank transfer screenshot for confirmation' });
   }
   const cash = mode === 'Cash' ? amt : 0, bank = mode === 'Bank' ? amt : 0;
   await q(`UPDATE services SET status='Awaiting Payment', work_status='Done', work_done_on=now(), completion_note=$2, pending_reason=NULL, amount_received=amount_received+$3, billing_type=$4, pay_mode=$5, bank_amount=$6 WHERE id=$1`,
     [s.id, b.note || null, cash, billing, mode, bank]);
-  const what = billing === 'Free' ? 'Free service' : mode === 'Cash' ? `Paid · Cash ₹${amt}` : `Paid · Bank ₹${amt} (screenshot attached)`;
+  const shot = mode === 'Bank' && (await q(`SELECT 1 FROM service_photos WHERE service_id=$1 AND stage='Payment' LIMIT 1`, [s.id])).rows.length > 0;
+  const what = billing === 'Free' ? 'Free service' : mode === 'Cash' ? `Paid · Cash ₹${amt}` : `Paid · Bank ₹${amt}${shot ? ' (screenshot attached)' : ' (no screenshot)'}`;
   await log(s.id, req.user.name, 'Work done' + (b.note ? ': ' + b.note : '') + ' · ' + what);
   const adminMsg = billing === 'Free' ? `${req.user.name} finished #${s.ticket_no} as a FREE service. Confirm to close.`
     : mode === 'Cash' ? `${req.user.name} finished #${s.ticket_no}. Cash collected ₹${Number(s.amount_received) + cash} in total. Confirm once handed over.`
