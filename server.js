@@ -84,7 +84,7 @@ const auth = wrap(async (req, res, next) => {
   req.user = u; next();
 });
 const me = u => ({ id: u.id, name: u.name, role: u.role, username: u.username, brand_id: u.brand_id || null, brand: u.brand_name || null, photo_v: u.photo_v || 0, permissions: isSuper(u) ? ALL_KEYS : u.permissions });
-const pub = u => { const { password_hash, photo, photo_mime, ...r } = u; return r; };
+const pub = u => { const { password_hash, photo, photo_mime, cal_token, ...r } = u; return r; };
 
 const tries = {};
 app.post('/api/login', wrap(async (req, res) => {
@@ -214,6 +214,7 @@ app.post('/api/leads/bulk', need('leads'), wrap(async (req, res) => {
   await q(`UPDATE leads SET ${keys.map((k, i) => `${k}=$${i + 1}`).join(',')}, updated_at=now()${o.stage ? ', last_contact=now()' : ''} WHERE id=ANY($${keys.length + 1}::int[])`, [...keys.map(k => o[k]), ids]);
   const txt = [o.stage && `Stage → ${o.stage}`, o.priority && `Priority → ${o.priority}`, 'assigned_to' in o && `Agent → ${await userName(o.assigned_to)}`].filter(Boolean).join(', ');
   await q('INSERT INTO lead_activity(lead_id,by_name,text) SELECT id,$1::text,$2::text FROM leads WHERE id=ANY($3::int[])', [req.user.name, txt, ids]);
+  if (o.stage === 'Closed Won') for (const l of (await q('SELECT * FROM leads WHERE id=ANY($1::int[])', [ids])).rows) await leadCustomer(l, req.user.brand_id);
   if (o.assigned_to && o.assigned_to !== req.user.id) notify([o.assigned_to], 'Leads assigned', `${ids.length} lead(s) were assigned to you`, null).catch(() => {});
   res.json({ ok: true });
 }));
@@ -264,6 +265,7 @@ app.patch('/api/leads/:id', need('leads'), wrap(async (req, res) => {
   if ('value' in o && Number(o.value) !== Number(cur.value)) ch.push(`Value: ₹${Number(cur.value)} → ₹${Number(o.value)}`);
   if ('map_url' in lf) ch.push(lf.map_url ? `Site location pinned by ${req.user.name}` : 'Site location removed');
   if (!ch.length && keys.some(k => !['stage', 'priority', 'assigned_to', 'follow_up', 'value', 'lost_reason', 'lat', 'lng', 'map_url', 'location_by', 'location_on'].includes(k))) ch.push('Details updated');
+  if (stageChanged && o.stage === 'Closed Won') { const c = await leadCustomer({ ...cur, ...o }, req.user.brand_id); ch.push(`Added to customers (${c.name})`); }
   if (ch.length) await leadLog(cur.id, req.user.name, ch.join(' · '));
   if ('assigned_to' in o && o.assigned_to && o.assigned_to !== cur.assigned_to && o.assigned_to !== req.user.id) notify([o.assigned_to], 'Lead assigned to you', cur.name, null).catch(() => {});
   res.json({ ok: true });
@@ -278,11 +280,19 @@ app.post('/api/leads/:id/note', need('leads'), wrap(async (req, res) => {
   await leadLog(r.rows[0].id, req.user.name, t); res.json({ ok: true });
 }));
 
+// a won lead becomes a service customer (same brand) — reused if the phone already exists
+async function leadCustomer(l, brandFallback) {
+  let c; if (l.customer_id) c = (await q('SELECT * FROM customers WHERE id=$1', [l.customer_id])).rows[0];
+  const br = l.brand_id || brandFallback || null;
+  if (!c && digits(l.phone).length >= 7) c = (await q(`SELECT * FROM customers WHERE regexp_replace(phone,'[^0-9]','','g')=$1 AND (brand_id IS NOT DISTINCT FROM $2 OR brand_id IS NULL) ORDER BY (brand_id IS NOT DISTINCT FROM $2) DESC LIMIT 1`, [digits(l.phone), br])).rows[0];
+  if (!c) c = (await q('INSERT INTO customers(name,phone,email,address,brand_id,lat,lng,map_url) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *', [l.company ? `${l.name} (${l.company})` : l.name, l.phone, l.email, l.address, br, l.lat ?? null, l.lng ?? null, l.map_url || null])).rows[0];
+  else if (!c.brand_id && br) await q('UPDATE customers SET brand_id=$1 WHERE id=$2', [br, c.id]);
+  if (l.customer_id !== c.id) await q('UPDATE leads SET customer_id=$1 WHERE id=$2', [c.id, l.id]);
+  return c;
+}
 app.post('/api/leads/:id/convert', need('leads'), wrap(async (req, res) => {
   const l = await leadOK(req, res, req.params.id); if (!l) return;
-  let c; if (l.customer_id) c = (await q('SELECT * FROM customers WHERE id=$1', [l.customer_id])).rows[0];
-  if (!c && digits(l.phone).length >= 7) c = (await q(`SELECT * FROM customers WHERE regexp_replace(phone,'[^0-9]','','g')=$1 LIMIT 1`, [digits(l.phone)])).rows[0];
-  if (!c) c = (await q('INSERT INTO customers(name,phone,email,address,brand_id) VALUES($1,$2,$3,$4,$5) RETURNING *', [l.company ? `${l.name} (${l.company})` : l.name, l.phone, l.email, l.address, l.brand_id || req.user.brand_id || null])).rows[0];
+  const c = await leadCustomer(l, req.user.brand_id);
   await q(`UPDATE leads SET customer_id=$1, stage='Closed Won', updated_at=now(), last_contact=now() WHERE id=$2`, [c.id, l.id]);
   await leadLog(l.id, req.user.name, l.customer_id ? 'Service requested' : 'Converted to customer · Closed Won');
   res.json({ customer: { id: c.id, name: c.name, phone: c.phone, address: c.address, tickets: 0 } });
@@ -353,7 +363,13 @@ async function initV2() {
   ALTER TABLE users ADD COLUMN IF NOT EXISTS cal_token TEXT;
   CREATE TABLE IF NOT EXISTS lead_voice (id SERIAL PRIMARY KEY, lead_id INT NOT NULL REFERENCES leads(id) ON DELETE CASCADE, user_id INT, user_name TEXT, role TEXT,
     audio BYTEA NOT NULL, mime TEXT, duration INT DEFAULT 0, created_at TIMESTAMPTZ DEFAULT now());
-  CREATE INDEX IF NOT EXISTS idx_lv_lead ON lead_voice(lead_id);`);
+  CREATE INDEX IF NOT EXISTS idx_lv_lead ON lead_voice(lead_id);
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS salary NUMERIC(12,2) DEFAULT 0;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS join_date DATE;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS pay_brand_id INT;
+  CREATE TABLE IF NOT EXISTS advances (id SERIAL PRIMARY KEY, user_id INT NOT NULL, kind TEXT NOT NULL DEFAULT 'Advance', amount NUMERIC(12,2) NOT NULL,
+    given_on DATE NOT NULL DEFAULT CURRENT_DATE, deduct_month TEXT NOT NULL, note TEXT, given_by TEXT, given_by_id INT, created_at TIMESTAMPTZ DEFAULT now());
+  CREATE INDEX IF NOT EXISTS idx_adv_user ON advances(user_id, deduct_month);`);
 
   if (!(await q(`SELECT 1 FROM settings WHERE k='office'`)).rows.length)
     await q(`INSERT INTO settings(k,v) VALUES('office',$1)`, [JSON.stringify(OFFICE_DEFAULT)]);
@@ -365,6 +381,7 @@ async function initV2() {
   await q(`UPDATE services SET brand_id=$1 WHERE brand_id IS NULL`, [heaven]);
   await q(`UPDATE services SET kind='Service' WHERE kind IS NULL`);
   await q(`UPDATE leads SET brand_id=$1 WHERE brand_id IS NULL`, [heaven]);   // old leads were Heaven Automation's pipeline
+  for (const l of (await q(`SELECT * FROM leads WHERE stage='Closed Won' AND customer_id IS NULL LIMIT 500`)).rows) await leadCustomer(l, heaven);   // won leads → customers
   // customers belong to the brand of their tickets (Heaven staff see Heaven customers; Super Admin sees all)
   await q(`UPDATE customers c SET brand_id=(SELECT s.brand_id FROM services s WHERE s.customer_id=c.id AND s.brand_id IS NOT NULL ORDER BY s.id DESC LIMIT 1) WHERE c.brand_id IS NULL`);
   // one-time: the first (owner) admin becomes Super Admin; other old admins become Admin staff of Heaven with every permission they had
@@ -511,7 +528,16 @@ const brandFor = async (role, v) => {
   return { id };
 };
 const manages = (me, role) => isSuper(me) || !['Admin', SUPER].includes(role);
-app.get('/api/users', need('team'), wrap(async (_, res) => res.json((await q('SELECT u.id,u.name,u.email,u.phone,u.role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at, b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id ORDER BY u.active DESC, u.role, u.name')).rows.map(pub))));
+// salary, joining date and "salary paid by" brand — only the Super Admin can set them
+const payFields = (me, b, cur) => {
+  if (!isSuper(me)) return {};
+  const o = {};
+  if (b.salary !== undefined) o.salary = Math.max(0, money(b.salary));
+  if (b.join_date !== undefined) o.join_date = isDate(b.join_date) ? b.join_date : null;
+  if (b.pay_brand_id !== undefined) o.pay_brand_id = Number.isInteger(+b.pay_brand_id) && +b.pay_brand_id > 0 ? +b.pay_brand_id : null;
+  return o;
+};
+app.get('/api/users', need('team'), wrap(async (req, res) => res.json((await q(`SELECT u.id,u.name,u.email,u.phone,u.role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at,u.pay_brand_id,to_char(u.join_date,'YYYY-MM-DD') join_date,${isSuper(req.user) ? 'u.salary' : 'NULL salary'}, b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id ORDER BY u.active DESC, u.role, u.name`)).rows.map(pub))));
 app.post('/api/users', need('team'), wrap(async (req, res) => {
   const b = req.body || {};
   if (!b.name || !b.email || !b.phone) return res.status(400).json({ error: 'Name, email and phone are required' });
@@ -522,8 +548,9 @@ app.post('/api/users', need('team'), wrap(async (req, res) => {
   let username;
   for (let i = 0; i < 20; i++) { username = base + crypto.randomInt(100, 999); if (!(await q('SELECT 1 FROM users WHERE username=$1', [username])).rows.length) break; }
   const password = randPw();
-  const r = await q('INSERT INTO users(name,email,phone,role,username,password_hash,permissions,brand_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',
-    [b.name.trim(), b.email.trim(), b.phone.trim(), b.role, username, hash(password), cleanPerms(b.role, b.permissions), br.id]);
+  const pay = payFields(req.user, b, {});
+  const r = await q('INSERT INTO users(name,email,phone,role,username,password_hash,permissions,brand_id,salary,join_date,pay_brand_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *',
+    [b.name.trim(), b.email.trim(), b.phone.trim(), b.role, username, hash(password), cleanPerms(b.role, b.permissions), br.id, pay.salary ?? 0, pay.join_date ?? null, pay.pay_brand_id ?? br.id]);
   res.json({ user: pub(r.rows[0]), credentials: { username, password } });
 }));
 app.patch('/api/users/:id', need('team'), wrap(async (req, res) => {
@@ -533,8 +560,10 @@ app.patch('/api/users/:id', need('team'), wrap(async (req, res) => {
   if (!manages(req.user, cur.role) || !manages(req.user, role)) return res.status(403).json({ error: 'Only the Super Admin can change admin staff' });
   if (cur.id === req.user.id && (b.active === false || role !== cur.role)) return res.status(400).json({ error: "You can't deactivate yourself or change your own role" });
   const br = await brandFor(role, b.brand_id !== undefined ? b.brand_id : cur.brand_id); if (br.error) return res.status(400).json({ error: br.error });
-  await q('UPDATE users SET name=$1,email=$2,phone=$3,role=$4,permissions=$5,active=$6,brand_id=$7 WHERE id=$8',
-    [b.name || cur.name, b.email ?? cur.email, b.phone ?? cur.phone, role, cleanPerms(role, b.permissions ?? cur.permissions), b.active ?? cur.active, br.id, cur.id]);
+  const pay = payFields(req.user, b, cur);
+  await q('UPDATE users SET name=$1,email=$2,phone=$3,role=$4,permissions=$5,active=$6,brand_id=$7,salary=$8,join_date=$9,pay_brand_id=$10 WHERE id=$11',
+    [b.name || cur.name, b.email ?? cur.email, b.phone ?? cur.phone, role, cleanPerms(role, b.permissions ?? cur.permissions), b.active ?? cur.active, br.id,
+     pay.salary ?? cur.salary, pay.join_date !== undefined ? pay.join_date : cur.join_date, pay.pay_brand_id !== undefined ? pay.pay_brand_id : (cur.pay_brand_id ?? br.id), cur.id]);
   res.json({ ok: true });
 }));
 app.post('/api/users/:id/reset', need('team'), wrap(async (req, res) => {
@@ -1297,6 +1326,91 @@ app.get('/api/service-voice/:id', wrap(async (req, res) => {
 }));
 app.delete('/api/service-voice/:id', superOnly, wrap(async (req, res) => { await q('DELETE FROM service_voice WHERE id=$1', [req.params.id]); res.json({ ok: true }); }));
 
+// ---------- salary / payroll ----------
+// Rules: per-day = salary ÷ 30, half-day = salary ÷ 60.  1 paid leave and 2 permissions free each month.
+//   extra leave days, absent days → per-day each · half days and extra permissions → half-day each
+//   advances (normal / petrol) given in the month are deducted.  Joined mid-month → paid from the joining day.
+const PAY_RULES = { paid_leaves: 1, free_permissions: 2, day_div: 30, half_div: 60 };
+const ADV_KINDS = ['Advance', 'Petrol Advance'];
+const r2 = v => Math.round(v * 100) / 100;
+async function salaryFor(u, m, today, start, off) {
+  const x = await monthFor(u, m, today, start, off), S = x.summary, sal = Number(u.salary) || 0;
+  const perDay = sal / PAY_RULES.day_div, half = sal / PAY_RULES.half_div, days = daysOf(m), last = days[days.length - 1];
+  const jd = u.join_date ? String(u.join_date).slice(0, 10) : null;
+  let gross = sal, notJoined = 0;
+  if (jd && jd > days[0]) { notJoined = jd > last ? days.length : days.filter(d => d < jd).length; gross = Math.max(0, sal - notJoined * perDay); }
+  // approved leave / permission count for the whole month (also later dates); absent days only up to today
+  const from = jd && jd > days[0] ? jd : days[0], inM = x.days.filter(d => d.d >= from);
+  S.leave = inM.filter(d => d.code === 'leave').length;
+  const perms = inM.reduce((t, d) => t + d.perm.length, 0), unpaidLeave = Math.max(0, S.leave - PAY_RULES.paid_leaves), extraPerm = Math.max(0, perms - PAY_RULES.free_permissions);
+  const adv = (await q(`SELECT id, kind, amount, to_char(given_on,'YYYY-MM-DD') given_on, note, given_by, created_at FROM advances WHERE user_id=$1 AND deduct_month=$2 ORDER BY given_on, id`, [u.id, m])).rows;
+  const advN = adv.filter(a => a.kind !== 'Petrol Advance').reduce((t, a) => t + Number(a.amount), 0), advP = adv.filter(a => a.kind === 'Petrol Advance').reduce((t, a) => t + Number(a.amount), 0);
+  const lines = [
+    { k: 'leave', label: `Leave beyond ${PAY_RULES.paid_leaves} paid leave`, qty: unpaidLeave, rate: perDay, of: S.leave },
+    { k: 'absent', label: 'Absent days', qty: S.absent, rate: perDay },
+    { k: 'half', label: 'Half days', qty: S.half, rate: half },
+    { k: 'perm', label: `Permissions beyond ${PAY_RULES.free_permissions} free`, qty: extraPerm, rate: half, of: perms },
+  ].map(l => ({ ...l, rate: r2(l.rate), amount: r2(l.qty * l.rate) }));
+  const attDed = r2(lines.reduce((t, l) => t + l.amount, 0)), net = r2(gross - attDed - advN - advP);
+  return { user_id: u.id, month: m, salary: sal, per_day: r2(perDay), half_day: r2(half), join_date: jd, not_joined_days: notJoined, gross: r2(gross),
+    leave_days: S.leave, paid_leave_used: Math.min(S.leave, PAY_RULES.paid_leaves), permissions: perms, absent: S.absent, half_days: S.half, present: S.present, working: S.working,
+    lines, att_deduction: attDed, advances: adv, advance: r2(advN), petrol: r2(advP), net, final: m < today.slice(0, 7), rules: PAY_RULES };
+}
+const PSEL = `SELECT u.id,u.name,u.role,u.salary,u.created_at,u.photo_v,u.brand_id,u.pay_brand_id,to_char(u.join_date,'YYYY-MM-DD') join_date, COALESCE(pb.name,b.name) pay_brand
+  FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id`;
+const slipFor = async (uid, m) => { const today = await todayIST(), u = (await q(`${PSEL} WHERE u.id=$1`, [uid])).rows[0]; return u ? { user: u, ...(await salaryFor(u, m, today, await attStart(), await office())) } : null; };
+const moneyIN = v => '₹' + Number(v || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+const slipMsg = s => `Salary ${moneyIN(s.gross)} − leave/permission ${moneyIN(s.att_deduction)} − advances ${moneyIN(s.advance + s.petrol)} = ${moneyIN(s.net)} remaining for ${new Date(s.month + '-01T12:00:00Z').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })}`;
+// who an admin may give an advance to: Super Admin → anyone; Admin staff → people paid by their brand + technicians / support staff without a brand
+const advOK = (me, u) => isSuper(me) || (isBoss(me) && u.role !== SUPER && u.id !== me.id && (!me.brand_id || (u.pay_brand_id || u.brand_id || null) === me.brand_id || (!u.pay_brand_id && !u.brand_id)));
+app.get('/api/payroll', superOnly, wrap(async (req, res) => {
+  const today = await todayIST(), m = isMonth(req.query.month) ? req.query.month : today.slice(0, 7), start = await attStart(), off = await office();
+  const p = [SUPER]; let w = 'u.active AND u.role<>$1';
+  if (+req.query.brand) { p.push(+req.query.brand); w += ` AND COALESCE(u.pay_brand_id,u.brand_id)=$${p.length}`; }
+  if (req.query.brand === 'none') w += ' AND u.pay_brand_id IS NULL AND u.brand_id IS NULL';
+  const users = (await q(`${PSEL} WHERE ${w} ORDER BY COALESCE(pb.name,b.name) NULLS LAST, u.name`, p)).rows, rows = [];
+  for (const u of users) rows.push({ user: u, ...(await salaryFor(u, m, today, start, off)) });
+  const T = k => r2(rows.reduce((t, r) => t + Number(r[k]), 0));
+  res.set('Cache-Control', 'no-store').json({ month: m, today, rows, totals: { salary: T('salary'), gross: T('gross'), att_deduction: T('att_deduction'), advance: T('advance'), petrol: T('petrol'), net: T('net') }, rules: PAY_RULES });
+}));
+app.get('/api/payroll/slip', wrap(async (req, res) => {
+  const today = await todayIST(), m = isMonth(req.query.month) ? req.query.month : today.slice(0, 7), uid = +req.query.user || req.user.id;
+  if (uid !== req.user.id && !isSuper(req.user)) return res.status(403).json({ error: 'Not allowed' });
+  const s = await slipFor(uid, m); if (!s) return res.status(404).json({ error: 'Not found' });
+  res.set('Cache-Control', 'no-store').json(s);
+}));
+app.post('/api/payroll/notify', superOnly, wrap(async (req, res) => {
+  const m = isMonth((req.body || {}).month) ? req.body.month : (await todayIST()).slice(0, 7);
+  const ids = (await q(`SELECT id FROM users WHERE active AND role<>$1 AND salary>0`, [SUPER])).rows.map(r => r.id); let n = 0;
+  for (const id of ids) { const s = await slipFor(id, m); await notifyLink([id], '💰 Salary slip', slipMsg(s), 'salary'); n++; }
+  res.json({ ok: true, sent: n });
+}));
+// advances (normal / petrol) — given by Admin staff or Super Admin, deducted from that month's salary
+app.get('/api/advances/people', wrap(async (req, res) => {
+  if (!isBoss(req.user)) return res.status(403).json({ error: 'Not allowed' });
+  const all = (await q(`${PSEL} WHERE u.active AND u.role<>$1 ORDER BY u.name`, [SUPER])).rows;
+  res.json(all.filter(u => advOK(req.user, u)).map(u => ({ id: u.id, name: u.name, role: u.role, photo_v: u.photo_v, pay_brand: u.pay_brand })));
+}));
+app.get('/api/advances', wrap(async (req, res) => {
+  const m = isMonth(req.query.month) ? req.query.month : (await todayIST()).slice(0, 7);
+  const rows = (await q(`SELECT a.*, to_char(a.given_on,'YYYY-MM-DD') given_on, u.name, u.role, u.photo_v, u.brand_id, u.pay_brand_id FROM advances a JOIN users u ON u.id=a.user_id WHERE a.deduct_month=$1 ORDER BY a.given_on DESC, a.id DESC`, [m])).rows;
+  res.set('Cache-Control', 'no-store').json(rows.filter(a => a.user_id === req.user.id || isSuper(req.user) || (isBoss(req.user) && (a.given_by_id === req.user.id || advOK(req.user, { id: a.user_id, role: a.role, brand_id: a.brand_id, pay_brand_id: a.pay_brand_id })))));
+}));
+app.post('/api/advances', wrap(async (req, res) => {
+  if (!isBoss(req.user)) return res.status(403).json({ error: 'Only Admin staff or the Super Admin can give advances' });
+  const b = req.body || {}, u = (await q(`${PSEL} WHERE u.id=$1 AND u.active`, [+b.user_id])).rows[0];
+  if (!u) return res.status(400).json({ error: 'Choose the person' });
+  if (!advOK(req.user, u)) return res.status(403).json({ error: 'You can only give advances to your brand’s staff' });
+  const amt = money(b.amount); if (!(amt > 0)) return res.status(400).json({ error: 'Enter the amount' });
+  const kind = ADV_KINDS.includes(b.kind) ? b.kind : 'Advance', today = await todayIST(), on = isDate(b.given_on) && b.given_on <= today ? b.given_on : today;
+  const dm = isMonth(b.deduct_month) ? b.deduct_month : on.slice(0, 7);
+  await q(`INSERT INTO advances(user_id,kind,amount,given_on,deduct_month,note,given_by,given_by_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [u.id, kind, amt, on, dm, String(b.note || '').trim().slice(0, 300) || null, req.user.name, req.user.id]);
+  const s = await slipFor(u.id, dm);
+  await notifyLink([u.id], kind === 'Petrol Advance' ? '⛽ Petrol advance given' : '💵 Advance given', `${moneyIN(amt)} by ${req.user.name}. ${slipMsg(s)}`, 'salary');
+  res.json({ ok: true, net: s.net });
+}));
+app.delete('/api/advances/:id', superOnly, wrap(async (req, res) => { await q('DELETE FROM advances WHERE id=$1', [req.params.id]); res.json({ ok: true }); }));
+
 // ---------- attendance, leave & permission ----------
 // Check in / out works only inside the office radius. Outside (or no GPS) → the person sends an
 // "Attendance request" with the time + reason, and an approver marks it. Leave = full days, Permission = morning / evening.
@@ -1327,7 +1441,8 @@ async function monthFor(u, m, today, start, off) {
   const days = daysOf(m), from = days[0], to = days[days.length - 1];
   const recs = {}; (await q(`SELECT *, to_char(day,'YYYY-MM-DD') d FROM attendance WHERE user_id=$1 AND day BETWEEN $2 AND $3`, [u.id, from, to])).rows.forEach(r => { recs[r.d] = r; });
   const reqs = (await q(`SELECT *, to_char(from_date,'YYYY-MM-DD') f, to_char(to_date,'YYYY-MM-DD') t FROM leave_requests WHERE user_id=$1 AND status IN ('Pending','Approved') AND from_date<=$3 AND to_date>=$2 ORDER BY id`, [u.id, from, to])).rows;
-  const joined = u.created_at ? new Date(u.created_at).toLocaleDateString('en-CA', { timeZone: TZ }) : start, first = joined > start ? joined : start;
+  const jd = u.join_date ? String(u.join_date).slice(0, 10) : null;
+  const joined = jd || (u.created_at ? new Date(u.created_at).toLocaleDateString('en-CA', { timeZone: TZ }) : start), first = joined > start ? joined : start;
   const out = days.map(d => {
     const r = recs[d], sun = wday(d) === 0, on = reqs.filter(x => x.f <= d && x.t >= d);
     const lv = on.find(x => x.kind === 'Leave' && x.status === 'Approved'), pm = on.filter(x => x.kind === 'Permission' && x.status === 'Approved'), pend = on.find(x => x.status === 'Pending');
@@ -1417,13 +1532,13 @@ app.get('/api/attendance/month', wrap(async (req, res) => {
   const today = await todayIST(), m = isMonth(req.query.month) ? req.query.month : today.slice(0, 7);
   const uid = +req.query.user || req.user.id;
   if (uid !== req.user.id && !canAtt(req.user)) return res.status(403).json({ error: 'Not allowed' });
-  const u = (await q('SELECT id,name,role,created_at,photo_v FROM users WHERE id=$1', [uid])).rows[0];
+  const u = (await q(`SELECT id,name,role,created_at,to_char(join_date,'YYYY-MM-DD') join_date,photo_v FROM users WHERE id=$1`, [uid])).rows[0];
   if (!u) return res.status(404).json({ error: 'Not found' });
   res.set('Cache-Control', 'no-store').json({ user: { id: u.id, name: u.name, role: u.role, photo_v: u.photo_v }, month: m, today, ...(await monthFor(u, m, today, await attStart(), await office())) });
 }));
 app.get('/api/attendance/report', attNeed, wrap(async (req, res) => {
   const today = await todayIST(), m = isMonth(req.query.month) ? req.query.month : today.slice(0, 7), start = await attStart(), off = await office();
-  const users = (await q(`SELECT u.id,u.name,u.role,u.created_at,u.photo_v,b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.active AND u.role<>$1 ORDER BY u.role, u.name`, [SUPER])).rows;
+  const users = (await q(`SELECT u.id,u.name,u.role,u.created_at,to_char(u.join_date,'YYYY-MM-DD') join_date,u.photo_v,b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.active AND u.role<>$1 ORDER BY u.role, u.name`, [SUPER])).rows;
   const rows = [];
   for (const u of users) {
     const x = await monthFor(u, m, today, start, off), td = x.days.find(d => d.d === today);
@@ -1447,7 +1562,7 @@ app.get('/api/attendance/board', attNeed, wrap(async (req, res) => {
 // MD (Super Admin) overview: everything about the team's attendance on one screen
 app.get('/api/attendance/md', superOnly, wrap(async (req, res) => {
   const today = await todayIST(), m = isMonth(req.query.month) ? req.query.month : today.slice(0, 7), start = await attStart(), off = await office();
-  const users = (await q(`SELECT u.id,u.name,u.role,u.created_at,u.photo_v,b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.active AND u.role<>$1 ORDER BY u.name`, [SUPER])).rows;
+  const users = (await q(`SELECT u.id,u.name,u.role,u.created_at,to_char(u.join_date,'YYYY-MM-DD') join_date,u.photo_v,b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.active AND u.role<>$1 ORDER BY u.name`, [SUPER])).rows;
   const days = daysOf(m), daily = Object.fromEntries(days.map(d => [d, { d, present: 0, late: 0, leave: 0, perm: 0, absent: 0, staff: 0 }]));
   const rows = [], todayList = [];
   for (const u of users) {
@@ -1561,7 +1676,14 @@ app.post('/api/leave/:id/decide', attNeed, wrap(async (req, res) => {
     const cur = (await q(`SELECT status FROM attendance WHERE user_id=$1 AND day=$2`, [r.user_id, r.from_date])).rows[0];
     await setAtt(r.user_id, r.from_date, cur && cur.status === 'Half Day' ? 'Half Day' : 'Present', r.from_time, r.to_time, null, req.user.name + ' (request)');
   }
-  await notifyLink([r.user_id], st === 'Approved' ? '✅ Request approved' : '❌ Request rejected', `Your ${reqWhen(r)} was ${st.toLowerCase()} by ${req.user.name}${note ? ' — ' + note : ''}`, 'att');
+  let extra = '';
+  if (st === 'Approved' && ['Leave', 'Permission'].includes(r.kind)) {
+    const s = await slipFor(r.user_id, r.from_date.slice(0, 7));
+    if (s && s.salary > 0) { const ln = s.lines.find(l => l.k === (r.kind === 'Leave' ? 'leave' : 'perm'));
+      extra = ln && ln.amount > 0 ? ` · Salary deduction ${moneyIN(ln.amount)} (${r.kind === 'Leave' ? `${PAY_RULES.paid_leaves} paid leave a month` : `${PAY_RULES.free_permissions} free permissions a month`}). ${slipMsg(s)}`
+        : ` · No salary deduction (${r.kind === 'Leave' ? 'paid leave' : 'free permission'}).`; }
+  }
+  await notifyLink([r.user_id], st === 'Approved' ? '✅ Request approved' : '❌ Request rejected', `Your ${reqWhen(r)} was ${st.toLowerCase()} by ${req.user.name}${note ? ' — ' + note : ''}${extra}`, 'att');
   res.json({ ok: true });
 }));
 app.post('/api/leave/:id/cancel', wrap(async (req, res) => {
