@@ -45,3 +45,17 @@ Profile → "Google Calendar · Siri & Google Assistant" → Set up.
 - **Siri:** make a Shortcut (Dictate Text → Get Contents of URL with your personal link + dictated text → Speak Text) named "Rago reminder". Say "Hey Siri, Rago reminder… tomorrow 10 am call Kumar".
 - **Android / Google Assistant:** long-press the app icon → "Say a reminder", or To-do → 🗣 Say a reminder.
 
+
+## Team chat (Version 9)
+- **Chat** menu for everyone (including support staff). **All Staff** group has every active user automatically.
+- Start a **1-to-1 chat** or a **group** (＋ New). The group creator or the Super Admin can rename, add or remove people.
+- Type **@** to tag a person (or **@everyone**). Tagged people get a bell notification and a phone alert.
+- Send **photos** (📎, shrunk on the phone before upload) and **voice messages** (tap the mic, then send).
+- Reply, copy, or delete your own messages (long-press on a phone, right-click or ⋯ on a computer). The Super Admin can delete any message or chat.
+- Unread counts show on the Chat icon. Direct messages show ✓✓ Seen. You can mute any chat.
+
+## Holidays, festivals & the daily greeting
+- **Holidays** page: Tamil Nadu government holidays for 2026 and 2027, plus festivals and special days. The Super Admin can add, edit or delete days.
+- Office holidays show as **Holiday** in attendance, so no one is marked absent.
+- Everyone gets a wish at 8 am on the day, and a reminder after 5 pm the day before an office holiday.
+- The first time each person opens the app each day, they see a short greeting: the festival wish, work anniversary, holiday notice, a thought for the day, and their tasks for the day.

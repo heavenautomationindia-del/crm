@@ -111,7 +111,7 @@ app.use('/api', (req, res, next) => {
 app.use('/api', (req, res, next) => (req.path === '/login' || req.path === '/logout') ? next() : auth(req, res, next));
 app.get('/api/pulse', wrap(async (req, res) => {
   const r = (await q('SELECT COALESCE(MAX(id),0)::int last, COUNT(*) FILTER (WHERE NOT read)::int unread FROM notifications WHERE user_id=$1', [req.user.id])).rows[0];
-  res.set('Cache-Control', 'no-store').json({ v: VER, last: r.last, unread: r.unread });
+  res.set('Cache-Control', 'no-store').json({ v: VER, last: r.last, unread: r.unread, chat: await chatUnread(req.user.id).catch(() => 0), chat_last: (await q('SELECT COALESCE(MAX(id),0)::int n FROM chat_messages')).rows[0].n });
 }));
 app.get('/api/me', (req, res) => res.json(me(req.user)));
 app.post('/api/password', wrap(async (req, res) => {
@@ -369,7 +369,10 @@ async function initV2() {
   ALTER TABLE users ADD COLUMN IF NOT EXISTS pay_brand_id INT;
   CREATE TABLE IF NOT EXISTS advances (id SERIAL PRIMARY KEY, user_id INT NOT NULL, kind TEXT NOT NULL DEFAULT 'Advance', amount NUMERIC(12,2) NOT NULL,
     given_on DATE NOT NULL DEFAULT CURRENT_DATE, deduct_month TEXT NOT NULL, note TEXT, given_by TEXT, given_by_id INT, created_at TIMESTAMPTZ DEFAULT now());
-  CREATE INDEX IF NOT EXISTS idx_adv_user ON advances(user_id, deduct_month);`);
+  CREATE INDEX IF NOT EXISTS idx_adv_user ON advances(user_id, deduct_month);
+  ALTER TABLE services ADD COLUMN IF NOT EXISTS work_done_on TIMESTAMPTZ;
+  CREATE INDEX IF NOT EXISTS idx_services_helper ON services(helper_id, status);`);
+  await q(`UPDATE services SET work_done_on=COALESCE(resolved_on, on_process_at, assigned_on, submitted_on) WHERE work_done_on IS NULL AND status IN ('Awaiting Payment','Resolved')`);
 
   if (!(await q(`SELECT 1 FROM settings WHERE k='office'`)).rows.length)
     await q(`INSERT INTO settings(k,v) VALUES('office',$1)`, [JSON.stringify(OFFICE_DEFAULT)]);
@@ -770,6 +773,7 @@ app.patch('/api/services/:id', need('service_edit', 'service_assign'), wrap(asyn
   }
   if (canAssign && b.technician_id && cur.technician_id && String(b.technician_id) !== String(cur.technician_id) && ['On-Process', 'Work Pending'].includes(cur.status) && !b.status) b.status = 'Work Not Started';   // new person starts fresh
   if (b.status === 'Resolved' && cur.status !== 'Resolved' && !can(req.user, 'payments')) delete b.status;
+  if (['Awaiting Payment', 'Resolved'].includes(b.status) && !['Awaiting Payment', 'Resolved'].includes(cur.status)) sets.push('work_done_on=COALESCE(work_done_on,now())');
   const fTech = canAssign && 'technician_id' in b ? (b.technician_id ? Number(b.technician_id) : null) : cur.technician_id;
   const fHelp = canAssign && 'helper_id' in b ? (b.helper_id ? Number(b.helper_id) : null) : cur.helper_id;
   const removed = [cur.technician_id, cur.helper_id].filter(x => x && x !== fTech && x !== fHelp);
@@ -839,7 +843,7 @@ app.post('/api/services/:id/done', techOnly, wrap(async (req, res) => {
       return res.status(400).json({ error: 'Upload the bank transfer screenshot for confirmation' });
   }
   const cash = mode === 'Cash' ? amt : 0, bank = mode === 'Bank' ? amt : 0;
-  await q(`UPDATE services SET status='Awaiting Payment', work_status='Done', completion_note=$2, pending_reason=NULL, amount_received=amount_received+$3, billing_type=$4, pay_mode=$5, bank_amount=$6 WHERE id=$1`,
+  await q(`UPDATE services SET status='Awaiting Payment', work_status='Done', work_done_on=now(), completion_note=$2, pending_reason=NULL, amount_received=amount_received+$3, billing_type=$4, pay_mode=$5, bank_amount=$6 WHERE id=$1`,
     [s.id, b.note || null, cash, billing, mode, bank]);
   const what = billing === 'Free' ? 'Free service' : mode === 'Cash' ? `Paid · Cash ₹${amt}` : `Paid · Bank ₹${amt} (screenshot attached)`;
   await log(s.id, req.user.name, 'Work done' + (b.note ? ': ' + b.note : '') + ' · ' + what);
@@ -872,7 +876,7 @@ app.post('/api/services/:id/settle', need('payments'), wrap(async (req, res) => 
   if (cashDue > 0) await q(`INSERT INTO payments(service_id,amount,bank,note,approval) VALUES($1,$2,$3,'Cash handed over by technician','Approved')`, [s.id, cashDue, cashBank]);
   if (bankDue > 0) await q(`INSERT INTO payments(service_id,amount,bank,note,approval) VALUES($1,$2,$3,'Bank transfer · screenshot verified','Approved')`, [s.id, bankDue, trBank]);
   if (cashDue > 0 || bankDue > 0) await q(`UPDATE payments SET received_by=$2 WHERE service_id=$1 AND received_by IS NULL`, [s.id, req.user.name]);
-  await q(`UPDATE services SET received_settled=amount_received, bank_settled=COALESCE(bank_amount,0)${close ? `, status='Resolved', resolved_on=now(), approval='Approved'` : ''} WHERE id=$1`, [s.id]);
+  await q(`UPDATE services SET received_settled=amount_received, bank_settled=COALESCE(bank_amount,0)${close ? `, status='Resolved', resolved_on=now(), work_done_on=COALESCE(work_done_on,now()), approval='Approved'` : ''} WHERE id=$1`, [s.id]);
   const parts = [cashDue > 0 && `cash ₹${cashDue} from technician`, bankDue > 0 && `bank ₹${bankDue} confirmed`].filter(Boolean).join(' + ');
   await log(s.id, req.user.name, (parts ? `Payment received: ${parts}` : 'Free service confirmed') + (close ? ' — work completed' : ''));
   await notify([s.technician_id, s.helper_id], close ? 'Job closed' : 'Payment received', `#${s.ticket_no}: admin confirmed ${parts || 'the job'}${close ? ' — work completed' : ''}`, s.id); res.json({ ok: true });
@@ -886,6 +890,8 @@ app.get('/api/tech/dashboard', techOnly, wrap(async (req, res) => {
     COUNT(*) FILTER (WHERE status='Resolved' AND resolved_on>=date_trunc('day',now()))::int done_today
     FROM services WHERE technician_id=$1 OR helper_id=$1`, [id])).rows[0];
   const c = (await q(`SELECT COALESCE(SUM(amount_received-received_settled),0) hold, COALESCE(SUM(received_settled),0) handed FROM services WHERE technician_id=$1`, [id])).rows[0];
+  const crew = (await q(`SELECT ${CREW_COLS} FROM services s WHERE (s.technician_id=$1 OR s.helper_id=$1)`, [id, (await todayIST()).slice(0, 7)])).rows[0];
+  k.crew = crew;
   const next = (await q(`${SELECT} WHERE (s.technician_id=$1 OR s.helper_id=$1) AND s.status IN ('New Ticket','Work Not Started','On-Process','Work Pending') ORDER BY (s.status='On-Process') DESC, s.assigned_on DESC NULLS LAST LIMIT 5`, [id])).rows.map(s => shape(s, req.user));
   res.json({ ...k, hold: c.hold, handed: c.handed, next });
 }));
@@ -896,6 +902,7 @@ const WIPE = {
   todos: 'TRUNCATE todos RESTART IDENTITY',
   attendance: 'TRUNCATE attendance, leave_requests RESTART IDENTITY',
   notifications: 'TRUNCATE notifications RESTART IDENTITY',
+  chat: `DELETE FROM chats WHERE kind<>'all'; TRUNCATE chat_messages RESTART IDENTITY; UPDATE chat_members SET last_read=0`,
   users: 'SELECT 1',   // staff logins: handled below
 };
 app.post('/api/admin/reset-data', superOnly, wrap(async (req, res) => {
@@ -1110,6 +1117,32 @@ async function remindDue() {
     if (due.length) VER = Math.max(VER + 1, Date.now());
   } catch (e) { console.error('reminders failed', e.message); } finally { remBusy = false; }
 }
+
+// ---------- technician & helper counts ----------
+// $1 = technician id, $2 = 'YYYY-MM'.  "finished" = work done (Awaiting Payment or Resolved).
+const DONE = `s.status IN ('Awaiting Payment','Resolved')`, INM = c => `to_char(${c} AT TIME ZONE 'Asia/Kolkata','YYYY-MM')=$2`, OPEN = `s.status IN ('New Ticket','Work Not Started','On-Process','Work Pending')`;
+const CREW_COLS = `COUNT(*) FILTER (WHERE s.technician_id=$1 AND ${INM('COALESCE(s.assigned_on,s.submitted_on)')})::int tech_assigned,
+  COUNT(*) FILTER (WHERE s.technician_id=$1 AND ${DONE} AND ${INM('s.work_done_on')})::int tech_done,
+  COUNT(*) FILTER (WHERE s.helper_id=$1 AND ${INM('COALESCE(s.assigned_on,s.submitted_on)')})::int helper_assigned,
+  COUNT(*) FILTER (WHERE s.helper_id=$1 AND ${DONE} AND ${INM('s.work_done_on')})::int helper_done,
+  COUNT(*) FILTER (WHERE s.technician_id=$1 AND ${OPEN})::int tech_open, COUNT(*) FILTER (WHERE s.helper_id=$1 AND ${OPEN})::int helper_open,
+  COUNT(*) FILTER (WHERE s.technician_id=$1 AND ${DONE})::int tech_done_total, COUNT(*) FILTER (WHERE s.helper_id=$1 AND ${DONE})::int helper_done_total`;
+app.get('/api/crew/stats', wrap(async (req, res) => {
+  if (!(isBoss(req.user) || can(req.user, 'dashboard') || can(req.user, 'service_assign'))) return res.status(403).json({ error: 'Not allowed' });
+  const m = isMonth(req.query.month) ? req.query.month : (await todayIST()).slice(0, 7);
+  const bid = req.user.brand_id || (+req.query.brand || null);
+  const techs = (await q(`SELECT id,name,photo_v FROM users WHERE role='Technician' AND active ORDER BY name`)).rows, out = [];
+  for (const t of techs) {
+    const p = [t.id, m]; let w = '(s.technician_id=$1 OR s.helper_id=$1)';
+    if (bid) { p.push(bid); w += ` AND s.brand_id=$3`; }
+    const c = (await q(`SELECT ${CREW_COLS} FROM services s WHERE ${w}`, p)).rows[0];
+    const last = (await q(`SELECT s.ticket_no, s.status, c.name customer, CASE WHEN s.helper_id=$1 THEN 'helper' ELSE 'technician' END as_role, tt.name technician, hh.name helper, br.name brand
+      FROM services s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN users tt ON tt.id=s.technician_id LEFT JOIN users hh ON hh.id=s.helper_id LEFT JOIN brands br ON br.id=s.brand_id
+      WHERE ${w.replace('$3', '$2')} AND ${OPEN} ORDER BY s.assigned_on DESC NULLS LAST LIMIT 5`, bid ? [t.id, bid] : [t.id])).rows;
+    out.push({ ...t, ...c, open_jobs: last });
+  }
+  res.set('Cache-Control', 'no-store').json({ month: m, rows: out });
+}));
 
 // ---------- add extra work to an existing service / job ----------
 app.post('/api/services/:id/extra', need('service_edit', 'service_create'), wrap(async (req, res) => {
@@ -1443,11 +1476,13 @@ async function monthFor(u, m, today, start, off) {
   const reqs = (await q(`SELECT *, to_char(from_date,'YYYY-MM-DD') f, to_char(to_date,'YYYY-MM-DD') t FROM leave_requests WHERE user_id=$1 AND status IN ('Pending','Approved') AND from_date<=$3 AND to_date>=$2 ORDER BY id`, [u.id, from, to])).rows;
   const jd = u.join_date ? String(u.join_date).slice(0, 10) : null;
   const joined = jd || (u.created_at ? new Date(u.created_at).toLocaleDateString('en-CA', { timeZone: TZ }) : start), first = joined > start ? joined : start;
+  const HOL = await officeHolidays(from, to);
   const out = days.map(d => {
     const r = recs[d], sun = wday(d) === 0, on = reqs.filter(x => x.f <= d && x.t >= d);
     const lv = on.find(x => x.kind === 'Leave' && x.status === 'Approved'), pm = on.filter(x => x.kind === 'Permission' && x.status === 'Approved'), pend = on.find(x => x.status === 'Pending');
     let code = '';
     if (r && r.marked_by && !['Present'].includes(r.status)) code = { 'Half Day': 'half', Absent: 'absent', 'Week Off': 'off', Holiday: 'holiday' }[r.status] || 'present';
+    else if (HOL[d] && !(r && r.check_in)) code = 'holiday';
     else if (lv && !sun && !(r && r.check_in)) code = 'leave';
     else if (pm.length) code = pm.some(x => x.session === 'Morning') ? (pm.some(x => x.session === 'Evening') ? 'perm-both' : 'perm-m') : 'perm-e';
     else if (r) code = r.status === 'Half Day' ? 'half' : r.status === 'Absent' ? 'absent' : 'present';
@@ -1458,7 +1493,7 @@ async function monthFor(u, m, today, start, off) {
     return { d, sun, code, pending: !!pend, pend_kind: pend ? pend.kind : null, in: istHM(inT), out: istHM(r && r.check_out), in24: ist24(inT), out24: ist24(r && r.check_out),
       hours: +hrs(inT, r && r.check_out).toFixed(2), late, in_dist: r ? r.in_dist : null, out_dist: r ? r.out_dist : null,
       status: r ? r.status : null, note: r ? r.note : null, by: r ? r.marked_by : null,
-      leave: lv ? (lv.leave_type || 'Leave') : null, perm: pm.map(x => ({ session: x.session, from: x.from_time, to: x.to_time })), counts: d >= first && d <= today };
+      holiday: HOL[d] || null, leave: lv ? (lv.leave_type || 'Leave') : null, perm: pm.map(x => ({ session: x.session, from: x.from_time, to: x.to_time })), counts: d >= first && d <= today };
   });
   const S = { present: 0, half: 0, absent: 0, leave: 0, perm_m: 0, perm_e: 0, off: 0, working: 0, late: 0, hours: 0 };
   for (const x of out) {
@@ -1554,10 +1589,11 @@ app.get('/api/attendance/board', attNeed, wrap(async (req, res) => {
   const tr = (await q(`${LSELR} WHERE r.status='Approved' AND r.kind IN ('Leave','Permission') AND r.from_date<=$1 AND r.to_date>=$1 ORDER BY r.kind, r.session, u.name`, [today])).rows;
   const pending = (await q(`${LSELR} WHERE r.status='Pending' ORDER BY r.created_at LIMIT 20`)).rows;
   const leave = tr.filter(r => r.kind === 'Leave'), perm = tr.filter(r => r.kind === 'Permission'), away = new Set(leave.map(r => r.user_id));
-  const sunday = wday(today) === 0;
+  const holToday = (await officeHolidays(today, today))[today] || null;
+  const sunday = wday(today) === 0 || !!holToday;
   const inn = staff.filter(u => att[u.id] && att[u.id].check_in).map(u => ({ ...u, in: istHM(att[u.id].check_in), out: istHM(att[u.id].check_out), late: ist24(att[u.id].check_in) > off.late }));
   const notIn = sunday ? [] : staff.filter(u => !(att[u.id] && att[u.id].check_in) && !away.has(u.id) && !(att[u.id] && ['Week Off', 'Holiday', 'Absent'].includes(att[u.id].status)));
-  res.set('Cache-Control', 'no-store').json({ today, total: staff.length, inn, notIn, leave, perm, pending, late: off.late });
+  res.set('Cache-Control', 'no-store').json({ today, holiday: holToday, total: staff.length, inn, notIn, leave, perm, pending, late: off.late });
 }));
 // MD (Super Admin) overview: everything about the team's attendance on one screen
 app.get('/api/attendance/md', superOnly, wrap(async (req, res) => {
@@ -1694,5 +1730,394 @@ app.post('/api/leave/:id/cancel', wrap(async (req, res) => {
 }));
 app.delete('/api/leave/:id', superOnly, wrap(async (req, res) => { await q('DELETE FROM leave_requests WHERE id=$1', [req.params.id]); res.json({ ok: true }); }));
 
-init().then(() => { setInterval(remindDue, 30000); remindDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
+
+// =====================================================================
+// ---------- team chat (Skype-style): All-staff group, groups, direct messages ----------
+// =====================================================================
+async function initChat() {
+  await q(`
+  CREATE TABLE IF NOT EXISTS chats (id SERIAL PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'group', name TEXT, dm_key TEXT UNIQUE, created_by INT,
+    created_at TIMESTAMPTZ DEFAULT now(), last_at TIMESTAMPTZ DEFAULT now());
+  CREATE TABLE IF NOT EXISTS chat_members (chat_id INT NOT NULL REFERENCES chats(id) ON DELETE CASCADE, user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    last_read INT DEFAULT 0, seen_at TIMESTAMPTZ, muted BOOLEAN DEFAULT false, PRIMARY KEY (chat_id, user_id));
+  CREATE TABLE IF NOT EXISTS chat_messages (id SERIAL PRIMARY KEY, chat_id INT NOT NULL REFERENCES chats(id) ON DELETE CASCADE, user_id INT, user_name TEXT,
+    kind TEXT NOT NULL DEFAULT 'text', body TEXT, mime TEXT, data BYTEA, duration INT, w INT, h INT, mentions INT[] DEFAULT '{}', reply_to INT,
+    deleted BOOLEAN DEFAULT false, created_at TIMESTAMPTZ DEFAULT now());
+  CREATE INDEX IF NOT EXISTS idx_cm_chat ON chat_messages(chat_id, id);
+  CREATE INDEX IF NOT EXISTS idx_cmem_user ON chat_members(user_id);
+  CREATE TABLE IF NOT EXISTS holidays (id SERIAL PRIMARY KEY, day DATE NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'Festival',
+    is_holiday BOOLEAN DEFAULT false, emoji TEXT, greeting TEXT, created_at TIMESTAMPTZ DEFAULT now(), UNIQUE(day, name));`);
+  if (!(await q(`SELECT 1 FROM chats WHERE kind='all'`)).rows.length)
+    await q(`INSERT INTO chats(kind,name,created_by) VALUES('all','All Staff',NULL)`);
+  if (!(await q(`SELECT 1 FROM settings WHERE k='holidays_seeded'`)).rows.length) {
+    for (const h of HOLIDAY_SEED) await q(`INSERT INTO holidays(day,name,kind,is_holiday,emoji,greeting) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (day,name) DO NOTHING`, h);
+    await q(`INSERT INTO settings(k,v) VALUES('holidays_seeded','1') ON CONFLICT (k) DO NOTHING`);
+  }
+}
+const ALL_CHAT = async () => (await q(`SELECT id FROM chats WHERE kind='all'`)).rows[0].id;
+// is this user in the chat?  (everyone active is in "All Staff")
+const chatFor = async (u, id) => {
+  const c = (await q('SELECT * FROM chats WHERE id=$1', [id])).rows[0];
+  if (!c) return null;
+  if (c.kind === 'all') { await q(`INSERT INTO chat_members(chat_id,user_id,last_read) VALUES($1,$2,(SELECT COALESCE(MAX(id),0) FROM chat_messages WHERE chat_id=$1)) ON CONFLICT DO NOTHING`, [c.id, u.id]); return c; }
+  return (await q('SELECT 1 FROM chat_members WHERE chat_id=$1 AND user_id=$2', [c.id, u.id])).rows.length ? c : null;
+};
+const chatMemberIds = async c => c.kind === 'all' ? (await q('SELECT id FROM users WHERE active')).rows.map(r => r.id)
+  : (await q('SELECT m.user_id FROM chat_members m JOIN users u ON u.id=m.user_id WHERE m.chat_id=$1 AND u.active', [c.id])).rows.map(r => r.user_id);
+const chatUnread = async uid => {
+  const all = await ALL_CHAT();
+  await q(`INSERT INTO chat_members(chat_id,user_id,last_read) VALUES($1,$2,(SELECT COALESCE(MAX(id),0) FROM chat_messages WHERE chat_id=$1)) ON CONFLICT DO NOTHING`, [all, uid]);
+  return (await q(`SELECT COUNT(*)::int n FROM chat_messages x JOIN chat_members m ON m.chat_id=x.chat_id AND m.user_id=$1
+    WHERE x.id>m.last_read AND x.user_id IS DISTINCT FROM $1 AND NOT x.deleted`, [uid])).rows[0].n;
+};
+const MSG_COLS = `x.id, x.chat_id, x.user_id, x.user_name, x.kind, CASE WHEN x.deleted THEN NULL ELSE x.body END body, x.mime, x.duration, x.w, x.h,
+  x.mentions, x.reply_to, x.deleted, x.created_at, u.photo_v, u.role`;
+const preview = m => m.deleted ? 'Message deleted' : m.kind === 'image' ? '📷 Photo' + (m.body ? ' · ' + m.body : '') : m.kind === 'voice' ? `🎤 Voice message (${durTxt(m.duration)})` : (m.body || '');
+const durTxt = s => `${Math.floor((s || 0) / 60)}:${String((s || 0) % 60).padStart(2, '0')}`;
+
+app.get('/api/chats', wrap(async (req, res) => {
+  const uid = req.user.id; await chatUnread(uid);   // makes sure the user is in All Staff
+  const rows = (await q(`SELECT c.*, m.last_read, m.muted,
+      (SELECT COUNT(*)::int FROM chat_messages x WHERE x.chat_id=c.id AND x.id>m.last_read AND x.user_id IS DISTINCT FROM $1 AND NOT x.deleted) unread,
+      (SELECT COUNT(*)::int FROM chat_messages x WHERE x.chat_id=c.id AND x.id>m.last_read AND NOT x.deleted AND ($1=ANY(x.mentions) OR -1=ANY(x.mentions)) AND x.user_id IS DISTINCT FROM $1) tagged,
+      (SELECT COUNT(*)::int FROM chat_members mm WHERE mm.chat_id=c.id) members
+    FROM chats c JOIN chat_members m ON m.chat_id=c.id AND m.user_id=$1 ORDER BY (c.kind='all') DESC, c.last_at DESC`, [uid])).rows;
+  const ids = rows.map(r => r.id), last = {};
+  if (ids.length) (await q(`SELECT DISTINCT ON (x.chat_id) ${MSG_COLS} FROM chat_messages x LEFT JOIN users u ON u.id=x.user_id WHERE x.chat_id=ANY($1) ORDER BY x.chat_id, x.id DESC`, [ids])).rows.forEach(m => { last[m.chat_id] = m; });
+  const dms = rows.filter(r => r.kind === 'dm').map(r => r.id), other = {};
+  if (dms.length) (await q(`SELECT m.chat_id, u.id, u.name, u.role, u.photo_v FROM chat_members m JOIN users u ON u.id=m.user_id WHERE m.chat_id=ANY($1) AND m.user_id<>$2`, [dms, uid])).rows.forEach(o => { other[o.chat_id] = o; });
+  const allN = (await q('SELECT COUNT(*)::int n FROM users WHERE active')).rows[0].n;
+  res.set('Cache-Control', 'no-store').json({ items: rows.map(r => {
+    const l = last[r.id], o = other[r.id];
+    return { id: r.id, kind: r.kind, name: r.kind === 'dm' ? (o ? o.name : 'Former staff') : r.name, other: o || null, created_by: r.created_by,
+      members: r.kind === 'all' ? allN : r.members, unread: r.unread, tagged: r.tagged, muted: r.muted, last_at: l ? l.created_at : r.last_at,
+      last: l ? { who: l.user_id === uid ? 'You' : (l.user_name || '').split(' ')[0], text: preview(l), kind: l.kind } : null };
+  }).sort((a, b) => (b.kind === 'all') - (a.kind === 'all') || new Date(b.last_at) - new Date(a.last_at)) });
+}));
+// people you can chat with / tag
+app.get('/api/chat/people', wrap(async (req, res) => {
+  res.json({ items: (await q(`SELECT u.id, u.name, u.role, u.photo_v, b.name brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.active ORDER BY u.name`)).rows });
+}));
+app.post('/api/chats/dm', wrap(async (req, res) => {
+  const other = +(req.body || {}).user_id, me = req.user.id;
+  if (!other || other === me) return res.status(400).json({ error: 'Choose a person' });
+  if (!(await q('SELECT 1 FROM users WHERE id=$1 AND active', [other])).rows.length) return res.status(404).json({ error: 'Not found' });
+  const key = [me, other].sort((a, b) => a - b).join('-');
+  let c = (await q('SELECT id FROM chats WHERE dm_key=$1', [key])).rows[0];
+  if (!c) {
+    c = (await q(`INSERT INTO chats(kind,dm_key,created_by) VALUES('dm',$1,$2) ON CONFLICT (dm_key) DO UPDATE SET dm_key=EXCLUDED.dm_key RETURNING id`, [key, me])).rows[0];
+    await q(`INSERT INTO chat_members(chat_id,user_id) VALUES($1,$2),($1,$3) ON CONFLICT DO NOTHING`, [c.id, me, other]);
+  }
+  res.json({ id: c.id });
+}));
+app.post('/api/chats', wrap(async (req, res) => {
+  const b = req.body || {}, name = String(b.name || '').trim().slice(0, 60);
+  if (!name) return res.status(400).json({ error: 'Give the group a name' });
+  const ids = [...new Set([req.user.id, ...(Array.isArray(b.members) ? b.members.map(Number) : [])])].filter(Boolean);
+  if (ids.length < 2) return res.status(400).json({ error: 'Add at least one person' });
+  const c = (await q(`INSERT INTO chats(kind,name,created_by) VALUES('group',$1,$2) RETURNING id`, [name, req.user.id])).rows[0];
+  const ok = (await q('SELECT id FROM users WHERE active AND id=ANY($1)', [ids])).rows.map(r => r.id);
+  for (const id of ok) await q('INSERT INTO chat_members(chat_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [c.id, id]);
+  await sysMsg(c.id, `${req.user.name} created the group “${name}”`);
+  notifyChat(ok.filter(x => x !== req.user.id), `👥 Added to “${name}”`, `${req.user.name} added you to a group chat`, c.id, true);
+  res.json({ id: c.id });
+}));
+const sysMsg = async (cid, text) => { await q(`INSERT INTO chat_messages(chat_id,kind,body) VALUES($1,'system',$2)`, [cid, text]); await q('UPDATE chats SET last_at=now() WHERE id=$1', [cid]); };
+const canManage = (u, c) => isSuper(u) || c.created_by === u.id;
+app.patch('/api/chats/:id', wrap(async (req, res) => {
+  const c = await chatFor(req.user, +req.params.id); if (!c) return res.status(404).json({ error: 'Not found' });
+  if (c.kind !== 'group') return res.status(400).json({ error: 'This chat cannot be changed' });
+  if (!canManage(req.user, c)) return res.status(403).json({ error: 'Only the person who made the group (or the Super Admin) can change it' });
+  const b = req.body || {}, msgs = [];
+  if (b.name && String(b.name).trim() && String(b.name).trim() !== c.name) { const n = String(b.name).trim().slice(0, 60); await q('UPDATE chats SET name=$2 WHERE id=$1', [c.id, n]); msgs.push(`${req.user.name} renamed the group to “${n}”`); }
+  const add = Array.isArray(b.add) ? b.add.map(Number) : [], rem = Array.isArray(b.remove) ? b.remove.map(Number) : [];
+  if (add.length) {
+    const ok = (await q('SELECT id, name FROM users WHERE active AND id=ANY($1) AND id NOT IN (SELECT user_id FROM chat_members WHERE chat_id=$2)', [add, c.id])).rows;
+    for (const u of ok) await q(`INSERT INTO chat_members(chat_id,user_id,last_read) VALUES($1,$2,(SELECT COALESCE(MAX(id),0) FROM chat_messages WHERE chat_id=$1)) ON CONFLICT DO NOTHING`, [c.id, u.id]);
+    if (ok.length) { msgs.push(`${req.user.name} added ${ok.map(u => u.name).join(', ')}`); notifyChat(ok.map(u => u.id), `👥 Added to “${b.name || c.name}”`, `${req.user.name} added you to a group chat`, c.id, true); }
+  }
+  if (rem.length) {
+    const gone = (await q('DELETE FROM chat_members m USING users u WHERE u.id=m.user_id AND m.chat_id=$1 AND m.user_id=ANY($2) RETURNING u.name', [c.id, rem])).rows;
+    if (gone.length) msgs.push(`${req.user.name} removed ${gone.map(u => u.name).join(', ')}`);
+  }
+  for (const m of msgs) await sysMsg(c.id, m);
+  res.json({ ok: true });
+}));
+app.post('/api/chats/:id/leave', wrap(async (req, res) => {
+  const c = await chatFor(req.user, +req.params.id); if (!c) return res.status(404).json({ error: 'Not found' });
+  if (c.kind !== 'group') return res.status(400).json({ error: 'You cannot leave this chat' });
+  await q('DELETE FROM chat_members WHERE chat_id=$1 AND user_id=$2', [c.id, req.user.id]);
+  await sysMsg(c.id, `${req.user.name} left the group`); res.json({ ok: true });
+}));
+app.post('/api/chats/:id/mute', wrap(async (req, res) => {
+  const c = await chatFor(req.user, +req.params.id); if (!c) return res.status(404).json({ error: 'Not found' });
+  await q('UPDATE chat_members SET muted=$3 WHERE chat_id=$1 AND user_id=$2', [c.id, req.user.id, !!(req.body || {}).muted]); res.json({ ok: true });
+}));
+app.delete('/api/chats/:id', superOnly, wrap(async (req, res) => {
+  const c = (await q('SELECT kind FROM chats WHERE id=$1', [req.params.id])).rows[0];
+  if (!c) return res.status(404).json({ error: 'Not found' });
+  if (c.kind === 'all') { await q('DELETE FROM chat_messages WHERE chat_id=$1', [req.params.id]); await q('UPDATE chat_members SET last_read=0 WHERE chat_id=$1', [req.params.id]); return res.json({ ok: true, cleared: true }); }
+  await q('DELETE FROM chats WHERE id=$1', [req.params.id]); res.json({ ok: true });
+}));
+// messages: ?after=<id> for new ones (polling), ?before=<id> for older ones
+app.get('/api/chats/:id/messages', wrap(async (req, res) => {
+  const c = await chatFor(req.user, +req.params.id); if (!c) return res.status(404).json({ error: 'Not found' });
+  const after = +req.query.after || 0, before = +req.query.before || 0;
+  let rows;
+  if (after) rows = (await q(`SELECT ${MSG_COLS} FROM chat_messages x LEFT JOIN users u ON u.id=x.user_id WHERE x.chat_id=$1 AND x.id>$2 ORDER BY x.id LIMIT 200`, [c.id, after])).rows;
+  else rows = (await q(`SELECT * FROM (SELECT ${MSG_COLS} FROM chat_messages x LEFT JOIN users u ON u.id=x.user_id WHERE x.chat_id=$1 ${before ? 'AND x.id<$2' : ''} ORDER BY x.id DESC LIMIT 60) t ORDER BY id`, before ? [c.id, before] : [c.id])).rows;
+  await q('UPDATE chat_members SET seen_at=now() WHERE chat_id=$1 AND user_id=$2', [c.id, req.user.id]);
+  const out = { items: rows, more: !after && rows.length === 60 };
+  if (!after && !before) {   // first load: chat details + members + who has read up to where
+    const mem = c.kind === 'all' ? (await q(`SELECT u.id, u.name, u.role, u.photo_v FROM users u WHERE u.active ORDER BY u.name`)).rows
+      : (await q(`SELECT u.id, u.name, u.role, u.photo_v FROM chat_members m JOIN users u ON u.id=m.user_id WHERE m.chat_id=$1 ORDER BY u.name`, [c.id])).rows;
+    const other = c.kind === 'dm' ? mem.find(m => m.id !== req.user.id) : null;
+    out.chat = { id: c.id, kind: c.kind, name: c.kind === 'dm' ? (other ? other.name : 'Former staff') : c.name, created_by: c.created_by, other,
+      can_manage: c.kind === 'group' && canManage(req.user, c), muted: !!((await q('SELECT muted FROM chat_members WHERE chat_id=$1 AND user_id=$2', [c.id, req.user.id])).rows[0] || {}).muted };
+    out.members = mem;
+  }
+  // "seen" ticks: the lowest last_read among the other members (DMs show Seen)
+  out.read_by = c.kind === 'dm' ? ((await q('SELECT last_read FROM chat_members WHERE chat_id=$1 AND user_id<>$2', [c.id, req.user.id])).rows[0] || {}).last_read || 0 : null;
+  res.set('Cache-Control', 'no-store').json(out);
+}));
+app.post('/api/chats/:id/read', wrap(async (req, res) => {
+  const c = await chatFor(req.user, +req.params.id); if (!c) return res.status(404).json({ error: 'Not found' });
+  const last = +(req.body || {}).last || 0;
+  await q('UPDATE chat_members SET last_read=GREATEST(last_read,$3), seen_at=now() WHERE chat_id=$1 AND user_id=$2', [c.id, req.user.id, last]);
+  // the related bell notifications for this chat are read too
+  await q(`UPDATE notifications SET read=true WHERE user_id=$1 AND link=$2 AND NOT read`, [req.user.id, 'chat:' + c.id]);
+  res.json({ ok: true, unread: await chatUnread(req.user.id) });
+}));
+// push + (for DMs / tags / group adds) a bell notification. Skips people who are looking at the chat right now.
+async function notifyChat(ids, title, body, cid, bell) {
+  for (const id of [...new Set(ids)].filter(Boolean)) {
+    if (bell) await q('INSERT INTO notifications(user_id,title,body,link) VALUES($1,$2,$3,$4)', [id, title, body, 'chat:' + cid]);
+    pushTo(id, title, body, null, { url: '/?chat=' + cid, chat: cid, tag: 'rago-chat-' + cid }).catch(() => {});
+  }
+}
+app.post('/api/chats/:id/messages', wrap(async (req, res) => {
+  const c = await chatFor(req.user, +req.params.id); if (!c) return res.status(404).json({ error: 'Not found' });
+  const b = req.body || {}, text = String(b.text || '').replace(/\s+$/, '').slice(0, 4000);
+  let kind = 'text', buf = null, mime = null, dur = null, w = null, h = null;
+  if (b.image) {
+    const m = /^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/=]+)$/.exec(String(b.image));
+    if (!m) return res.status(400).json({ error: 'Choose a photo (JPG or PNG)' });
+    buf = Buffer.from(m[2], 'base64'); if (buf.length > 3 * 1024 * 1024) return res.status(400).json({ error: 'Photo is too large' });
+    kind = 'image'; mime = m[1]; w = +b.w || null; h = +b.h || null;
+  } else if (b.audio) {
+    const m = /^data:(audio\/[\w.+-]+)(?:;[\w=.+-]+)*;base64,([A-Za-z0-9+/=]+)$/.exec(String(b.audio));
+    if (!m) return res.status(400).json({ error: 'Record a voice message first' });
+    buf = Buffer.from(m[2], 'base64'); if (buf.length < 200) return res.status(400).json({ error: 'The recording is empty — try again' });
+    if (buf.length > 6 * 1024 * 1024) return res.status(400).json({ error: 'Recording too long (max 5 minutes)' });
+    kind = 'voice'; mime = m[1]; dur = Math.max(1, Math.min(600, Math.round(+b.duration || 0)));
+  } else if (!text.trim()) return res.status(400).json({ error: 'Type a message' });
+  // tags: client sends ids; -1 = @everyone. Only people who are in this chat count.
+  const members = await chatMemberIds(c);
+  let tags = (Array.isArray(b.mentions) ? b.mentions.map(Number) : []).filter(x => x === -1 || members.includes(x));
+  if (/(^|\s)@(all|everyone)\b/i.test(text) && !tags.includes(-1)) tags.push(-1);
+  tags = [...new Set(tags)];
+  const reply = +b.reply_to || null;
+  const r = (await q(`INSERT INTO chat_messages(chat_id,user_id,user_name,kind,body,mime,data,duration,w,h,mentions,reply_to) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id, created_at`,
+    [c.id, req.user.id, req.user.name, kind, text || null, mime, buf, dur, w, h, tags, reply])).rows[0];
+  await q('UPDATE chats SET last_at=now() WHERE id=$1', [c.id]);
+  await q('UPDATE chat_members SET last_read=GREATEST(last_read,$3), seen_at=now() WHERE chat_id=$1 AND user_id=$2', [c.id, req.user.id, r.id]);
+  // who to alert
+  const others = members.filter(x => x !== req.user.id);
+  const st = (await q(`SELECT user_id, muted, (seen_at > now() - interval '12 seconds') here FROM chat_members WHERE chat_id=$1`, [c.id])).rows, S = {};
+  st.forEach(x => { S[x.user_id] = x; });
+  const gname = c.kind === 'dm' ? null : c.name, pv = preview({ kind, body: text, duration: dur }).slice(0, 140);
+  const tagged = tags.includes(-1) ? others : others.filter(x => tags.includes(x));
+  const rest = others.filter(x => !tagged.includes(x) && !(S[x] && (S[x].muted || S[x].here)));
+  if (c.kind === 'dm') await notifyChat(others.filter(x => !(S[x] && S[x].here)), `💬 ${req.user.name}`, pv, c.id, true);
+  else {
+    await notifyChat(tagged.filter(x => !(S[x] && S[x].here)), `📣 ${req.user.name} tagged you · ${gname}`, pv, c.id, true);
+    await notifyChat(rest, `💬 ${gname}`, `${req.user.name}: ${pv}`, c.id, false);
+  }
+  res.json({ id: r.id, created_at: r.created_at });
+}));
+app.get('/api/chat-media/:id', wrap(async (req, res) => {
+  const m = (await q('SELECT chat_id, data, mime, deleted FROM chat_messages WHERE id=$1', [req.params.id])).rows[0];
+  if (!m || m.deleted || !m.data) return res.status(404).end();
+  if (!(await chatFor(req.user, m.chat_id))) return res.status(403).end();
+  const buf = m.data, total = buf.length, range = /bytes=(\d*)-(\d*)/.exec(req.headers.range || '');
+  res.set({ 'Content-Type': m.mime || 'application/octet-stream', 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, max-age=604800' });
+  if (range) { const s = range[1] ? +range[1] : 0, e = range[2] ? Math.min(+range[2], total - 1) : total - 1; res.status(206).set('Content-Range', `bytes ${s}-${e}/${total}`).send(buf.subarray(s, e + 1)); }
+  else res.send(buf);
+}));
+// delete: your own message, or anything if you are the Super Admin
+app.delete('/api/chat-messages/:id', wrap(async (req, res) => {
+  const m = (await q('SELECT id, user_id FROM chat_messages WHERE id=$1', [req.params.id])).rows[0];
+  if (!m) return res.status(404).json({ error: 'Not found' });
+  if (m.user_id !== req.user.id && !isSuper(req.user)) return res.status(403).json({ error: 'You can only delete your own messages' });
+  await q('UPDATE chat_messages SET deleted=true, data=NULL, body=NULL WHERE id=$1', [m.id]); res.json({ ok: true });
+}));
+
+// =====================================================================
+// ---------- holidays, festivals & special days + the daily greeting ----------
+// =====================================================================
+// [day, name, kind, office holiday?, emoji, greeting]
+const G = 'Government', F = 'Festival', SP = 'Special Day';
+const HOLIDAY_SEED = [
+  ['2026-01-01', "New Year's Day", G, true, '🎆', 'Happy New Year! Wishing you a year full of good health, happy customers and big wins.'],
+  ['2026-01-12', 'National Youth Day', SP, false, '🌟', 'Stay curious, stay bold — the energy you bring every day moves the whole team forward.'],
+  ['2026-01-14', 'Bhogi', F, false, '🔥', 'Happy Bhogi! Out with the old, in with the new — a fresh start for the season.'],
+  ['2026-01-15', 'Pongal', G, true, '🌾', 'Pongalo Pongal! May your home overflow with joy and prosperity, just like the sweet pongal pot.'],
+  ['2026-01-16', 'Thiruvalluvar Day', G, true, '📜', 'Happy Thiruvalluvar Day! Wisdom, honesty and hard work — the timeless recipe for success.'],
+  ['2026-01-17', 'Uzhavar Thirunal', G, true, '🐄', 'Happy Uzhavar Thirunal! A big thank you to the farmers who feed us all.'],
+  ['2026-01-26', 'Republic Day', G, true, '🇮🇳', 'Happy Republic Day! Proud to build, serve and grow together.'],
+  ['2026-02-01', 'Thai Poosam', G, true, '🪔', 'Happy Thai Poosam! Wishing you strength, devotion and blessings.'],
+  ['2026-02-15', 'Maha Shivaratri', F, false, '🕉️', 'Wishing you a peaceful and blessed Maha Shivaratri.'],
+  ['2026-03-04', 'Holi', F, false, '🎨', 'Happy Holi! May your day be as colourful as your smile.'],
+  ['2026-03-08', "International Women's Day", SP, false, '💐', "Happy Women's Day to every amazing woman on our team and in our lives — thank you!"],
+  ['2026-03-19', 'Telugu New Year (Ugadi)', G, true, '🌼', 'Happy Ugadi! A sweet new beginning with a little bit of every flavour of life.'],
+  ['2026-03-21', 'Ramzan (Idul Fitr)', G, true, '🌙', 'Eid Mubarak! Wishing you peace, happiness and lots of sweet moments with family.'],
+  ['2026-03-31', 'Mahaveer Jayanthi', G, true, '🙏', 'Happy Mahaveer Jayanthi! Kindness and peace to all.'],
+  ['2026-04-03', 'Good Friday', G, true, '✝️', 'A day of reflection and peace. Wishing you calm and comfort today.'],
+  ['2026-04-05', 'Easter', F, false, '🐣', 'Happy Easter! New hope, new beginnings.'],
+  ['2026-04-14', 'Tamil New Year & Dr. Ambedkar Birthday', G, true, '🎉', 'Iniya Tamil Puthandu Nalvazhthukkal! Happy Tamil New Year — may this year bring success in everything you do.'],
+  ['2026-04-22', 'Earth Day', SP, false, '🌍', 'Happy Earth Day! Switch off what you don’t need — every small saving counts.'],
+  ['2026-05-01', 'May Day (Labour Day)', G, true, '🛠️', 'Happy May Day! Every job done well by this team makes a difference — thank you for your hard work.'],
+  ['2026-05-10', "Mother's Day", SP, false, '💐', "Happy Mother's Day! Give your amma a call today."],
+  ['2026-05-28', 'Bakrid (Idul Azha)', G, true, '🌙', 'Eid al-Adha Mubarak! Wishing you blessings, generosity and joy.'],
+  ['2026-06-05', 'World Environment Day', SP, false, '🌱', 'Happy Environment Day! Plant a tree, save a drop, keep it green.'],
+  ['2026-06-21', "International Yoga Day & Father's Day", SP, false, '🧘', "Happy Yoga Day and Father's Day! Take a deep breath, stretch — and thank your appa."],
+  ['2026-06-26', 'Muharram', G, true, '🌙', 'Wishing you peace and reflection this Muharram.'],
+  ['2026-07-01', "National Doctors' Day", SP, false, '🩺', "Happy Doctors' Day! Thank you to the doctors who keep us healthy."],
+  ['2026-08-02', 'Friendship Day', SP, false, '🤝', 'Happy Friendship Day! Great teams are built on great friendships.'],
+  ['2026-08-15', 'Independence Day', G, true, '🇮🇳', 'Happy Independence Day! Jai Hind!'],
+  ['2026-08-26', 'Milad-un-Nabi', G, true, '🌙', 'Wishing you peace and blessings on Milad-un-Nabi.'],
+  ['2026-08-26', 'Onam', F, false, '🌸', 'Happy Onam! Wishing you a feast of happiness.'],
+  ['2026-08-28', 'Raksha Bandhan', F, false, '🎗️', 'Happy Raksha Bandhan! Celebrating the bond of love and care.'],
+  ['2026-09-04', 'Krishna Jayanthi', G, true, '🦚', 'Happy Krishna Jayanthi! May the little Krishna bring joy into your home.'],
+  ['2026-09-05', "Teachers' Day", SP, false, '🍎', "Happy Teachers' Day! Thank you to everyone who teaches and guides — at school and at work."],
+  ['2026-09-14', 'Vinayakar Chathurthi', G, true, '🐘', 'Happy Vinayakar Chathurthi! May Lord Ganesha remove every obstacle in your way.'],
+  ['2026-09-15', "Engineers' Day", SP, false, '⚙️', "Happy Engineers' Day to our technicians and engineers — you make it all work!"],
+  ['2026-10-02', 'Gandhi Jayanthi', G, true, '🕊️', 'Happy Gandhi Jayanthi! Be the change you wish to see.'],
+  ['2026-10-19', 'Ayudha Pooja', G, true, '🔧', 'Happy Ayudha Pooja! Honouring the tools and the hands that do great work every day.'],
+  ['2026-10-20', 'Vijaya Dasami', G, true, '🏹', 'Happy Vijaya Dasami! May good always win — a great day to start something new.'],
+  ['2026-11-08', 'Deepavali', G, true, '🪔', 'Happy Deepavali! May the festival of lights fill your home with joy, sweets and sparkle. Celebrate safely!'],
+  ['2026-11-14', "Children's Day", SP, false, '🎈', "Happy Children's Day! Stay young at heart."],
+  ['2026-11-24', 'Karthigai Deepam', F, false, '🪔', 'Happy Karthigai Deepam! May the lamps light up your home and your heart.'],
+  ['2026-12-24', 'Christmas Eve', SP, false, '🎄', 'Merry Christmas Eve! Get ready for some cake and cheer.'],
+  ['2026-12-25', 'Christmas', G, true, '🎄', 'Merry Christmas! Wishing you joy, peace and lots of cake.'],
+  ['2026-12-31', "New Year's Eve", SP, false, '🥳', 'Last day of the year! Thank you for all your hard work in 2026 — let’s make 2027 even bigger.'],
+  ['2027-01-01', "New Year's Day", G, true, '🎆', 'Happy New Year 2027! New goals, new wins — let’s go!'],
+  ['2027-01-12', 'National Youth Day', SP, false, '🌟', 'Stay curious, stay bold — the energy you bring every day moves the whole team forward.'],
+  ['2027-01-14', 'Bhogi', F, false, '🔥', 'Happy Bhogi! Out with the old, in with the new.'],
+  ['2027-01-15', 'Pongal', G, true, '🌾', 'Pongalo Pongal! May your home overflow with joy and prosperity.'],
+  ['2027-01-16', 'Thiruvalluvar Day', G, true, '📜', 'Happy Thiruvalluvar Day! Wisdom, honesty and hard work.'],
+  ['2027-01-17', 'Uzhavar Thirunal', G, true, '🐄', 'Happy Uzhavar Thirunal! Thank you to the farmers who feed us all.'],
+  ['2027-01-22', 'Thai Poosam', G, true, '🪔', 'Happy Thai Poosam! Wishing you strength and blessings.'],
+  ['2027-01-26', 'Republic Day', G, true, '🇮🇳', 'Happy Republic Day! Proud to build, serve and grow together.'],
+  ['2027-03-08', "International Women's Day", SP, false, '💐', "Happy Women's Day to every amazing woman on our team!"],
+  ['2027-03-10', 'Ramzan (Idul Fitr)', G, true, '🌙', 'Eid Mubarak! Wishing you peace, happiness and sweet moments with family.'],
+  ['2027-03-26', 'Good Friday', G, true, '✝️', 'A day of reflection and peace. Wishing you calm today.'],
+  ['2027-04-07', 'Telugu New Year (Ugadi)', G, true, '🌼', 'Happy Ugadi! A sweet new beginning.'],
+  ['2027-04-14', 'Tamil New Year & Dr. Ambedkar Birthday', G, true, '🎉', 'Iniya Tamil Puthandu Nalvazhthukkal! Happy Tamil New Year!'],
+  ['2027-04-19', 'Mahaveer Jayanthi', G, true, '🙏', 'Happy Mahaveer Jayanthi! Kindness and peace to all.'],
+  ['2027-05-01', 'May Day (Labour Day)', G, true, '🛠️', 'Happy May Day! Thank you for your hard work.'],
+  ['2027-05-09', "Mother's Day", SP, false, '💐', "Happy Mother's Day! Give your amma a call today."],
+  ['2027-05-17', 'Bakrid (Idul Azha)', G, true, '🌙', 'Eid al-Adha Mubarak! Wishing you blessings and joy.'],
+  ['2027-06-15', 'Muharram', G, true, '🌙', 'Wishing you peace and reflection this Muharram.'],
+  ['2027-06-20', "Father's Day", SP, false, '👔', "Happy Father's Day! Thank your appa today."],
+  ['2027-08-15', 'Independence Day & Milad-un-Nabi', G, true, '🇮🇳', 'Happy Independence Day! Jai Hind! And peace and blessings on Milad-un-Nabi.'],
+  ['2027-08-25', 'Krishna Jayanthi', G, true, '🦚', 'Happy Krishna Jayanthi!'],
+  ['2027-09-04', 'Vinayakar Chathurthi', G, true, '🐘', 'Happy Vinayakar Chathurthi! May every obstacle be removed.'],
+  ['2027-09-05', "Teachers' Day", SP, false, '🍎', "Happy Teachers' Day!"],
+  ['2027-09-15', "Engineers' Day", SP, false, '⚙️', "Happy Engineers' Day to our technicians and engineers!"],
+  ['2027-10-02', 'Gandhi Jayanthi', G, true, '🕊️', 'Happy Gandhi Jayanthi! Be the change you wish to see.'],
+  ['2027-10-08', 'Ayudha Pooja', G, true, '🔧', 'Happy Ayudha Pooja! Honouring the tools and hands that do great work.'],
+  ['2027-10-09', 'Vijaya Dasami', G, true, '🏹', 'Happy Vijaya Dasami! A great day to start something new.'],
+  ['2027-10-28', 'Deepavali', G, true, '🪔', 'Happy Deepavali! May the festival of lights fill your home with joy. Celebrate safely!'],
+  ['2027-11-14', "Children's Day", SP, false, '🎈', "Happy Children's Day! Stay young at heart."],
+  ['2027-12-25', 'Christmas', G, true, '🎄', 'Merry Christmas! Wishing you joy and peace.'],
+  ['2027-12-31', "New Year's Eve", SP, false, '🥳', 'Thank you for a great 2027!'],
+];
+const HCOLS = `id, to_char(day,'YYYY-MM-DD') AS day, name, kind, is_holiday, emoji, greeting`;
+const officeHolidays = async (from, to) => { const o = {}; (await q(`SELECT ${HCOLS} FROM holidays WHERE is_holiday AND day BETWEEN $1 AND $2`, [from, to])).rows.forEach(h => { o[h.day] = o[h.day] ? o[h.day] + ' · ' + h.name : h.name; }); return o; };
+app.get('/api/holidays', wrap(async (req, res) => {
+  const y = /^\d{4}$/.test(req.query.year || '') ? req.query.year : (await todayIST()).slice(0, 4);
+  res.set('Cache-Control', 'no-store').json({ year: y, today: await todayIST(), items: (await q(`SELECT ${HCOLS} FROM holidays WHERE EXTRACT(YEAR FROM day)=$1 ORDER BY day, is_holiday DESC, name`, [y])).rows });
+}));
+const holBody = b => {
+  const day = String(b.day || ''), name = String(b.name || '').trim().slice(0, 80);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return { error: 'Choose a date' };
+  if (!name) return { error: 'Write the name' };
+  const kind = [G, F, SP].includes(b.kind) ? b.kind : F;
+  return { v: [day, name, kind, !!b.is_holiday, String(b.emoji || '').slice(0, 8) || '🎉', String(b.greeting || '').trim().slice(0, 400) || null] };
+};
+app.post('/api/holidays', wrap(async (req, res) => {
+  if (!isSuper(req.user)) return res.status(403).json({ error: 'Only the Super Admin can change holidays' });
+  const h = holBody(req.body || {}); if (h.error) return res.status(400).json(h);
+  const r = await q(`INSERT INTO holidays(day,name,kind,is_holiday,emoji,greeting) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (day,name) DO UPDATE SET kind=$3,is_holiday=$4,emoji=$5,greeting=$6 RETURNING id`, h.v);
+  res.json({ id: r.rows[0].id });
+}));
+app.patch('/api/holidays/:id', wrap(async (req, res) => {
+  if (!isSuper(req.user)) return res.status(403).json({ error: 'Only the Super Admin can change holidays' });
+  const h = holBody(req.body || {}); if (h.error) return res.status(400).json(h);
+  await q(`UPDATE holidays SET day=$2,name=$3,kind=$4,is_holiday=$5,emoji=$6,greeting=$7 WHERE id=$1`, [req.params.id, ...h.v]); res.json({ ok: true });
+}));
+app.delete('/api/holidays/:id', superOnly, wrap(async (req, res) => { await q('DELETE FROM holidays WHERE id=$1', [req.params.id]); res.json({ ok: true }); }));
+
+// Thoughts for an ordinary day (one per day, same for everyone)
+const DAILY = [
+  ['☀️', 'Small things done well every day add up to big results.'],
+  ['🚀', 'Every happy customer is the best advertisement we will ever have.'],
+  ['💪', 'Hard work beats talent when talent does not work hard.'],
+  ['🤝', 'Alone we can do so little; together we can do so much.'],
+  ['🎯', 'Focus on one job at a time and finish it like a pro.'],
+  ['🌱', 'Learn one new thing today — tomorrow you will be glad you did.'],
+  ['😊', 'A smile at the customer’s door is part of the service.'],
+  ['⚡', 'Done is better than perfect — but neat and safe is non-negotiable.'],
+  ['🧠', 'Listen first, then fix. The customer usually tells you the problem.'],
+  ['🏆', 'Quality is remembered long after the price is forgotten.'],
+  ['🔧', 'Take care of your tools and they will take care of you.'],
+  ['📞', 'A quick call to update a customer saves ten angry calls later.'],
+  ['🌈', 'Positive mind, positive day, positive results.'],
+  ['⏰', 'On time is the new early. Respect the customer’s time.'],
+  ['🙌', 'Thank a teammate today — appreciation is free and powerful.'],
+  ['🧹', 'Leave every site cleaner than you found it.'],
+  ['📈', 'Better than yesterday — that is the only target that matters.'],
+  ['🛡️', 'Safety first, always. Your family is waiting for you at home.'],
+  ['💡', 'Every problem has a solution — sometimes it just needs a fresh look.'],
+  ['🎉', 'Celebrate small wins. They keep the big goals moving.'],
+  ['🌟', 'Your work today builds the name of Heaven Automation tomorrow.'],
+];
+const GREET_TIME = h => h < 12 ? ['Good morning', '🌅'] : h < 16 ? ['Good afternoon', '🌤️'] : h < 20 ? ['Good evening', '🌇'] : ['Good night', '🌙'];
+app.get('/api/greeting', wrap(async (req, res) => {
+  const today = await todayIST(), uid = req.user.id;
+  const now = (await q(`SELECT EXTRACT(HOUR FROM now() AT TIME ZONE '${TZ}')::int h, to_char((now() AT TIME ZONE '${TZ}')::date+1,'YYYY-MM-DD') tm`)).rows[0];
+  const key = `greet:${uid}`, seen = ((await q('SELECT v FROM settings WHERE k=$1', [key])).rows[0] || {}).v;
+  const first = seen !== today;
+  if (first && req.query.mark) await q(`INSERT INTO settings(k,v) VALUES($1,$2) ON CONFLICT (k) DO UPDATE SET v=$2`, [key, today]);
+  const days = (await q(`SELECT ${HCOLS} FROM holidays WHERE day=$1 ORDER BY is_holiday DESC, kind`, [today])).rows;
+  const tomorrow = (await q(`SELECT ${HCOLS} FROM holidays WHERE day=$1 AND is_holiday`, [now.tm])).rows;
+  const next = (await q(`SELECT ${HCOLS} FROM holidays WHERE day>$1 AND is_holiday ORDER BY day LIMIT 1`, [today])).rows[0] || null;
+  const u = (await q(`SELECT name, to_char(join_date,'MM-DD') jmd, EXTRACT(YEAR FROM join_date)::int jy FROM users WHERE id=$1`, [uid])).rows[0] || {};
+  const yrs = u.jmd && u.jmd === today.slice(5) && u.jy < +today.slice(0, 4) ? +today.slice(0, 4) - u.jy : 0;
+  const n = Math.floor(Date.UTC(+today.slice(0, 4), +today.slice(5, 7) - 1, +today.slice(8, 10)) / 864e5), [e, t] = DAILY[n % DAILY.length];
+  const [hi, he] = GREET_TIME(now.h);
+  // a short "your day" line
+  let mine = null;
+  try {
+    if (req.user.role === 'Technician') mine = (await q(`SELECT COUNT(*)::int n FROM services WHERE (technician_id=$1 OR helper_id=$1) AND status NOT IN ('Resolved','Cancelled')`, [uid])).rows[0].n + ' open job(s) for you';
+    else if (req.user.role !== 'Staff') { const d = (await q(`SELECT COUNT(*)::int n FROM todos WHERE COALESCE(for_user,created_by)=$1 AND NOT done AND to_char(due_at AT TIME ZONE '${TZ}','YYYY-MM-DD')=$2`, [uid, today])).rows[0]; mine = d.n ? `${d.n} reminder(s) due today` : null; }
+  } catch (x) { mine = null; }
+  res.set('Cache-Control', 'no-store').json({ first, today, hello: hi, hello_emoji: he, name: (u.name || req.user.name || '').split(' ')[0],
+    days, tomorrow, next, anniversary: yrs, thought: { emoji: e, text: t }, mine });
+}));
+// Morning wishes on the day itself, and an evening heads-up the day before an office holiday
+async function holidayDue() {
+  try {
+    const t = (await q(`SELECT to_char(now() AT TIME ZONE '${TZ}','YYYY-MM-DD') d, EXTRACT(HOUR FROM now() AT TIME ZONE '${TZ}')::int h, to_char((now() AT TIME ZONE '${TZ}')::date+1,'YYYY-MM-DD') tm`)).rows[0];
+    const once = async k => (await q(`INSERT INTO settings(k,v) VALUES($1,'1') ON CONFLICT (k) DO NOTHING RETURNING k`, [k])).rows.length > 0;
+    const everyone = async () => (await q('SELECT id FROM users WHERE active')).rows.map(r => r.id);
+    if (t.h >= 8) for (const h of (await q(`SELECT ${HCOLS} FROM holidays WHERE day=$1`, [t.d])).rows)
+      if (await once(`holnote:${t.d}:${h.id}`)) await notifyLink(await everyone(), `${h.emoji || '🎉'} ${h.is_holiday ? 'Holiday today' : 'Today'} · ${h.name}`, h.greeting || `Wishing you a wonderful ${h.name}!`, 'greet');
+    if (t.h >= 17) for (const h of (await q(`SELECT ${HCOLS} FROM holidays WHERE day=$1 AND is_holiday`, [t.tm])).rows)
+      if (await once(`holeve:${t.tm}:${h.id}`)) await notifyLink(await everyone(), `📅 Tomorrow is a holiday · ${h.name}`, `The office is closed tomorrow (${new Date(t.tm + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short' })}) for ${h.name}. Enjoy! ${h.emoji || ''}`, 'greet');
+  } catch (e) { console.error('holiday notify', e.message); }
+}
+
+init().then(initChat).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
   .catch(e => { console.error('DB init failed', e.message); process.exit(1); });
