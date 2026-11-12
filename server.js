@@ -423,6 +423,7 @@ async function init() {
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION;
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS map_url TEXT;
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS company TEXT;
+  ALTER TABLE services ADD COLUMN IF NOT EXISTS created_by INT;
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS location_by TEXT;
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS location_on TIMESTAMPTZ;
   CREATE TABLE IF NOT EXISTS notifications (id SERIAL PRIMARY KEY, user_id INT NOT NULL, title TEXT, body TEXT, service_id INT, read BOOLEAN DEFAULT false, created_at TIMESTAMPTZ DEFAULT now());
@@ -601,7 +602,7 @@ app.delete('/api/users/:id', superOnly, wrap(async (req, res) => {
 }));
 
 // ---------- services ----------
-const SELECT = `SELECT s.*, c.name customer, c.company customer_company, c.phone, c.email, c.address, c.city, c.lat, c.lng, c.map_url, c.location_by, c.location_on, t.name technician, h.name helper,
+const SELECT = `SELECT s.*, (SELECT name FROM users WHERE id=s.created_by) created_by_name, (SELECT role FROM users WHERE id=s.created_by) created_by_role, c.name customer, c.company customer_company, c.phone, c.email, c.address, c.city, c.lat, c.lng, c.map_url, c.location_by, c.location_on, t.name technician, h.name helper,
   COALESCE(pp.given,0) given, br.name brand
   FROM services s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN brands br ON br.id=s.brand_id
   LEFT JOIN (SELECT service_id, SUM(amount) given FROM payments WHERE approval<>'Rejected' GROUP BY service_id) pp ON pp.service_id=s.id
@@ -762,6 +763,12 @@ app.post('/api/services', need('service_create'), wrap(async (req, res) => {
   const r = await q(`INSERT INTO services(ticket_no,customer_id,product,request_details,service_type,visit_type,charges_applied,kind,brand_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
     [ticket, cid, b.product, b.request_details, b.service_type || 'Other', b.visit_type || 'Onsite', b.charges_applied || 0, kind, brandId]);
   await log(r.rows[0].id, req.user.name, (kind === 'Job' ? 'Job' : 'Ticket') + ' created');
+  await q('UPDATE services SET created_by=$2 WHERE id=$1', [r.rows[0].id, req.user.id]);
+  if (isSuper(req.user)) {   // MD created it → tell that brand's admin staff, so they see and handle it
+    const adm = (await q(`SELECT id FROM users WHERE active AND role='Admin' AND (brand_id IS NULL OR brand_id=$1)`, [brandId])).rows.map(x => x.id);
+    const cn = ((await q('SELECT name FROM customers WHERE id=$1', [cid])).rows[0] || {}).name || '', bn = ((await q('SELECT name FROM brands WHERE id=$1', [brandId])).rows[0] || {}).name || '';
+    if (adm.length) await notify(adm, `👔 MD created a ${kind === 'Job' ? 'job' : 'service'}`, `#${ticket} · ${cn}${bn ? ' · ' + bn : ''} · ${b.service_type || 'Other'}`, r.rows[0].id);
+  }
   res.json({ id: r.rows[0].id, ticket_no: ticket });
 }));
 
@@ -810,6 +817,10 @@ app.patch('/api/services/:id', need('service_edit', 'service_assign'), wrap(asyn
     if (newHelp) await notify([newHelp], 'You are the helper on a job', `${where} — technician: ${tn}. Open My Jobs to see the work.`, cur.id);
     if (!newTech && newHelp && fTech) await notify([fTech], 'Helper added', `${hn} will help you on #${cur.ticket_no}`, cur.id);
     if (removed.length) await notify(removed, 'Service reallocated', `#${cur.ticket_no} · ${c ? c.name : ''} — this service was allocated to another person`, null);
+    if (isSuper(req.user) && (newTech || newHelp)) {   // MD allocated → the brand's admin staff should know
+      const adm = (await q(`SELECT id FROM users WHERE active AND role='Admin' AND (brand_id IS NULL OR brand_id=$1)`, [cur.brand_id])).rows.map(x => x.id);
+      if (adm.length) await notify(adm, '👔 MD allocated a service', `${where} → ${tn}${hn ? ' + helper ' + hn : ''}`, cur.id);
+    }
   }
   res.json({ ok: true });
 }));

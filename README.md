@@ -85,3 +85,8 @@ Profile → "Google Calendar · Siri & Google Assistant" → Set up.
 - New service has a **Company name** for new customers. For an existing customer, the company can be added or changed when you create the ticket.
 - The company shows on ticket cards, on the ticket, and on the Customers list. Customers can be searched by company.
 - When a lead is won, its company is kept on the customer.
+
+## Services created by the MD
+- When the Super Admin (MD) creates a service or job, that brand's admin staff get a notification. The ticket shows a **👔 From MD** badge and "Created by".
+- When the MD allocates a technician or helper, the brand's admin staff are notified too.
+- The brand choice in New service starts on **Heaven**. The note under it says that brand's admin staff will handle the ticket.
