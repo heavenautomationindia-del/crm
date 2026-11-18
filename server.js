@@ -14,7 +14,7 @@ const q = (sql, p) => pool.query(sql, p);
 const SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const app = express();
 app.set('trust proxy', 1);
-app.use(express.json({ limit: '16mb' }));
+app.use(express.json({ limit: '24mb', verify: (req, res, buf) => { if (req.originalUrl.startsWith('/webhook/')) req.rawBody = buf; } }));
 app.use(express.static(path.join(__dirname, 'public')));
 const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(e => { console.error(e); res.status(500).json({ error: e.message }); });
 
@@ -24,9 +24,11 @@ const SERVICE_TYPES = ['Camera Issue', 'Automation Issue', 'Network / Wi-Fi Issu
 const VISIT_TYPES = ['Onsite', 'Offsite'];
 const LEAD_STAGES = ['New Enquiry', 'Contacted', 'Site Visit', 'Quotation', 'Negotiation', 'Closed Won', 'Closed Lost'];
 const LEAD_PRIORITIES = ['Hot', 'Warm', 'Cold'];
-const LEAD_SOURCES = ['Call', 'WhatsApp', 'Walk-in', 'Website', 'Instagram', 'Referral', 'Other'];
-const LEAD_INTERESTS = ['CCTV Cameras', 'Home Automation', 'Smart Lock / Access', 'Intercom', 'Alarm / Security', 'Networking / Wi-Fi', 'Other'];
-const STATUSES = ['New Ticket', 'Work Not Started', 'On-Process', 'Work Pending', 'Awaiting Payment', 'Resolved', 'Cancelled'];
+const LEAD_SOURCES_DEF = ['Call', 'WhatsApp', 'Walk-in', 'Website', 'Instagram', 'Referral', 'Other'];
+const LEAD_SOURCES = [...LEAD_SOURCES_DEF], LEAD_INTERESTS = [];
+const LEAD_INTERESTS_DEF = ['CCTV Cameras', 'Home Automation', 'Smart Lock / Access', 'Intercom', 'Alarm / Security', 'Networking / Wi-Fi', 'Other'];
+LEAD_INTERESTS.push(...LEAD_INTERESTS_DEF);
+const STATUSES = ['New Ticket', 'Work Not Started', 'On-Process', 'Work Pending', 'Billing', 'Awaiting Payment', 'Resolved', 'Cancelled'];
 const APPROVALS = ['Pending', 'Approved', 'Rejected'];
 const BANKS = ['HDFC BANK LTD - 50200080113661', 'HDFC BANK LTD - 50200090005267', 'SERVICE PETTY CASH', 'SALES PETTY CASH'];
 // Super Admin = owner: everything, and the ONLY role that can delete anything.
@@ -36,21 +38,30 @@ const ROLES = [SUPER, 'Admin', 'Sales', 'Technician', 'Staff'];   // Staff = dri
 const PERMS = [
   { k: 'dashboard', l: 'Dashboard', g: 'Menus' }, { k: 'services', l: 'Services & jobs', g: 'Menus' },
   { k: 'customers', l: 'Customers', g: 'Menus' }, { k: 'team', l: 'Team', g: 'Menus' }, { k: 'leads', l: 'Leads', g: 'Menus' },
-  { k: 'attendance', l: 'Team attendance, approvals & report (always on for Admin staff)', g: 'Menus' },
   { k: 'pay_overview', l: 'Service payments & overview (today’s customer payments, status counts)', g: 'Menus' },
   { k: 'service_create', l: 'Create services & jobs', g: 'Actions' }, { k: 'service_assign', l: 'Assign technician', g: 'Actions' },
   { k: 'service_edit', l: 'Edit status & approval', g: 'Actions' }, { k: 'payments', l: 'Add payments & discounts', g: 'Actions' },
   { k: 'view_charges', l: 'See charges', g: 'Actions' }, { k: 'view_phone', l: 'See customer phone', g: 'Actions' },
   { k: 'types', l: 'Add issue types & job types', g: 'Actions' },
+  { k: 'customer_edit', l: 'Edit customer name, company & phone', g: 'Actions' },
+  { k: 'billing', l: 'Billing — quotations, bills & payment received', g: 'Actions' },
+  { k: 'lead_lists', l: 'Add lead sources & interests', g: 'Actions' },
+  { k: 'att_team', l: 'See team attendance — who came, leave, absent, late', g: 'Attendance & pay' },
+  { k: 'leave_approve', l: 'Approve leave / permission / attendance requests & mark attendance', g: 'Attendance & pay' },
+  { k: 'payroll', l: 'Payroll — staff salaries, advances & salary download', g: 'Attendance & pay' },
+  { k: 'chat', l: 'Team chat', g: 'Features' }, { k: 'projects', l: 'Projects', g: 'Features' },
+  { k: 'voice_assign', l: 'Send voice messages & tasks to other staff', g: 'Features' },
+  { k: 'whatsapp', l: 'WhatsApp — see and reply on the Sales & Service numbers', g: 'Features' },
 ];
-const TECH_KEYS = ['view_phone', 'view_charges'];
+const TECH_KEYS = ['view_phone', 'view_charges', 'chat', 'projects', 'voice_assign', 'whatsapp'], STAFF_KEYS = ['chat'];
 const ALL_KEYS = PERMS.map(p => p.k);
 const DEFAULTS = {
-  Admin: ALL_KEYS.filter(k => k !== 'team'),
-  Sales: ['dashboard', 'services', 'customers', 'leads', 'service_create', 'view_charges', 'view_phone'],
-  Technician: ['view_phone'],
+  Admin: ALL_KEYS.filter(k => !['team', 'payroll'].includes(k)),
+  Sales: ['dashboard', 'services', 'customers', 'leads', 'service_create', 'view_charges', 'view_phone', 'chat', 'projects', 'voice_assign', 'whatsapp'],
+  Technician: ['view_phone', 'chat', 'projects'],
+  Staff: ['chat'],
 };
-const cleanPerms = (role, list) => role === SUPER ? ALL_KEYS : role === 'Staff' ? [] : (Array.isArray(list) ? list : DEFAULTS[role] || []).filter(k => (role === 'Technician' ? TECH_KEYS : ALL_KEYS).includes(k));
+const cleanPerms = (role, list) => role === SUPER ? ALL_KEYS : (Array.isArray(list) ? list : DEFAULTS[role] || []).filter(k => (role === 'Technician' ? TECH_KEYS : role === 'Staff' ? STAFF_KEYS : ALL_KEYS).includes(k));
 const BRANDS = ['Heaven', 'G Media'];
 const JOB_TYPES = ['New Installation', 'CCTV Camera Fitting', 'Automation Fitting', 'Wiring / Cabling', 'Site Survey', 'AMC Visit', 'Other'];
 const OPEN_ST = ['Work Not Started', 'On-Process', 'Work Pending'];   // a technician with one of these is busy
@@ -75,6 +86,8 @@ const isBoss = u => u.role === SUPER || u.role === 'Admin';
 const can = (u, k) => isSuper(u) || (u.permissions || []).includes(k);
 const isTech = u => u.role === 'Technician';
 const need = (...ks) => (req, res, next) => ks.some(k => can(req.user, k)) ? next() : res.status(403).json({ error: 'Not allowed' });
+const approveNeed = (req, res, next) => can(req.user, 'leave_approve') ? next() : res.status(403).json({ error: 'You don’t have permission to approve or mark attendance' });
+const payNeed = (req, res, next) => can(req.user, 'payroll') ? next() : res.status(403).json({ error: 'Not allowed' });
 const superOnly = (req, res, next) => isSuper(req.user) ? next() : res.status(403).json({ error: 'Only the Super Admin can delete' });
 const techOnly = (req, res, next) => (isTech(req.user) || isSuper(req.user)) ? next() : res.status(403).json({ error: 'Not allowed' });
 const auth = wrap(async (req, res, next) => {
@@ -112,7 +125,7 @@ app.use('/api', (req, res, next) => {
 app.use('/api', (req, res, next) => (req.path === '/login' || req.path === '/logout') ? next() : auth(req, res, next));
 app.get('/api/pulse', wrap(async (req, res) => {
   const r = (await q('SELECT COALESCE(MAX(id),0)::int last, COUNT(*) FILTER (WHERE NOT read)::int unread FROM notifications WHERE user_id=$1', [req.user.id])).rows[0];
-  res.set('Cache-Control', 'no-store').json({ v: VER, last: r.last, unread: r.unread, chat: await chatUnread(req.user.id).catch(() => 0), chat_last: (await q('SELECT COALESCE(MAX(id),0)::int n FROM chat_messages')).rows[0].n });
+  res.set('Cache-Control', 'no-store').json({ v: VER, last: r.last, unread: r.unread, chat: can(req.user, 'chat') ? await chatUnread(req.user.id).catch(() => 0) : 0, wa: can(req.user, 'whatsapp') ? await waUnread(req.user.id).catch(() => 0) : 0, wa_last: can(req.user, 'whatsapp') ? ((await q('SELECT COALESCE(MAX(id),0)::int n FROM wa_messages').catch(() => ({ rows: [{ n: 0 }] }))).rows[0].n) : 0, chat_last: (await q('SELECT COALESCE(MAX(id),0)::int n FROM chat_messages')).rows[0].n });
 }));
 app.get('/api/me', (req, res) => res.json(me(req.user)));
 app.post('/api/password', wrap(async (req, res) => {
@@ -348,6 +361,7 @@ async function initV2() {
   ALTER TABLE notifications ADD COLUMN IF NOT EXISTS link TEXT;
   ALTER TABLE attendance ADD COLUMN IF NOT EXISTS in_dist INT;
   ALTER TABLE attendance ADD COLUMN IF NOT EXISTS out_dist INT;
+  ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS company BOOLEAN DEFAULT false;
   ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION;
   ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION;
   ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS distance INT;
@@ -425,6 +439,15 @@ async function init() {
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS map_url TEXT;
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS company TEXT;
   ALTER TABLE services ADD COLUMN IF NOT EXISTS created_by INT;
+  ALTER TABLE services ADD COLUMN IF NOT EXISTS bill_items JSONB;
+  ALTER TABLE services ADD COLUMN IF NOT EXISTS bill_note TEXT;
+  ALTER TABLE services ADD COLUMN IF NOT EXISTS bill_total NUMERIC(12,2);
+  ALTER TABLE services ADD COLUMN IF NOT EXISTS bill_state TEXT;
+  ALTER TABLE services ADD COLUMN IF NOT EXISTS bill_no INT;
+  ALTER TABLE services ADD COLUMN IF NOT EXISTS billed_at TIMESTAMPTZ;
+  ALTER TABLE payments ADD COLUMN IF NOT EXISTS mode TEXT;
+  ALTER TABLE payments ADD COLUMN IF NOT EXISTS actual NUMERIC(12,2);
+  ALTER TABLE payments ADD COLUMN IF NOT EXISTS disc NUMERIC(12,2);
   ALTER TABLE users ADD COLUMN IF NOT EXISTS att_rules JSONB;
   CREATE TABLE IF NOT EXISTS notes (id SERIAL PRIMARY KEY, user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE, day DATE NOT NULL, title TEXT, body TEXT,
     pinned BOOLEAN DEFAULT false, created_by INT, created_by_name TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
@@ -484,13 +507,27 @@ const techList = async () => {
     const t = m.get(x.id) || { id: x.id, name: x.name, photo_v: x.photo_v, busy: [] }; m.set(x.id, t);
     if (x.brand_id && !t.busy.some(z => z.brand_id === x.brand_id)) t.busy.push({ brand_id: x.brand_id, brand: x.brand, ticket_no: x.ticket_no });
   }
+  // who is away today: approved leave, week off, office holiday, permission time (shown as "not available" in allocation)
+  try {
+    const today = await todayIST(), now = (await q(`SELECT to_char(now() AT TIME ZONE '${TZ}','HH24:MI') t`)).rows[0].t, off = await office(), hol = (await officeHolidays(today, today))[today];
+    const lv = (await q(`SELECT user_id, kind, session, from_time ft, to_time tt FROM leave_requests WHERE status='Approved' AND kind IN ('Leave','Permission') AND $1::date BETWEEN from_date AND COALESCE(to_date,from_date)`, [today])).rows;
+    const ru = {}; (await q(`SELECT id, att_rules FROM users WHERE role='Technician' AND active`)).rows.forEach(u => { ru[u.id] = u; });
+    for (const t of m.values()) {
+      const L = lv.filter(x => x.user_id === t.id), leave = L.find(x => x.kind === 'Leave'), pm = L.filter(x => x.kind === 'Permission');
+      const R = rulesOf(ru[t.id] || {}, off), wo = (await offDaysFor(t.id, R, today, today))(today);
+      const win = pm.map(x => ({ f: x.ft || (x.session === 'Evening' ? m2hm(hm2m(R.out) - 120) : R.in), e: x.tt || (x.session === 'Morning' ? m2hm(hm2m(R.in) + 120) : R.out) }));
+      const cur = win.find(w => w.f <= now && now < w.e);
+      t.away = leave ? 'On leave today' : wo ? 'Week off today' : hol ? 'Holiday · ' + hol : cur ? `On permission till ${cur.e}` : null;
+      t.note = !t.away && win.length ? 'Permission ' + win.map(w => `${w.f}–${w.e}`).join(', ') : null;
+    }
+  } catch (e) { console.error('away', e.message); }
   return [...m.values()];
 };
 app.get('/api/meta', wrap(async (req, res) => {
   const ag = await q(`SELECT id,name FROM users WHERE role IN ('${SUPER}','Admin','Sales') AND active ORDER BY name`);
   let it = { rows: [] }; try { it = await q('SELECT id,name FROM issue_types ORDER BY id'); } catch (e) { /* table missing: fall back to defaults */ }
   const ISSUE_TYPES = it.rows, JT = (await q('SELECT id,name FROM job_types ORDER BY id')).rows, brands = (await q('SELECT id,name FROM brands ORDER BY id')).rows;
-  res.json({ SERVICE_TYPES: ISSUE_TYPES.length ? ISSUE_TYPES.map(r => r.name) : SERVICE_TYPES, ISSUE_TYPES, JOB_TYPES: JT.map(r => r.name), JOB_TYPE_ROWS: JT, brands, VISIT_TYPES, STATUSES, APPROVALS, BANKS, ROLES, PERMS, DEFAULTS, TECH_KEYS, LEAD_STAGES, LEAD_PRIORITIES, LEAD_SOURCES, LEAD_INTERESTS, LEAVE_TYPES, technicians: await techList(), agents: ag.rows });
+  res.json({ SERVICE_TYPES: ISSUE_TYPES.length ? ISSUE_TYPES.map(r => r.name) : SERVICE_TYPES, ISSUE_TYPES, JOB_TYPES: JT.map(r => r.name), JOB_TYPE_ROWS: JT, brands, VISIT_TYPES, STATUSES, APPROVALS, BANKS, ROLES, PERMS, DEFAULTS, TECH_KEYS, STAFF_KEYS, LEAD_STAGES, LEAD_PRIORITIES, LEAD_SOURCES, LEAD_INTERESTS, LEAVE_TYPES, technicians: await techList(), agents: ag.rows });
 }));
 
 // issue types (for services) and job types (for jobs): add = Super Admin or "Add issue types & job types"; delete = Super Admin only
@@ -619,7 +656,7 @@ const SELECT = `SELECT s.*, (SELECT name FROM users WHERE id=s.created_by) creat
   LEFT JOIN users t ON t.id=s.technician_id LEFT JOIN users h ON h.id=s.helper_id`;
 // technicians: only their own jobs (any brand). Staff tied to a brand: only that brand. Super Admin / staff with no brand: everything.
 const scope = (u, p, w) => {
-  if (isTech(u)) { p.push(u.id); w.push(`(s.technician_id=$${p.length} OR s.helper_id=$${p.length})`); }
+  if (isTech(u)) { p.push(u.id); w.push(`(s.technician_id=$${p.length} OR s.helper_id=$${p.length}) AND s.status<>'Billing'`); }   // billing is office work — hidden from technicians
   else if (u.brand_id) { p.push(u.brand_id); w.push(`s.brand_id=$${p.length}`); }
 };
 const brandOK = (u, s) => isTech(u) || !u.brand_id || s.brand_id === u.brand_id;
@@ -632,6 +669,7 @@ const custScope = (u, p) => {
 const shape = (s, u) => {
   if (!can(u, 'view_phone')) { delete s.phone; delete s.email; }
   if (!can(u, 'view_charges')) { delete s.charges_applied; delete s.discount; delete s.given; }
+  if (!can(u, 'billing')) { delete s.bill_items; delete s.bill_note; delete s.bill_total; }
   return s;
 };
 const log = (id, by, changes) => changes ? q('INSERT INTO service_history(service_id,done_by,changes) VALUES($1,$2,$3)', [id, by || 'System', changes]) : null;
@@ -657,6 +695,41 @@ const mine = async (req, res) => {           // loads a service the caller may t
   return s;
 };
 
+app.patch('/api/customers/:id', need('customer_edit'), wrap(async (req, res) => {
+  const p = [+req.params.id], sc = custScope(req.user, p);
+  const c = (await q(`SELECT c.* FROM customers c WHERE c.id=$1 AND ${sc}`, p)).rows[0];
+  if (!c) return res.status(404).json({ error: 'Customer not found' });
+  const b = req.body || {}, set = [], val = [c.id], add = (k, v) => { val.push(v); set.push(`${k}=$${val.length}`); }, ch = [];
+  if (b.name !== undefined) { const n = String(b.name || '').trim().slice(0, 120) || String(b.company ?? c.company ?? '').trim() || c.name; if (n !== c.name) { add('name', n); ch.push(`name ${c.name} → ${n}`); } }
+  if (b.company !== undefined) { const n = String(b.company || '').trim().slice(0, 120) || null; if (n !== c.company) { add('company', n); ch.push(`company → ${n || '—'}`); } }
+  if (b.phone !== undefined) { const n = String(b.phone || '').trim(); if (digits(n).length < 7) return res.status(400).json({ error: 'Enter a valid phone number' }); if (n !== c.phone) { add('phone', n); ch.push(`phone ${c.phone || '—'} → ${n}`); } }
+  for (const k of ['email', 'address']) if (b[k] !== undefined) add(k, String(b[k] || '').trim().slice(0, 300) || null);
+  if (!set.length) return res.json({ ok: true });
+  await q(`UPDATE customers SET ${set.join(',')} WHERE id=$1`, val);
+  if (ch.length) for (const sv of (await q(`SELECT id FROM services WHERE customer_id=$1 AND status NOT IN ('Resolved','Cancelled')`, [c.id])).rows) await log(sv.id, req.user.name, 'Customer edited: ' + ch.join(', '));
+  res.json({ ok: true });
+}));
+// everything about one customer: tickets, payments, money still to come, leads with the same phone
+app.get('/api/customers/:id/full', need('customers', 'service_create'), wrap(async (req, res) => {
+  const p = [+req.params.id], sc = custScope(req.user, p);
+  const c = (await q(`SELECT c.*, b.name brand FROM customers c LEFT JOIN brands b ON b.id=c.brand_id WHERE c.id=$1 AND ${sc}`, p)).rows[0];
+  if (!c) return res.status(404).json({ error: 'Customer not found' });
+  const sp = [c.id], sw = []; scope(req.user, sp, sw);
+  const svc = (await q(`${SELECT} WHERE s.customer_id=$1${sw.length ? ' AND ' + sw.join(' AND ') : ''} ORDER BY s.submitted_on DESC`, sp)).rows.map(s => shape(s, req.user));
+  const ids = svc.map(s => s.id);
+  const pays = ids.length ? (await q(`SELECT p.id, p.service_id, p.amount, p.bank, p.note, p.approval, p.received_by, p.mode, p.actual, p.disc, to_char(p.paid_on,'YYYY-MM-DD') paid_on, p.created_at, s.ticket_no FROM payments p JOIN services s ON s.id=p.service_id WHERE p.service_id=ANY($1) ORDER BY p.created_at DESC`, [ids])).rows : [];
+  const paid = pays.filter(x => x.approval !== 'Rejected').reduce((t, x) => t + Number(x.amount), 0);
+  const out = svc.filter(s => ['Billing', 'Awaiting Payment'].includes(s.status)).map(s => {
+    const coll = Math.max(0, Number(s.amount_received || 0) - Number(s.received_settled || 0)) + Math.max(0, Number(s.bank_amount || 0) - Number(s.bank_settled || 0));
+    const billDue = s.bill_state === 'Billed' && s.status === 'Awaiting Payment' ? Number(s.bill_total || s.charges_applied || 0) : 0;
+    return { id: s.id, ticket_no: s.ticket_no, status: s.status, bill_no: s.bill_no, bill_state: s.bill_state, quote: s.status === 'Billing' ? Number(s.bill_total || 0) : 0, due: billDue, with_tech: coll };
+  });
+  let leads = [];
+  if (can(req.user, 'leads')) { const lp = [digits(c.phone).slice(-10)], lw = leadScope(req.user, lp); if (lp[0].length >= 7) leads = (await q(`SELECT l.id, l.name, l.company, l.stage, l.value, l.created_at, l.follow_up FROM leads l WHERE right(regexp_replace(COALESCE(l.phone,''),'\D','','g'),10)=$1 AND ${lw} ORDER BY l.created_at DESC`, lp)).rows; }
+  const discount = svc.reduce((t, s) => t + Number(s.discount || 0), 0);
+  res.json({ customer: c, services: svc, payments: pays, outstanding: out, leads,
+    totals: { tickets: svc.length, open: svc.filter(s => !['Resolved', 'Cancelled'].includes(s.status)).length, paid: Math.round(paid * 100) / 100, discount, due: out.reduce((t, o) => t + o.due + o.quote, 0), with_tech: out.reduce((t, o) => t + o.with_tech, 0) } });
+}));
 app.get('/api/customers', need('customers', 'service_create'), wrap(async (req, res) => {
   const p = ['%' + (req.query.q || '') + '%'], sc = custScope(req.user, p);
   res.json((await q(`SELECT c.*, b.name brand, (SELECT COUNT(*)::int FROM services s WHERE s.customer_id=c.id) tickets FROM customers c LEFT JOIN brands b ON b.id=c.brand_id
@@ -703,6 +776,7 @@ app.get('/api/services/counts', wrap(async (req, res) => {
   if (brand && !req.user.brand_id && !isTech(req.user)) add('s.brand_id=?', +brand);
   if (tech && !isTech(req.user)) add('s.technician_id=?', tech);
   if (search) { p.push('%' + search + '%'); const n = p.length; p.push(String(search).replace(/\D/g, '')); w.push(`(c.name ILIKE $${n} OR s.request_details ILIKE $${n} OR c.phone ILIKE $${n} OR s.ticket_no::text=$${n + 1})`); }
+  if (/^\d{4}-\d{2}$/.test(req.query.month || '')) { p.push(req.query.month); w.push(`(to_char(s.submitted_on AT TIME ZONE 'Asia/Kolkata','YYYY-MM')=$${p.length} OR (s.status NOT IN ('Resolved','Cancelled') AND to_char(s.submitted_on AT TIME ZONE 'Asia/Kolkata','YYYY-MM')<$${p.length}))`); }
   const r = await q(`SELECT s.status, COUNT(*)::int n FROM services s LEFT JOIN customers c ON c.id=s.customer_id ${w.length ? 'WHERE ' + w.join(' AND ') : ''} GROUP BY s.status`, p);
   const out = { ALL: 0 }; r.rows.forEach(x => { out[x.status] = x.n; out.ALL += x.n; }); res.json(out);
 }));
@@ -719,13 +793,15 @@ app.get('/api/services', wrap(async (req, res) => {
   if (tech && !isTech(req.user)) add('s.technician_id=?', tech);
   if (approval) add('s.approval=?', approval);
   if (search) { p.push('%' + search + '%'); const n = p.length; p.push(search.replace(/\D/g, '')); w.push(`(c.name ILIKE $${n} OR s.request_details ILIKE $${n} OR c.phone ILIKE $${n} OR s.ticket_no::text=$${n + 1})`); }
+  if (/^\d{4}-\d{2}$/.test(req.query.month || '')) { p.push(req.query.month); w.push(`(to_char(s.submitted_on AT TIME ZONE 'Asia/Kolkata','YYYY-MM')=$${p.length} OR (s.status NOT IN ('Resolved','Cancelled') AND to_char(s.submitted_on AT TIME ZONE 'Asia/Kolkata','YYYY-MM')<$${p.length}))`); }
+  if (req.query.billing) w.push(`(s.status='Billing' OR (s.bill_state='Billed' AND s.status='Awaiting Payment'))`);
   if (req.query.board) {   // pipeline view: every open ticket + the latest 15 resolved
     const base = w.length ? w.join(' AND ') + ' AND ' : '';
     const o = await q(`${SELECT} WHERE ${base}s.status NOT IN ('Resolved','Cancelled') ORDER BY s.submitted_on DESC LIMIT 400`, p);
     const d = await q(`${SELECT} WHERE ${base}s.status='Resolved' ORDER BY s.resolved_on DESC NULLS LAST LIMIT 15`, p);
     return res.json([...o.rows, ...d.rows].map(s => shape(s, req.user)));
   }
-  const r = await q(`${SELECT} ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY s.submitted_on DESC LIMIT 200`, p);
+  const r = await q(`${SELECT} ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY s.submitted_on DESC LIMIT 500`, p);
   res.json(r.rows.map(s => shape(s, req.user)));
 }));
 
@@ -763,7 +839,7 @@ app.post('/api/services', need('service_create'), wrap(async (req, res) => {
   }
   if (!cid) {
     b.name = String(b.name || '').trim(); b.phone = String(b.phone || '').trim();
-    if (!b.name) return res.status(400).json({ error: 'Customer name is required' });
+    if (!b.name) b.name = String(b.company || '').trim() || `Customer ${digits(b.phone).slice(-4)}`;   // name and company are optional
     if (digits(b.phone).length < 7) return res.status(400).json({ error: 'Enter a valid phone number' });
     const m = /@(-?\d+\.\d+),(-?\d+\.\d+)|[?&](?:q|ll|query)=(-?\d+\.\d+),(-?\d+\.\d+)/.exec(b.map_url || '');
     cid = (await q('INSERT INTO customers(name,phone,email,address,map_url,lat,lng,brand_id,company) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id',
@@ -869,7 +945,14 @@ app.post('/api/services/:id/done', techOnly, wrap(async (req, res) => {
     return res.status(400).json({ error: 'Add a photo of the report book before finishing' });
   // Free or Paid? Paid → Cash (amount) or Bank (amount + transfer screenshot)
   const b = req.body, billing = b.billing;
-  if (!['Free', 'Paid'].includes(billing)) return res.status(400).json({ error: 'Choose Free service or Paid service' });
+  if (!['Free', 'Paid', 'Billing'].includes(billing)) return res.status(400).json({ error: 'Choose Free service, Paid service or Billing' });
+  if (billing === 'Billing') {   // office prepares a quotation / bill — the job leaves the technician's list
+    await q(`UPDATE services SET status='Billing', work_status='Done', work_done_on=now(), completion_note=$2, pending_reason=NULL, billing_type='Billing', bill_state=COALESCE(bill_state,'Quotation') WHERE id=$1`, [s.id, b.note || null]);
+    await log(s.id, req.user.name, 'Work done' + (b.note ? ': ' + b.note : '') + ' · sent for billing');
+    const billers = (await q(`SELECT id FROM users WHERE active AND (role=$1 OR ('billing'=ANY(permissions) AND (brand_id IS NULL OR brand_id=$2)))`, [SUPER, s.brand_id])).rows.map(x => x.id);
+    await notify(billers, '🧾 Ready for billing', `${req.user.name} finished #${s.ticket_no} — prepare the quotation / bill`, s.id);
+    return res.json({ ok: true });
+  }
   let mode = null, amt = 0;
   if (billing === 'Paid') {
     mode = b.mode;
@@ -901,6 +984,30 @@ app.post('/api/services/:id/location', techOnly, wrap(async (req, res) => {
   await q('UPDATE customers SET lat=$1,lng=$2,map_url=$3,location_by=$4,location_on=now() WHERE id=$5', [lat, lng, `https://www.google.com/maps?q=${lat},${lng}`, req.user.name, s.customer_id]);
   await log(s.id, req.user.name, 'Customer location updated from site GPS'); res.json({ ok: true });
 }));
+const billSvc = async (req, res) => {
+  const s = (await q('SELECT * FROM services WHERE id=$1', [req.params.id])).rows[0];
+  if (!s) { res.status(404).json({ error: 'Not found' }); return null; }
+  if (!brandOK(req.user, s)) { res.status(403).json({ error: 'This ticket belongs to another brand' }); return null; }
+  return s;
+};
+const billLines = items => (Array.isArray(items) ? items : []).slice(0, 60).map(i => ({ d: String(i.d || '').trim().slice(0, 200), q: Math.max(0, +i.q || 0), r: Math.max(0, Math.round((+i.r || 0) * 100) / 100) })).filter(i => i.d || i.r);
+// quotation: free notes + lines (description, qty, rate) — saved as many times as needed
+app.put('/api/services/:id/bill', need('billing'), wrap(async (req, res) => {
+  const s = await billSvc(req, res); if (!s) return;
+  if (s.bill_state === 'Billed' && s.status !== 'Billing') return res.status(400).json({ error: 'Already billed' });
+  const items = billLines((req.body || {}).items), total = Math.round(items.reduce((t, i) => t + i.q * i.r, 0) * 100) / 100;
+  await q(`UPDATE services SET bill_items=$2, bill_note=$3, bill_total=$4, bill_state=COALESCE(NULLIF(bill_state,''),'Quotation') WHERE id=$1`, [s.id, JSON.stringify(items), String((req.body || {}).note || '').slice(0, 4000) || null, total]);
+  await log(s.id, req.user.name, `Quotation saved · ₹${total}`); res.json({ ok: true, total });
+}));
+// quotation → bill: amount becomes due, ticket moves to Payment
+app.post('/api/services/:id/bill/convert', need('billing'), wrap(async (req, res) => {
+  const s = await billSvc(req, res); if (!s) return;
+  if (!(+s.bill_total > 0)) return res.status(400).json({ error: 'Add the quotation lines first' });
+  if (s.bill_state === 'Billed') return res.status(400).json({ error: 'Already billed' });
+  const no = (await q(`SELECT COALESCE(MAX(bill_no),1000)+1 n FROM services`)).rows[0].n;
+  await q(`UPDATE services SET bill_state='Billed', bill_no=$2, billed_at=now(), charges_applied=bill_total, status='Awaiting Payment', work_done_on=COALESCE(work_done_on,now()) WHERE id=$1`, [s.id, no]);
+  await log(s.id, req.user.name, `Bill #${no} created · ₹${s.bill_total} — waiting for the customer’s payment`); res.json({ ok: true, bill_no: no });
+}));
 app.post('/api/services/:id/settle', need('payments'), wrap(async (req, res) => {
   const s = (await q('SELECT * FROM services WHERE id=$1', [req.params.id])).rows[0];
   if (!s) return res.status(404).json({ error: 'Not found' });
@@ -908,13 +1015,30 @@ app.post('/api/services/:id/settle', need('payments'), wrap(async (req, res) => 
   const cashDue = Math.max(0, Number(s.amount_received) - Number(s.received_settled)), bankDue = Math.max(0, Number(s.bank_amount || 0) - Number(s.bank_settled || 0)), close = s.status === 'Awaiting Payment';
   if (!close && cashDue <= 0 && bankDue <= 0) return res.status(400).json({ error: 'Nothing to settle' });
   const b = req.body || {}, cashBank = BANKS.includes(b.bank) ? b.bank : null, trBank = BANKS.includes(b.transfer_bank) ? b.transfer_bank : null;
+  // discount: actual amount − discount = final amount (shown to the customer)
+  const disc = b.discount_on ? money(b.discount) : 0, actual = b.discount_on ? money(b.actual) : null;
+  if (b.discount_on && (actual <= 0 || disc > actual)) return res.status(400).json({ error: 'Enter the actual amount and a discount that is not more than it' });
+  // a bill made in the office: the customer pays the office directly
+  if (s.bill_state === 'Billed' && cashDue <= 0 && bankDue <= 0 && close) {
+    const due = Number(s.bill_total) || 0, act = actual ?? due, fin = Math.round((act - disc) * 100) / 100, mode = ['Cash', 'Bank', 'UPI'].includes(b.mode) ? b.mode : null;
+    if (!mode) return res.status(400).json({ error: 'Choose how the customer paid: Cash, Bank or UPI' });
+    const acc = BANKS.includes(b.account) ? b.account : null;
+    if (mode !== 'Cash' && !acc) return res.status(400).json({ error: 'Choose the account that received the money' });
+    await q(`INSERT INTO payments(service_id,amount,bank,note,approval,received_by,mode,actual,disc) VALUES($1,$2,$3,$4,'Approved',$5,$6,$7,$8)`, [s.id, fin, acc || cashBank, `Bill #${s.bill_no}${disc ? ` · discount ₹${disc}` : ''}`, req.user.name, mode, act, disc]);
+    await q(`UPDATE services SET charges_applied=$2, discount=COALESCE(discount,0)+$3, status='Resolved', resolved_on=now(), approval='Approved' WHERE id=$1`, [s.id, act, disc]);
+    await log(s.id, req.user.name, `Payment received · ${mode} ₹${fin}${disc ? ` (actual ₹${act} − discount ₹${disc})` : ''} — bill #${s.bill_no} closed`);
+    await notify([s.technician_id, s.helper_id], 'Job closed', `#${s.ticket_no}: customer paid the bill — work completed`, s.id);
+    return res.json({ ok: true });
+  }
+  if (disc || actual) await q(`UPDATE services SET charges_applied=$2, discount=COALESCE(discount,0)+$3 WHERE id=$1`, [s.id, actual ?? (cashDue + bankDue + disc), disc]);
   if (bankDue > 0 && !trBank) return res.status(400).json({ error: 'Choose the bank account that received the transfer' });
   if (cashDue > 0) await q(`INSERT INTO payments(service_id,amount,bank,note,approval) VALUES($1,$2,$3,'Cash handed over by technician','Approved')`, [s.id, cashDue, cashBank]);
   if (bankDue > 0) await q(`INSERT INTO payments(service_id,amount,bank,note,approval) VALUES($1,$2,$3,'Bank transfer · screenshot verified','Approved')`, [s.id, bankDue, trBank]);
-  if (cashDue > 0 || bankDue > 0) await q(`UPDATE payments SET received_by=$2 WHERE service_id=$1 AND received_by IS NULL`, [s.id, req.user.name]);
+  if (cashDue > 0 || bankDue > 0) await q(`UPDATE payments SET received_by=$2, mode=COALESCE(mode, CASE WHEN note LIKE 'Cash%' THEN 'Cash' ELSE 'Bank' END) WHERE service_id=$1 AND received_by IS NULL`, [s.id, req.user.name]);
+  if (disc) await q(`UPDATE payments SET actual=$2, disc=$3, note=note||$4 WHERE id=(SELECT MAX(id) FROM payments WHERE service_id=$1)`, [s.id, actual, disc, ` · discount ₹${disc}`]);
   await q(`UPDATE services SET received_settled=amount_received, bank_settled=COALESCE(bank_amount,0)${close ? `, status='Resolved', resolved_on=now(), work_done_on=COALESCE(work_done_on,now()), approval='Approved'` : ''} WHERE id=$1`, [s.id]);
   const parts = [cashDue > 0 && `cash ₹${cashDue} from technician`, bankDue > 0 && `bank ₹${bankDue} confirmed`].filter(Boolean).join(' + ');
-  await log(s.id, req.user.name, (parts ? `Payment received: ${parts}` : 'Free service confirmed') + (close ? ' — work completed' : ''));
+  await log(s.id, req.user.name, (parts ? `Payment received: ${parts}` : 'Free service confirmed') + (disc ? ` · actual ₹${actual} − discount ₹${disc}` : '') + (close ? ' — work completed' : ''));
   await notify([s.technician_id, s.helper_id], close ? 'Job closed' : 'Payment received', `#${s.ticket_no}: admin confirmed ${parts || 'the job'}${close ? ' — work completed' : ''}`, s.id); res.json({ ok: true });
 }));
 app.get('/api/tech/dashboard', techOnly, wrap(async (req, res) => {
@@ -939,6 +1063,7 @@ const WIPE = {
   attendance: 'TRUNCATE attendance, leave_requests RESTART IDENTITY',
   notifications: 'TRUNCATE notifications RESTART IDENTITY',
   notes: 'TRUNCATE notes RESTART IDENTITY',
+  whatsapp: 'TRUNCATE wa_threads, wa_messages, wa_reads RESTART IDENTITY',
   projects: `DELETE FROM chats WHERE project_id IS NOT NULL; TRUNCATE projects, project_tasks RESTART IDENTITY`,
   chat: `DELETE FROM chats WHERE kind NOT IN ('all','project'); TRUNCATE chat_messages RESTART IDENTITY; UPDATE chat_members SET last_read=0`,
   users: 'SELECT 1',   // staff logins: handled below
@@ -1102,7 +1227,7 @@ app.post('/api/todos', wrap(async (req, res) => {
   const title = String(b.title || '').trim().slice(0, 200), note = String(b.note || '').trim().slice(0, 2000) || null;
   if (!audio && !title) return res.status(400).json({ error: 'Write the task or record a voice message' });
   let forUser = Number.isInteger(+b.for_user) && +b.for_user > 0 ? +b.for_user : req.user.id;
-  if (forUser !== req.user.id && !isBoss(req.user)) forUser = req.user.id;   // only Super Admin / Admin staff can give work to others
+  if (forUser !== req.user.id && !can(req.user, 'voice_assign')) forUser = req.user.id;   // only people allowed to send work to others
   if (!(await q('SELECT 1 FROM users WHERE id=$1 AND active', [forUser])).rows.length) return res.status(400).json({ error: 'Person not found' });
   const r = await q(`INSERT INTO todos(title,note,kind,audio,mime,duration,due_at,for_user,created_by,reminded)
     VALUES($1,$2,$3,$4,$5,$6,($7::date + $8::time) AT TIME ZONE '${TZ}',$9,$10,(($7::date + $8::time) AT TIME ZONE '${TZ}') < now() - interval '1 minute') RETURNING id`,
@@ -1124,7 +1249,7 @@ app.patch('/api/todos/:id', wrap(async (req, res) => {
     p.push(d); const a = p.length; p.push(tm2); const c = p.length;
     sets.push(`due_at=($${a}::date + $${c}::time) AT TIME ZONE '${TZ}'`, `reminded=(($${a}::date + $${c}::time) AT TIME ZONE '${TZ}') < now() - interval '1 minute'`);
   }
-  if (b.for_user !== undefined && isBoss(req.user) && Number.isInteger(+b.for_user) && +b.for_user > 0) put('for_user=?', +b.for_user);
+  if (b.for_user !== undefined && can(req.user, 'voice_assign') && Number.isInteger(+b.for_user) && +b.for_user > 0) put('for_user=?', +b.for_user);
   if (!sets.length) return res.json({ ok: true });
   p.push(t.id); await q(`UPDATE todos SET ${sets.join(',')} WHERE id=$${p.length}`, p);
   if (b.done && t.created_by && t.created_by !== req.user.id) notifyTodo([t.created_by], '✅ Task done', `${req.user.name} finished: ${t.title || 'voice message'}`, t.id).catch(() => {});
@@ -1160,7 +1285,7 @@ async function remindDue() {
 
 // ---------- technician & helper counts ----------
 // $1 = technician id, $2 = 'YYYY-MM'.  "finished" = work done (Awaiting Payment or Resolved).
-const DONE = `s.status IN ('Awaiting Payment','Resolved')`, INM = c => `to_char(${c} AT TIME ZONE 'Asia/Kolkata','YYYY-MM')=$2`, OPEN = `s.status IN ('New Ticket','Work Not Started','On-Process','Work Pending')`;
+const DONE = `s.status IN ('Billing','Awaiting Payment','Resolved')`, INM = c => `to_char(${c} AT TIME ZONE 'Asia/Kolkata','YYYY-MM')=$2`, OPEN = `s.status IN ('New Ticket','Work Not Started','On-Process','Work Pending')`;
 const CREW_COLS = `COUNT(*) FILTER (WHERE s.technician_id=$1 AND ${INM('COALESCE(s.assigned_on,s.submitted_on)')})::int tech_assigned,
   COUNT(*) FILTER (WHERE s.technician_id=$1 AND ${DONE} AND ${INM('s.work_done_on')})::int tech_done,
   COUNT(*) FILTER (WHERE s.helper_id=$1 AND ${INM('COALESCE(s.assigned_on,s.submitted_on)')})::int helper_assigned,
@@ -1436,7 +1561,7 @@ async function salaryFor(u, m, today, start, off) {
   // approved leave / permission count for the whole month (also later dates); absent days only up to today
   const from = jd && jd > days[0] ? jd : days[0], inM = x.days.filter(d => d.d >= from);
   S.leave = inM.filter(d => d.code === 'leave').length;
-  const perms = inM.reduce((t, d) => t + d.perm.length, 0);
+  const perms = inM.reduce((t, d) => t + d.perm.filter(p => !p.company).length, 0);
   // leave + absent share the free days (loss of pay only beyond them)
   const lop = S.leave + S.absent, freeL = R.leave_on ? Math.min(lop, R.paid_leaves) : 0, unpaid = R.leave_on ? Math.max(0, lop - R.paid_leaves) : 0;
   const extraPerm = R.perm_on ? Math.max(0, perms - R.free_perms) : 0;
@@ -1462,7 +1587,7 @@ const moneyIN = v => '₹' + Number(v || 0).toLocaleString('en-IN', { maximumFra
 const slipMsg = s => `Salary ${moneyIN(s.gross)} − leave/permission ${moneyIN(s.att_deduction)} − advances ${moneyIN(s.advance + s.petrol)} = ${moneyIN(s.net)} remaining for ${new Date(s.month + '-01T12:00:00Z').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })}`;
 // who an admin may give an advance to: Super Admin → anyone; Admin staff → people paid by their brand + technicians / support staff without a brand
 const advOK = (me, u) => isSuper(me) || (isBoss(me) && u.role !== SUPER && u.id !== me.id && (!me.brand_id || (u.pay_brand_id || u.brand_id || null) === me.brand_id || (!u.pay_brand_id && !u.brand_id)));
-app.get('/api/payroll', superOnly, wrap(async (req, res) => {
+app.get('/api/payroll', payNeed, wrap(async (req, res) => {
   const today = await todayIST(), m = isMonth(req.query.month) ? req.query.month : today.slice(0, 7), start = await attStart(), off = await office();
   const p = [SUPER]; let w = 'u.active AND u.role<>$1';
   if (+req.query.brand) { p.push(+req.query.brand); w += ` AND COALESCE(u.pay_brand_id,u.brand_id)=$${p.length}`; }
@@ -1478,7 +1603,7 @@ app.get('/api/payroll/slip', wrap(async (req, res) => {
   const s = await slipFor(uid, m); if (!s) return res.status(404).json({ error: 'Not found' });
   res.set('Cache-Control', 'no-store').json(s);
 }));
-app.post('/api/payroll/notify', superOnly, wrap(async (req, res) => {
+app.post('/api/payroll/notify', payNeed, wrap(async (req, res) => {
   const m = isMonth((req.body || {}).month) ? req.body.month : (await todayIST()).slice(0, 7);
   const ids = (await q(`SELECT id FROM users WHERE active AND role<>$1 AND salary>0`, [SUPER])).rows.map(r => r.id); let n = 0;
   for (const id of ids) { const s = await slipFor(id, m); await notifyLink([id], '💰 Salary slip', slipMsg(s), 'salary'); n++; }
@@ -1519,7 +1644,7 @@ const daysOf = m => { const [y, mo] = m.split('-').map(Number), n = new Date(Dat
 const wday = s => new Date(s + 'T00:00:00Z').getUTCDay();   // 0 = Sunday
 const MARKS = ['Present', 'Half Day', 'Absent', 'Week Off', 'Holiday'];
 const KINDS = ['Leave', 'Permission', 'Attendance', 'WeekOff'];
-const canAtt = u => isBoss(u) || can(u, 'attendance');
+const canAtt = u => can(u, 'att_team') || can(u, 'leave_approve');
 const attNeed = (req, res, next) => canAtt(req.user) ? next() : res.status(403).json({ error: 'Not allowed' });
 const attStart = async () => ((await q(`SELECT v FROM settings WHERE k='att_start'`)).rows[0] || {}).v || '2000-01-01';
 const office = async () => { try { return { ...OFFICE_DEFAULT, ...JSON.parse(((await q(`SELECT v FROM settings WHERE k='office'`)).rows[0] || {}).v || '{}') }; } catch (e) { return OFFICE_DEFAULT; } };
@@ -1527,7 +1652,7 @@ const istHM = t => t ? new Date(t).toLocaleTimeString('en-IN', { timeZone: TZ, h
 const ist24 = t => t ? new Date(t).toLocaleTimeString('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }) : null;
 const metres = (a, b, c, d) => { const R = 6371000, r = x => x * Math.PI / 180, dl = r(c - a), dg = r(d - b), h = Math.sin(dl / 2) ** 2 + Math.cos(r(a)) * Math.cos(r(c)) * Math.sin(dg / 2) ** 2; return Math.round(2 * R * Math.asin(Math.sqrt(h))); };
 const distTxt = m => m == null ? '' : m < 1000 ? m + ' m' : (m / 1000).toFixed(1) + ' km';
-const approvers = async () => (await q(`SELECT id FROM users WHERE active AND (role=$1 OR role='Admin' OR 'attendance'=ANY(permissions))`, [SUPER])).rows.map(r => r.id);
+const approvers = async () => (await q(`SELECT id FROM users WHERE active AND (role=$1 OR 'leave_approve'=ANY(permissions))`, [SUPER])).rows.map(r => r.id);
 const notifyLink = async (ids, title, body, link) => {
   for (const id of [...new Set(ids)].filter(Boolean)) {
     await q('INSERT INTO notifications(user_id,title,body,link) VALUES($1,$2,$3,$4)', [id, title, body, link]);
@@ -1551,13 +1676,14 @@ async function monthFor(u, m, today, start, off) {
     let code = '';
     if (r && r.marked_by && !['Present'].includes(r.status)) code = { 'Half Day': 'half', Absent: 'absent', 'Week Off': 'off', Holiday: 'holiday' }[r.status] || 'present';
     else if (HOL[d] && !(r && r.check_in)) code = 'holiday';
+    else if (lv && lv.company && !(r && r.check_in)) code = 'holiday';   // leave given by the company (festival etc.) — not counted
     else if (lv && !sun && !(r && r.check_in)) code = 'leave';
     else if (pm.length) code = pm.some(x => x.session === 'Morning') ? (pm.some(x => x.session === 'Evening') ? 'perm-both' : 'perm-m') : 'perm-e';
     else if (r) code = r.status === 'Half Day' ? 'half' : r.status === 'Absent' ? 'absent' : 'present';
     else if (sun) code = 'off';
     else if (d < today && d >= first) code = 'absent';
     else if (d === today) code = 'today';
-    const inT = r && r.check_in, late = !!(inT && R.late_after && ist24(inT) > R.late_after && !pm.some(x => x.session === 'Morning'));
+    const inT = r && r.check_in, late = !!(inT && R.late_after && ist24(inT) > R.late_after && !pm.some(x => x.session === 'Morning' || (x.company && (x.from_time || '00:00') <= R.late_after)));
     // overtime: minutes after the shift ends (whole time when working on a week off / holiday)
     let ot = 0; const outT = r && r.check_out;
     if (R.ot_on && inT && outT) {
@@ -1568,7 +1694,7 @@ async function monthFor(u, m, today, start, off) {
     return { d, sun, code, pending: !!pend, pend_kind: pend ? pend.kind : null, in: istHM(inT), out: istHM(r && r.check_out), in24: ist24(inT), out24: ist24(r && r.check_out),
       hours: +hrs(inT, r && r.check_out).toFixed(2), late, ot, in_dist: r ? r.in_dist : null, out_dist: r ? r.out_dist : null,
       status: r ? r.status : null, note: r ? r.note : null, by: r ? r.marked_by : null,
-      holiday: HOL[d] || null, leave: lv ? (lv.leave_type || 'Leave') : null, perm: pm.map(x => ({ session: x.session, from: x.from_time, to: x.to_time })), counts: d >= first && d <= today };
+      holiday: HOL[d] || (lv && lv.company ? (lv.reason || 'Company leave') : null), leave: lv && !lv.company ? (lv.leave_type || 'Leave') : null, perm: pm.map(x => ({ session: x.session, from: x.from_time, to: x.to_time, company: !!x.company, reason: x.company ? x.reason : undefined })), counts: d >= first && d <= today };
   });
   const S = { present: 0, half: 0, absent: 0, leave: 0, perm_m: 0, perm_e: 0, off: 0, working: 0, late: 0, hours: 0, ot_min: 0 };
   for (const x of out) {
@@ -1706,7 +1832,7 @@ app.get('/api/attendance/md', superOnly, wrap(async (req, res) => {
     totals: { ...tot, hours: +tot.hours.toFixed(1), pct: tot.working ? Math.round(tot.eff / tot.working * 100) : null } });
 }));
 
-app.post('/api/attendance/mark', attNeed, wrap(async (req, res) => {
+app.post('/api/attendance/mark', approveNeed, wrap(async (req, res) => {
   const b = req.body || {}, uid = +b.user_id;
   if (!isDate(b.date)) return res.status(400).json({ error: 'Choose the date' });
   if (b.date > await todayIST()) return res.status(400).json({ error: 'You can’t mark a future date' });
@@ -1736,6 +1862,7 @@ const LSELR = `SELECT r.*, to_char(r.from_date,'YYYY-MM-DD') from_date, to_char(
 const reqWhen = r => r.kind === 'WeekOff' ? `week off on ${fdIN(r.from_date)} instead of the usual day that week` : r.kind === 'Permission' ? `${r.session} permission on ${fdIN(r.from_date)}${r.from_time ? ` (${r.from_time}${r.to_time ? '–' + r.to_time : ''})` : ''}`
   : r.kind === 'Attendance' ? `attendance on ${fdIN(r.from_date)}: ${[r.from_time && 'in ' + r.from_time, r.to_time && 'out ' + r.to_time].filter(Boolean).join(', ')}`
   : `${r.leave_type || 'Leave'} ${fdIN(r.from_date)}${r.to_date !== r.from_date ? ' → ' + fdIN(r.to_date) : ''}`;
+const t12s = t => { const [h, m] = String(t || '0:0').split(':').map(Number); return `${(h % 12) || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`; };
 const fdIN = d => new Date(d + 'T12:00:00Z').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', weekday: 'short' });
 app.get('/api/leave', wrap(async (req, res) => {
   const all = req.query.all && canAtt(req.user), p = [], w = [];
@@ -1786,7 +1913,24 @@ app.post('/api/leave', wrap(async (req, res) => {
   await notifyLink((await approvers()).filter(id => id !== req.user.id), title, `${req.user.name}: ${reqWhen({ kind, session, from_date: from, to_date: to, from_time: ft, to_time: tt, leave_type: lt })}${kind === 'Attendance' ? ` at ${cname} (${distTxt(dist)} from office)` : ''} — ${reason}`, 'leave');
   res.json({ id: r.rows[0].id });
 }));
-app.post('/api/leave/:id/decide', attNeed, wrap(async (req, res) => {
+// company leave / permission (festival etc.) — given by the Super Admin to everyone or chosen people; never counted against anyone
+app.post('/api/company-leave', superOnly, wrap(async (req, res) => {
+  const b = req.body || {}, kind = b.kind === 'Permission' ? 'Permission' : 'Leave', from = b.from_date, to = kind === 'Leave' && isDate(b.to_date) ? b.to_date : from;
+  if (!isDate(from) || to < from) return res.status(400).json({ error: 'Choose the date' });
+  const reason = String(b.reason || '').trim().slice(0, 200);
+  if (!reason) return res.status(400).json({ error: 'Write the reason, e.g. Deepavali' });
+  let ft = null, tt = null;
+  if (kind === 'Permission') { ft = b.from_time; tt = b.to_time; if (!isTime(ft) || !isTime(tt) || tt <= ft) return res.status(400).json({ error: 'Choose the time: from and to' }); }
+  const ids = b.users === 'all' ? (await q(`SELECT id FROM users WHERE active AND role<>$1`, [SUPER])).rows.map(r => r.id)
+    : (await q(`SELECT id FROM users WHERE active AND id=ANY($1)`, [Array.isArray(b.users) ? b.users.map(Number) : []])).rows.map(r => r.id);
+  if (!ids.length) return res.status(400).json({ error: 'Choose who gets it' });
+  for (const id of ids) await q(`INSERT INTO leave_requests(user_id,kind,leave_type,session,from_date,to_date,from_time,to_time,reason,status,decided_by,decided_at,company)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'Approved',$10,now(),true)`, [id, kind, kind === 'Leave' ? 'Company leave' : null, kind === 'Permission' ? (tt <= '13:00' ? 'Morning' : 'Evening') : null, from, to, ft, tt, reason, req.user.name]);
+  const when = kind === 'Leave' ? (from === to ? fdIN(from) : `${fdIN(from)} – ${fdIN(to)}`) : `${fdIN(from)}, ${t12s(ft)} – ${t12s(tt)}`;
+  await notifyLink(ids, kind === 'Leave' ? `🎉 Leave from the company · ${reason}` : `🕘 Permission for everyone · ${reason}`, `${when}. This is not counted in your leave or permissions.`, 'att');
+  res.json({ ok: true, count: ids.length });
+}));
+app.post('/api/leave/:id/decide', approveNeed, wrap(async (req, res) => {
   const b = req.body || {}, st = b.status;
   if (!['Approved', 'Rejected'].includes(st)) return res.status(400).json({ error: 'Approve or reject' });
   const r = (await q(`${LSELR} WHERE r.id=$1`, [req.params.id])).rows[0];
@@ -1821,7 +1965,34 @@ app.delete('/api/leave/:id', superOnly, wrap(async (req, res) => { await q('DELE
 // =====================================================================
 // ---------- team chat (Skype-style): All-staff group, groups, direct messages ----------
 // =====================================================================
+async function permMigrate() {
+  if ((await q(`SELECT 1 FROM settings WHERE k='perm_v13'`)).rows.length) return;
+  // keep what people could do before: Admin staff (and anyone with the old "attendance" switch) see team attendance and approve; everyone keeps chat & projects
+  await q(`UPDATE users SET permissions = (SELECT ARRAY(SELECT DISTINCT unnest(permissions || ARRAY['att_team','leave_approve']))) WHERE role='Admin' OR 'attendance'=ANY(permissions)`);
+  await q(`UPDATE users SET permissions = array_remove(permissions,'attendance')`);
+  await q(`UPDATE users SET permissions = (SELECT ARRAY(SELECT DISTINCT unnest(permissions || ARRAY['chat','projects']))) WHERE role IN ('Admin','Sales','Technician')`);
+  await q(`UPDATE users SET permissions = (SELECT ARRAY(SELECT DISTINCT unnest(permissions || ARRAY['chat']))) WHERE role='Staff'`);
+  await q(`UPDATE users SET permissions = (SELECT ARRAY(SELECT DISTINCT unnest(permissions || ARRAY['customer_edit','billing','lead_lists','voice_assign']))) WHERE role='Admin'`);
+  await q(`INSERT INTO settings(k,v) VALUES('perm_v13','1') ON CONFLICT (k) DO NOTHING`);
+}
+// lead sources & interests can be changed (Leads → ⚙ Sources & interests)
+async function loadLeadLists() {
+  for (const [k, arr, def] of [['lead_sources', LEAD_SOURCES, LEAD_SOURCES_DEF], ['lead_interests', LEAD_INTERESTS, LEAD_INTERESTS_DEF]]) {
+    let v = null; try { v = JSON.parse(((await q('SELECT v FROM settings WHERE k=$1', [k])).rows[0] || {}).v || 'null'); } catch (e) { v = null; }
+    arr.splice(0, arr.length, ...(Array.isArray(v) && v.length ? v : def));
+    if (!arr.includes('Other')) arr.push('Other');
+  }
+}
+app.put('/api/lead-lists', need('lead_lists'), wrap(async (req, res) => {
+  const clean = l => [...new Set((Array.isArray(l) ? l : []).map(x => String(x || '').trim().slice(0, 60)).filter(Boolean))].slice(0, 60);
+  const b = req.body || {}, src = clean(b.sources), int = clean(b.interests);
+  if (!src.length || !int.length) return res.status(400).json({ error: 'Keep at least one in each list' });
+  await q(`INSERT INTO settings(k,v) VALUES('lead_sources',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [JSON.stringify(src)]);
+  await q(`INSERT INTO settings(k,v) VALUES('lead_interests',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [JSON.stringify(int)]);
+  await loadLeadLists(); res.json({ ok: true, sources: LEAD_SOURCES, interests: LEAD_INTERESTS });
+}));
 async function initChat() {
+  await permMigrate(); await loadLeadLists();
   await q(`
   CREATE TABLE IF NOT EXISTS chats (id SERIAL PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'group', name TEXT, dm_key TEXT UNIQUE, created_by INT,
     created_at TIMESTAMPTZ DEFAULT now(), last_at TIMESTAMPTZ DEFAULT now());
@@ -1863,7 +2034,7 @@ const MSG_COLS = `x.id, x.chat_id, x.user_id, x.user_name, x.kind, CASE WHEN x.d
 const preview = m => m.deleted ? 'Message deleted' : m.kind === 'file' ? '📎 ' + (m.fname || 'File') + (m.body ? ' · ' + m.body : '') : m.kind === 'image' ? '📷 Photo' + (m.body ? ' · ' + m.body : '') : m.kind === 'voice' ? `🎤 Voice message (${durTxt(m.duration)})` : (m.body || '');
 const durTxt = s => `${Math.floor((s || 0) / 60)}:${String((s || 0) % 60).padStart(2, '0')}`;
 
-app.get('/api/chats', wrap(async (req, res) => {
+app.get('/api/chats', need('chat'), wrap(async (req, res) => {
   const uid = req.user.id; await chatUnread(uid);   // makes sure the user is in All Staff
   const rows = (await q(`SELECT c.*, m.last_read, m.muted,
       (SELECT COUNT(*)::int FROM chat_messages x WHERE x.chat_id=c.id AND x.id>m.last_read AND x.user_id IS DISTINCT FROM $1 AND NOT x.deleted) unread,
@@ -1886,7 +2057,7 @@ app.get('/api/chats', wrap(async (req, res) => {
 app.get('/api/chat/people', wrap(async (req, res) => {
   res.json({ items: (await q(`SELECT u.id, u.name, u.role, u.photo_v, COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id WHERE u.active ORDER BY u.name`)).rows });
 }));
-app.post('/api/chats/dm', wrap(async (req, res) => {
+app.post('/api/chats/dm', need('chat'), wrap(async (req, res) => {
   const other = +(req.body || {}).user_id, me = req.user.id;
   if (!other || other === me) return res.status(400).json({ error: 'Choose a person' });
   if (!(await q('SELECT 1 FROM users WHERE id=$1 AND active', [other])).rows.length) return res.status(404).json({ error: 'Not found' });
@@ -1898,7 +2069,7 @@ app.post('/api/chats/dm', wrap(async (req, res) => {
   }
   res.json({ id: c.id });
 }));
-app.post('/api/chats', wrap(async (req, res) => {
+app.post('/api/chats', need('chat'), wrap(async (req, res) => {
   const b = req.body || {}, name = String(b.name || '').trim().slice(0, 60);
   if (!name) return res.status(400).json({ error: 'Give the group a name' });
   const ids = [...new Set([req.user.id, ...(Array.isArray(b.members) ? b.members.map(Number) : [])])].filter(Boolean);
@@ -2263,7 +2434,7 @@ const projTeam = async pid => (await q(`SELECT u.id, u.name, u.role, u.photo_v, 
 // can this user open the project?  Super Admin: always. Others: when they are in the project team.
 const projFor = async (u, id) => {
   const p = (await q(`SELECT ${PCOLS} FROM projects p WHERE p.id=$1`, [id])).rows[0];
-  if (!p) return null;
+  if (!p || !can(u, 'projects')) return null;
   if (isSuper(u)) { await q('INSERT INTO chat_members(chat_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [p.chat_id, u.id]); return p; }
   return (await q('SELECT 1 FROM chat_members WHERE chat_id=$1 AND user_id=$2', [p.chat_id, u.id])).rows.length ? p : null;
 };
@@ -2283,7 +2454,7 @@ async function makeProject(u, d, team) {
 }
 const projNote = (ids, title, body, pid) => notifyLink(ids, title, body, 'project:' + pid);
 
-app.get('/api/projects', wrap(async (req, res) => {
+app.get('/api/projects', need('projects'), wrap(async (req, res) => {
   const u = req.user, sup = isSuper(u);
   const rows = (await q(`SELECT ${PCOLS}, m.last_read,
       (SELECT COUNT(*)::int FROM chat_messages x WHERE x.chat_id=p.chat_id AND x.id>COALESCE(m.last_read,0) AND x.user_id IS DISTINCT FROM $1 AND NOT x.deleted) unread,
@@ -2309,7 +2480,7 @@ app.post('/api/projects', wrap(async (req, res) => {
   res.json({ id: p.id });
 }));
 // lead → project (keeps all the lead details and brings the lead discussion along)
-app.post('/api/leads/:id/project', need('leads'), wrap(async (req, res) => {
+app.post('/api/leads/:id/project', need('leads'), need('projects'), wrap(async (req, res) => {
   const l = await leadOK(req, res, req.params.id); if (!l) return;
   const ex = (await q('SELECT id FROM projects WHERE lead_id=$1', [l.id])).rows[0];
   if (ex) return res.json({ id: ex.id, existed: true });
@@ -2463,5 +2634,332 @@ app.delete('/api/notes/:id', wrap(async (req, res) => {
   await q('DELETE FROM notes WHERE id=$1', [n.id]); res.json({ ok: true });
 }));
 
-init().then(initChat).then(initProjects).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
+
+// =====================================================================
+// ---------- WhatsApp Business (Meta Cloud API): Sales + Service numbers, shared inbox ----------
+// Keys can be set in Render → Environment (WA_TOKEN, WA_APP_SECRET, WA_VERIFY_TOKEN, WA_WABA_ID,
+// WA_SALES_PHONE_ID, WA_SERVICE_PHONE_ID) or in the app: Profile → WhatsApp setup (Super Admin).
+// =====================================================================
+const WA_LINES = ['sales', 'service'];
+const WA_RATES = { service: 0.115, utility: 0.115, marketing: 0.8631, authentication: 0.115, free: 1000, gst: 0.18 };   // Meta India card (Oct 2026), ₹ per message
+let WA_CFG = null;
+async function waCfg(fresh) {
+  if (WA_CFG && !fresh) return WA_CFG;
+  let db = {}; try { db = JSON.parse(((await q(`SELECT v FROM settings WHERE k='wa_cfg'`)).rows[0] || {}).v || '{}'); } catch (e) { db = {}; }
+  const E = process.env, pick = (k, e) => E[e] || db[k] || '';
+  WA_CFG = {
+    token: pick('token', 'WA_TOKEN'), app_secret: pick('app_secret', 'WA_APP_SECRET'), verify_token: pick('verify_token', 'WA_VERIFY_TOKEN'), waba_id: pick('waba_id', 'WA_WABA_ID'),
+    sales: { phone_id: pick('sales_phone_id', 'WA_SALES_PHONE_ID'), number: db.sales_number || '', brand_id: +db.sales_brand_id || null, label: 'Sales' },
+    service: { phone_id: pick('service_phone_id', 'WA_SERVICE_PHONE_ID'), number: db.service_number || '', brand_id: +db.service_brand_id || null, label: 'Service' },
+    auto_lead: db.auto_lead !== false, graph: (E.WA_GRAPH_URL || 'https://graph.facebook.com') + '/' + (E.WA_API_VERSION || 'v21.0'),
+    from_env: { token: !!E.WA_TOKEN, app_secret: !!E.WA_APP_SECRET, verify_token: !!E.WA_VERIFY_TOKEN, waba_id: !!E.WA_WABA_ID, sales_phone_id: !!E.WA_SALES_PHONE_ID, service_phone_id: !!E.WA_SERVICE_PHONE_ID },
+  };
+  return WA_CFG;
+}
+const waLineOf = async phoneId => { const c = await waCfg(); return WA_LINES.find(l => c[l].phone_id && c[l].phone_id === String(phoneId)) || null; };
+const waDigits = p => { let d = String(p || '').replace(/\D/g, ''); if (d.length === 10) d = '91' + d; return d; };
+const last10 = p => String(p || '').replace(/\D/g, '').slice(-10);
+// call Meta's Graph API
+async function graph(path, opt = {}) {
+  const c = await waCfg();
+  if (!c.token) throw new Error('WhatsApp is not connected yet — add the access token in WhatsApp setup');
+  const r = await fetch(c.graph + path, { method: opt.method || 'GET', headers: { Authorization: 'Bearer ' + c.token, ...(opt.json ? { 'Content-Type': 'application/json' } : {}) }, body: opt.json ? JSON.stringify(opt.json) : opt.body });
+  const t = await r.text(); let j = {}; try { j = JSON.parse(t); } catch (e) { j = { raw: t }; }
+  if (!r.ok || j.error) {
+    const e = j.error || {}, d = (e.error_data && e.error_data.details) || '';
+    const nice = e.code === 131047 || e.code === 131026 ? 'More than 24 hours since the customer’s last message — send a template instead'
+      : e.code === 190 ? 'The access token has expired or is wrong — update it in WhatsApp setup'
+      : e.code === 131030 ? 'This number is not in the allowed list (test mode) — add it in Meta or go live'
+      : (e.message || 'WhatsApp error') + (d ? ' — ' + d : '');
+    const err = new Error(nice); err.meta = e; throw err;
+  }
+  return j;
+}
+async function initWA() {
+  await q(`
+  CREATE TABLE IF NOT EXISTS wa_threads (id SERIAL PRIMARY KEY, line TEXT NOT NULL, wa_phone TEXT NOT NULL, name TEXT, lead_id INT, customer_id INT,
+    last_in_at TIMESTAMPTZ, last_at TIMESTAMPTZ DEFAULT now(), created_at TIMESTAMPTZ DEFAULT now(), UNIQUE(line, wa_phone));
+  CREATE TABLE IF NOT EXISTS wa_messages (id SERIAL PRIMARY KEY, thread_id INT NOT NULL REFERENCES wa_threads(id) ON DELETE CASCADE, dir TEXT NOT NULL, wa_id TEXT UNIQUE,
+    type TEXT, body TEXT, media_id TEXT, mime TEXT, fname TEXT, data BYTEA, lat DOUBLE PRECISION, lng DOUBLE PRECISION, status TEXT, error TEXT,
+    category TEXT, template TEXT, sent_by INT, sent_by_name TEXT, reply_to TEXT, created_at TIMESTAMPTZ DEFAULT now());
+  CREATE INDEX IF NOT EXISTS idx_wam_thread ON wa_messages(thread_id, id);
+  CREATE TABLE IF NOT EXISTS wa_reads (thread_id INT NOT NULL REFERENCES wa_threads(id) ON DELETE CASCADE, user_id INT NOT NULL, last_read INT DEFAULT 0, PRIMARY KEY(thread_id, user_id));`);
+  if (!(await q(`SELECT 1 FROM settings WHERE k='wa_perm_v1'`)).rows.length) {   // admin staff & sales get WhatsApp switched on once
+    await q(`UPDATE users SET permissions = (SELECT ARRAY(SELECT DISTINCT unnest(permissions || ARRAY['whatsapp']))) WHERE role IN ('Admin','Sales')`);
+    await q(`INSERT INTO settings(k,v) VALUES('wa_perm_v1','1') ON CONFLICT (k) DO NOTHING`);
+  }
+}
+const waNeed = need('whatsapp');
+// the thread for a phone on a line (made if missing); links it to a lead / customer with the same number
+async function waThread(line, phone, name) {
+  const p = waDigits(phone);
+  let t = (await q('SELECT * FROM wa_threads WHERE line=$1 AND wa_phone=$2', [line, p])).rows[0];
+  if (!t) t = (await q(`INSERT INTO wa_threads(line,wa_phone,name) VALUES($1,$2,$3) ON CONFLICT (line,wa_phone) DO UPDATE SET name=COALESCE(wa_threads.name,EXCLUDED.name) RETURNING *`, [line, p, name || null])).rows[0];
+  const l10 = last10(p);
+  if (!t.lead_id) { const l = (await q(`SELECT id FROM leads WHERE right(regexp_replace(COALESCE(phone,''),'\\D','','g'),10)=$1 ORDER BY id DESC LIMIT 1`, [l10])).rows[0]; if (l) { await q('UPDATE wa_threads SET lead_id=$2 WHERE id=$1', [t.id, l.id]); t.lead_id = l.id; } }
+  if (!t.customer_id) { const c = (await q(`SELECT id FROM customers WHERE right(regexp_replace(COALESCE(phone,''),'\\D','','g'),10)=$1 ORDER BY id DESC LIMIT 1`, [l10])).rows[0]; if (c) { await q('UPDATE wa_threads SET customer_id=$2 WHERE id=$1', [t.id, c.id]); t.customer_id = c.id; } }
+  return t;
+}
+const waUsers = async () => (await q(`SELECT id FROM users WHERE active AND (role=$1 OR 'whatsapp'=ANY(permissions))`, [SUPER])).rows.map(r => r.id);
+const waText = m => m.type === 'text' ? m.body : m.type === 'image' ? '📷 Photo' + (m.body ? ' · ' + m.body : '') : m.type === 'document' ? '📄 ' + (m.fname || 'Document') : m.type === 'audio' ? '🎤 Voice message'
+  : m.type === 'video' ? '🎬 Video' : m.type === 'sticker' ? '🙂 Sticker' : m.type === 'location' ? '📍 Location' : m.type === 'template' ? '📋 ' + (m.body || m.template || 'Template') : m.type === 'reaction' ? (m.body || '👍') : (m.body || 'Message');
+// ---------- webhook (Meta calls this) ----------
+app.get('/webhook/whatsapp', wrap(async (req, res) => {
+  const c = await waCfg(true);
+  if (req.query['hub.mode'] === 'subscribe' && c.verify_token && req.query['hub.verify_token'] === c.verify_token) return res.status(200).send(String(req.query['hub.challenge'] || ''));
+  res.status(403).send('Verify token does not match');
+}));
+app.post('/webhook/whatsapp', wrap(async (req, res) => {
+  const c = await waCfg();
+  if (c.app_secret) {   // only accept messages signed by Meta
+    const sig = String(req.headers['x-hub-signature-256'] || ''), exp = 'sha256=' + crypto.createHmac('sha256', c.app_secret).update(req.rawBody || Buffer.from('')).digest('hex');
+    if (sig.length !== exp.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(exp))) return res.status(401).send('bad signature');
+  }
+  res.sendStatus(200);   // answer Meta at once, then process
+  try { for (const e of (req.body && req.body.entry) || []) for (const ch of e.changes || []) if (ch.field === 'messages') await waIncoming(ch.value || {}); } catch (err) { console.error('wa webhook', err.message); }
+}));
+async function waIncoming(v) {
+  const line = await waLineOf(v.metadata && v.metadata.phone_number_id); if (!line) return;
+  const names = {}; (v.contacts || []).forEach(x => { names[x.wa_id] = x.profile && x.profile.name; });
+  for (const st of v.statuses || []) {   // sent / delivered / read / failed
+    const err = st.errors && st.errors[0] ? (st.errors[0].title || '') + (st.errors[0].error_data && st.errors[0].error_data.details ? ' — ' + st.errors[0].error_data.details : '') : null;
+    await q(`UPDATE wa_messages SET status=CASE WHEN status='read' AND $2<>'failed' THEN status ELSE $2 END, error=COALESCE($3,error), category=COALESCE(category,$4) WHERE wa_id=$1`, [st.id, st.status, err, st.pricing && st.pricing.category || null]);
+  }
+  const C = await waCfg();
+  for (const m of v.messages || []) {
+    const t = await waThread(line, m.from, names[m.from]);
+    if (names[m.from] && !t.name) await q('UPDATE wa_threads SET name=$2 WHERE id=$1', [t.id, names[m.from]]);
+    let type = m.type, body = null, media = null, mime = null, fname = null, lat = null, lng = null;
+    if (type === 'text') body = m.text && m.text.body;
+    else if (['image', 'document', 'audio', 'video', 'sticker'].includes(type)) { const o = m[type] || {}; media = o.id; mime = o.mime_type; body = o.caption || null; fname = o.filename || null; }
+    else if (type === 'location') { lat = m.location.latitude; lng = m.location.longitude; body = [m.location.name, m.location.address].filter(Boolean).join(' · ') || null; }
+    else if (type === 'button') { type = 'text'; body = m.button && m.button.text; }
+    else if (type === 'interactive') { type = 'text'; const i = m.interactive || {}; body = (i.button_reply && i.button_reply.title) || (i.list_reply && i.list_reply.title) || 'Reply'; }
+    else if (type === 'reaction') body = (m.reaction && m.reaction.emoji) ? `Reacted ${m.reaction.emoji}` : 'Removed a reaction';
+    else if (type === 'contacts') { type = 'text'; body = '👤 ' + ((m.contacts || []).map(x => (x.name && x.name.formatted_name) + ' ' + ((x.phones || [])[0] || {}).phone).join(', ')); }
+    else body = 'Unsupported message';
+    const ins = (await q(`INSERT INTO wa_messages(thread_id,dir,wa_id,type,body,media_id,mime,fname,lat,lng,status,reply_to,created_at) VALUES($1,'in',$2,$3,$4,$5,$6,$7,$8,$9,'received',$10,to_timestamp($11)) ON CONFLICT (wa_id) DO NOTHING RETURNING id`,
+      [t.id, m.id, type, body, media, mime, fname, lat, lng, m.context && m.context.id || null, +m.timestamp || Date.now() / 1000])).rows[0];
+    if (!ins) continue;
+    await q('UPDATE wa_threads SET last_in_at=now(), last_at=now() WHERE id=$1', [t.id]);
+    if (media) waFetchMedia(ins.id, media).catch(e => console.error('wa media', e.message));
+    // a new number on the Sales line becomes a lead
+    let isNewLead = false;
+    if (line === 'sales' && !t.lead_id && C.auto_lead) {
+      const brand = C.sales.brand_id || (await q(`SELECT id FROM brands ORDER BY (lower(name)='heaven') DESC, id LIMIT 1`)).rows[0].id;
+      const l = (await q(`INSERT INTO leads(name,phone,source,stage,priority,brand_id,notes) VALUES($1,$2,'WhatsApp','New Enquiry','Warm',$3,$4) RETURNING id`,
+        [names[m.from] || ('WhatsApp ' + last10(m.from)), '+' + waDigits(m.from), brand, body ? 'First message: ' + String(body).slice(0, 300) : null])).rows[0];
+      await q('UPDATE wa_threads SET lead_id=$2 WHERE id=$1', [t.id, l.id]); t.lead_id = l.id; isNewLead = true;
+      await q(`INSERT INTO lead_activity(lead_id,by_name,text) VALUES($1,'WhatsApp','New lead from WhatsApp (Sales number)')`, [l.id]).catch(() => {});
+    }
+    const who = names[m.from] || t.name || '+' + waDigits(m.from), pv = waText({ type, body, fname }).slice(0, 120);
+    for (const id of await waUsers()) {
+      if (isNewLead) await q('INSERT INTO notifications(user_id,title,body,link) VALUES($1,$2,$3,$4)', [id, '🟢 New WhatsApp lead', `${who}: ${pv}`, 'wa:' + t.id]);
+      pushTo(id, `🟢 ${who} · WhatsApp ${line === 'sales' ? 'Sales' : 'Service'}`, pv, null, { url: '/?att=wa:' + t.id, att: 'wa:' + t.id, tag: 'rago-wa-' + t.id }).catch(() => {});
+    }
+  }
+}
+async function waFetchMedia(msgId, mediaId) {
+  const info = await graph('/' + mediaId), c = await waCfg();
+  const r = await fetch(info.url, { headers: { Authorization: 'Bearer ' + c.token } });
+  if (!r.ok) throw new Error('media download ' + r.status);
+  const buf = Buffer.from(await r.arrayBuffer());
+  if (buf.length > 25 * 1024 * 1024) return;
+  await q('UPDATE wa_messages SET data=$2, mime=COALESCE(mime,$3) WHERE id=$1', [msgId, buf, info.mime_type || null]);
+  return buf;
+}
+// ---------- inbox for staff ----------
+const WA_MCOLS = `id, thread_id, dir, wa_id, type, body, mime, fname, lat, lng, status, error, category, template, sent_by_name, reply_to, created_at, (data IS NOT NULL OR media_id IS NOT NULL) has_media, length(data) size`;
+const waOpen = t => !!(t.last_in_at && Date.now() - new Date(t.last_in_at) < 24 * 3600 * 1000);
+app.get('/api/wa/status', waNeed, wrap(async (req, res) => {
+  const c = await waCfg();
+  res.json({ connected: !!c.token, lines: WA_LINES.map(l => ({ line: l, label: c[l].label, ready: !!(c.token && c[l].phone_id), number: c[l].number })), templates: !!c.waba_id });
+}));
+app.get('/api/wa/threads', waNeed, wrap(async (req, res) => {
+  const line = WA_LINES.includes(req.query.line) ? req.query.line : null, p = [req.user.id], w = [];
+  if (line) { p.push(line); w.push(`t.line=$${p.length}`); }
+  if (req.query.q) { p.push('%' + String(req.query.q).slice(0, 60) + '%'); w.push(`(t.name ILIKE $${p.length} OR t.wa_phone ILIKE $${p.length} OR l.name ILIKE $${p.length} OR c.name ILIKE $${p.length} OR c.company ILIKE $${p.length} OR l.company ILIKE $${p.length})`); }
+  const rows = (await q(`SELECT t.*, l.name lead_name, l.company lead_company, l.stage lead_stage, c.name cust_name, c.company cust_company,
+      (SELECT COUNT(*)::int FROM wa_messages m WHERE m.thread_id=t.id AND m.dir='in' AND m.id>COALESCE(r.last_read,0)) unread,
+      (SELECT row_to_json(x) FROM (SELECT dir, type, body, fname, template, status, created_at FROM wa_messages m WHERE m.thread_id=t.id ORDER BY m.id DESC LIMIT 1) x) last
+    FROM wa_threads t LEFT JOIN leads l ON l.id=t.lead_id LEFT JOIN customers c ON c.id=t.customer_id LEFT JOIN wa_reads r ON r.thread_id=t.id AND r.user_id=$1
+    ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY t.last_at DESC LIMIT 300`, p)).rows;
+  const counts = (await q(`SELECT t.line, COUNT(*)::int n FROM wa_threads t JOIN wa_messages m ON m.thread_id=t.id AND m.dir='in' LEFT JOIN wa_reads r ON r.thread_id=t.id AND r.user_id=$1 WHERE m.id>COALESCE(r.last_read,0) GROUP BY t.line`, [req.user.id])).rows;
+  const un = {}; counts.forEach(x => { un[x.line] = x.n; });
+  res.set('Cache-Control', 'no-store').json({ unread: un, items: rows.map(t => ({ ...t, open: waOpen(t), title: t.lead_name || t.cust_name || t.name || '+' + t.wa_phone, preview: t.last ? (t.last.dir === 'out' ? 'You: ' : '') + waText(t.last) : '' })) });
+}));
+const waThreadFor = async id => (await q(`SELECT t.*, l.name lead_name, l.company lead_company, l.stage lead_stage, c.name cust_name, c.company cust_company FROM wa_threads t LEFT JOIN leads l ON l.id=t.lead_id LEFT JOIN customers c ON c.id=t.customer_id WHERE t.id=$1`, [id])).rows[0];
+app.get('/api/wa/threads/:id', waNeed, wrap(async (req, res) => {
+  const t = await waThreadFor(+req.params.id); if (!t) return res.status(404).json({ error: 'Not found' });
+  const after = +req.query.after || 0, before = +req.query.before || 0;
+  const items = after ? (await q(`SELECT ${WA_MCOLS} FROM wa_messages WHERE thread_id=$1 AND id>$2 ORDER BY id`, [t.id, after])).rows
+    : (await q(`SELECT * FROM (SELECT ${WA_MCOLS} FROM wa_messages WHERE thread_id=$1 ${before ? 'AND id<$2' : ''} ORDER BY id DESC LIMIT 80) x ORDER BY id`, before ? [t.id, before] : [t.id])).rows;
+  // status ticks change after sending: give the latest statuses of the last 40 outgoing messages
+  const st = after ? (await q(`SELECT id, status, error FROM wa_messages WHERE thread_id=$1 AND dir='out' ORDER BY id DESC LIMIT 40`, [t.id])).rows : [];
+  const c = await waCfg();
+  res.set('Cache-Control', 'no-store').json({ thread: { ...t, open: waOpen(t), title: t.lead_name || t.cust_name || t.name || '+' + t.wa_phone, number: c[t.line].number, ready: !!(c.token && c[t.line].phone_id) }, items, statuses: st, more: !after && items.length === 80 });
+}));
+app.post('/api/wa/threads/:id/read', waNeed, wrap(async (req, res) => {
+  const t = (await q('SELECT * FROM wa_threads WHERE id=$1', [req.params.id])).rows[0]; if (!t) return res.status(404).json({ error: 'Not found' });
+  const last = (await q(`SELECT MAX(id) n FROM wa_messages WHERE thread_id=$1`, [t.id])).rows[0].n || 0;
+  await q(`INSERT INTO wa_reads(thread_id,user_id,last_read) VALUES($1,$2,$3) ON CONFLICT (thread_id,user_id) DO UPDATE SET last_read=GREATEST(wa_reads.last_read,$3)`, [t.id, req.user.id, last]);
+  // blue ticks for the customer on their latest message
+  const lastIn = (await q(`SELECT wa_id FROM wa_messages WHERE thread_id=$1 AND dir='in' ORDER BY id DESC LIMIT 1`, [t.id])).rows[0], c = await waCfg();
+  if (lastIn && c.token && c[t.line].phone_id && req.body && req.body.seen !== false) graph(`/${c[t.line].phone_id}/messages`, { method: 'POST', json: { messaging_product: 'whatsapp', status: 'read', message_id: lastIn.wa_id } }).catch(() => {});
+  res.json({ ok: true, unread: await waUnread(req.user.id) });
+}));
+const waUnread = async uid => (await q(`SELECT COUNT(*)::int n FROM wa_messages m JOIN wa_threads t ON t.id=m.thread_id LEFT JOIN wa_reads r ON r.thread_id=t.id AND r.user_id=$1 WHERE m.dir='in' AND m.id>COALESCE(r.last_read,0)`, [uid])).rows[0].n;
+// open (or make) the chat for a lead / customer / ticket — leads use the Sales number, services the Service number
+app.post('/api/wa/open', waNeed, wrap(async (req, res) => {
+  const b = req.body || {}; let phone = b.phone, name = b.name, line = WA_LINES.includes(b.line) ? b.line : null, lead = null, cust = null;
+  if (b.lead_id) { const l = (await q('SELECT id, name, phone FROM leads WHERE id=$1', [b.lead_id])).rows[0]; if (!l) return res.status(404).json({ error: 'Lead not found' }); phone = l.phone; name = l.name; lead = l.id; line = line || 'sales'; }
+  if (b.service_id) { const s = (await q('SELECT c.id, c.name, c.phone FROM services s JOIN customers c ON c.id=s.customer_id WHERE s.id=$1', [b.service_id])).rows[0]; if (!s) return res.status(404).json({ error: 'Ticket not found' }); phone = s.phone; name = s.name; cust = s.id; line = line || 'service'; }
+  if (b.customer_id) { const c2 = (await q('SELECT id, name, phone FROM customers WHERE id=$1', [b.customer_id])).rows[0]; if (!c2) return res.status(404).json({ error: 'Customer not found' }); phone = c2.phone; name = c2.name; cust = c2.id; line = line || 'service'; }
+  if (waDigits(phone).length < 11) return res.status(400).json({ error: 'This contact has no valid mobile number' });
+  const t = await waThread(line || 'sales', phone, name);
+  if (lead && !t.lead_id) await q('UPDATE wa_threads SET lead_id=$2 WHERE id=$1', [t.id, lead]);
+  if (cust && !t.customer_id) await q('UPDATE wa_threads SET customer_id=$2 WHERE id=$1', [t.id, cust]);
+  res.json({ id: t.id });
+}));
+app.patch('/api/wa/threads/:id', waNeed, wrap(async (req, res) => {   // link to a lead / customer, rename
+  const t = (await q('SELECT * FROM wa_threads WHERE id=$1', [req.params.id])).rows[0]; if (!t) return res.status(404).json({ error: 'Not found' });
+  const b = req.body || {};
+  if (b.lead_id !== undefined) await q('UPDATE wa_threads SET lead_id=$2 WHERE id=$1', [t.id, +b.lead_id || null]);
+  if (b.customer_id !== undefined) await q('UPDATE wa_threads SET customer_id=$2 WHERE id=$1', [t.id, +b.customer_id || null]);
+  if (b.name !== undefined) await q('UPDATE wa_threads SET name=$2 WHERE id=$1', [t.id, String(b.name || '').trim().slice(0, 80) || null]);
+  res.json({ ok: true });
+}));
+// make a lead from a chat (Sales) or a ticket's customer (Service)
+app.post('/api/wa/threads/:id/lead', waNeed, need('leads'), wrap(async (req, res) => {
+  const t = (await q('SELECT * FROM wa_threads WHERE id=$1', [req.params.id])).rows[0]; if (!t) return res.status(404).json({ error: 'Not found' });
+  if (t.lead_id) return res.json({ id: t.lead_id });
+  const c = await waCfg(), brand = req.user.brand_id || c[t.line].brand_id || (await q(`SELECT id FROM brands ORDER BY (lower(name)='heaven') DESC, id LIMIT 1`)).rows[0].id;
+  const l = (await q(`INSERT INTO leads(name,phone,source,stage,priority,brand_id,created_by,assigned_to) VALUES($1,$2,'WhatsApp','New Enquiry','Warm',$3,$4,$4) RETURNING id`, [t.name || ('WhatsApp ' + last10(t.wa_phone)), '+' + t.wa_phone, brand, req.user.id])).rows[0];
+  await q('UPDATE wa_threads SET lead_id=$2 WHERE id=$1', [t.id, l.id]); res.json({ id: l.id });
+}));
+// send: text, file (photo / document / voice) or an approved template
+async function waUpload(phoneId, buf, mime, fname) {
+  const fd = new FormData(); fd.append('messaging_product', 'whatsapp'); fd.append('type', mime); fd.append('file', new Blob([buf], { type: mime }), fname || 'file');
+  return (await graph(`/${phoneId}/media`, { method: 'POST', body: fd })).id;
+}
+// Chrome records voice as WebM — WhatsApp needs OGG/Opus, so convert (ffmpeg comes with the app)
+function toOgg(buf) {
+  return new Promise((ok, no) => {
+    let ff; try { ff = require('ffmpeg-static'); } catch (e) { return no(new Error('no ffmpeg')); }
+    const p = require('child_process').spawn(ff, ['-hide_banner', '-loglevel', 'error', '-i', 'pipe:0', '-vn', '-c:a', 'libopus', '-b:a', '32k', '-ac', '1', '-ar', '48000', '-f', 'ogg', 'pipe:1']);
+    const out = []; p.stdout.on('data', d => out.push(d)); p.on('error', no); p.on('close', code => code === 0 && out.length ? ok(Buffer.concat(out)) : no(new Error('convert failed')));
+    p.stdin.on('error', () => {}); p.stdin.end(buf);
+  });
+}
+app.post('/api/wa/threads/:id/send', waNeed, wrap(async (req, res) => {
+  const t = (await q('SELECT * FROM wa_threads WHERE id=$1', [req.params.id])).rows[0]; if (!t) return res.status(404).json({ error: 'Not found' });
+  const c = await waCfg(), phoneId = c[t.line].phone_id;
+  if (!c.token || !phoneId) return res.status(400).json({ error: `The ${c[t.line].label} number is not connected yet — Super Admin: Profile → WhatsApp setup` });
+  const b = req.body || {}; let payload, row = { type: 'text', body: null, mime: null, fname: null, data: null, template: null, category: null };
+  try {
+    if (b.template) {
+      const tp = b.template, params = Array.isArray(tp.params) ? tp.params.map(x => String(x || '').slice(0, 900)) : [];
+      if (!tp.name) return res.status(400).json({ error: 'Choose a template' });
+      if (params.some(x => !x.trim())) return res.status(400).json({ error: 'Fill in every blank in the template' });
+      payload = { type: 'template', template: { name: tp.name, language: { code: tp.lang || 'en' }, ...(params.length ? { components: [{ type: 'body', parameters: params.map(x => ({ type: 'text', text: x })) }] } : {}) } };
+      row = { ...row, type: 'template', template: tp.name, body: String(tp.preview || tp.name).slice(0, 2000), category: String(tp.category || '').toLowerCase() || null };
+    } else {
+      if (!waOpen(t)) return res.status(400).json({ error: 'More than 24 hours since the customer’s last message — send a template instead', need_template: true });
+      if (b.file) {
+        const m = /^data:([\w.+-]+\/[\w.+-]+)?(?:;[\w=.+-]+)*;base64,([A-Za-z0-9+/=]*)$/.exec(String(b.file)); if (!m) return res.status(400).json({ error: 'Choose a file' });
+        let buf = Buffer.from(m[2], 'base64'), mime = (m[1] || 'application/octet-stream').toLowerCase(), fname = String(b.fname || 'file').replace(/[\\/:*?"<>|\r\n]+/g, '_').slice(0, 120);
+        if (buf.length > 16 * 1024 * 1024) return res.status(400).json({ error: 'File is too large for WhatsApp (max 16 MB)' });
+        let kind = /^image\/(jpeg|png)$/.test(mime) ? 'image' : /^audio\//.test(mime) || b.voice ? 'audio' : /^video\/(mp4|3gpp)$/.test(mime) ? 'video' : 'document';
+        if (kind === 'audio' && !/ogg|mpeg|mp4|aac|amr/.test(mime)) { try { buf = await toOgg(buf); mime = 'audio/ogg'; fname = 'voice.ogg'; } catch (e) { kind = 'document'; } }
+        if (kind === 'audio' && /ogg/.test(mime)) mime = 'audio/ogg';
+        const mid = await waUpload(phoneId, buf, mime.split(';')[0], fname);
+        payload = { type: kind, [kind]: { id: mid, ...(kind === 'document' ? { filename: fname } : {}), ...(b.text && kind !== 'audio' ? { caption: String(b.text).slice(0, 1000) } : {}) } };
+        row = { ...row, type: kind, body: b.text || null, mime: mime.split(';')[0], fname, data: buf };
+      } else {
+        const text = String(b.text || '').trim(); if (!text) return res.status(400).json({ error: 'Type a message' });
+        payload = { type: 'text', text: { body: text.slice(0, 4096), preview_url: /https?:\/\//.test(text) } };
+        row = { ...row, body: text };
+      }
+    }
+    if (b.reply_to) { const rt = (await q('SELECT wa_id FROM wa_messages WHERE id=$1 AND thread_id=$2', [b.reply_to, t.id])).rows[0]; if (rt && rt.wa_id) payload.context = { message_id: rt.wa_id }; }
+    const r = await graph(`/${phoneId}/messages`, { method: 'POST', json: { messaging_product: 'whatsapp', recipient_type: 'individual', to: t.wa_phone, ...payload } });
+    const wid = r.messages && r.messages[0] && r.messages[0].id;
+    const ins = (await q(`INSERT INTO wa_messages(thread_id,dir,wa_id,type,body,mime,fname,data,status,category,template,sent_by,sent_by_name,reply_to) VALUES($1,'out',$2,$3,$4,$5,$6,$7,'sent',$8,$9,$10,$11,$12) RETURNING id`,
+      [t.id, wid || null, row.type, row.body, row.mime, row.fname, row.data, row.category || (b.template ? null : 'service'), row.template, req.user.id, req.user.name, payload.context ? payload.context.message_id : null])).rows[0];
+    await q('UPDATE wa_threads SET last_at=now() WHERE id=$1', [t.id]);
+    if (t.lead_id) { await q(`UPDATE leads SET last_contact=now(), updated_at=now() WHERE id=$1`, [t.lead_id]).catch(() => {}); if (b.template) await q(`INSERT INTO lead_activity(lead_id,by_name,text) VALUES($1,$2,$3)`, [t.lead_id, req.user.name, `📋 WhatsApp template sent: ${row.template}`]).catch(() => {}); }
+    res.json({ ok: true, id: ins.id });
+  } catch (e) { res.status(400).json({ error: e.message, need_template: /24 hours/.test(e.message) }); }
+}));
+app.get('/api/wa/media/:id', waNeed, wrap(async (req, res) => {
+  let m = (await q('SELECT id, data, mime, media_id, fname, type FROM wa_messages WHERE id=$1', [req.params.id])).rows[0];
+  if (!m) return res.status(404).end();
+  let buf = m.data;
+  if (!buf && m.media_id) { try { buf = await waFetchMedia(m.id, m.media_id); } catch (e) { return res.status(404).end(); } }
+  if (!buf) return res.status(404).end();
+  const total = buf.length, range = /bytes=(\d*)-(\d*)/.exec(req.headers.range || '');
+  res.set({ 'Content-Type': m.mime || 'application/octet-stream', 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, max-age=604800', 'X-Content-Type-Options': 'nosniff' });
+  if (m.type === 'document' || req.query.dl) res.set('Content-Disposition', `${req.query.dl ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(m.fname || 'file')}`);
+  if (range) { const s = range[1] ? +range[1] : 0, e = range[2] ? Math.min(+range[2], total - 1) : total - 1; return res.status(206).set('Content-Range', `bytes ${s}-${e}/${total}`).send(buf.subarray(s, e + 1)); }
+  res.send(buf);
+}));
+// approved templates from Meta (cached 10 minutes)
+let WA_TPL = { at: 0, items: [] };
+app.get('/api/wa/templates', waNeed, wrap(async (req, res) => {
+  const c = await waCfg();
+  if (!c.waba_id) return res.json({ items: [], error: 'Add the WhatsApp Business Account ID in WhatsApp setup to use templates' });
+  try {
+    if (req.query.fresh || Date.now() - WA_TPL.at > 600000) {
+      const r = await graph(`/${c.waba_id}/message_templates?fields=name,language,status,category,components&limit=200`);
+      WA_TPL = { at: Date.now(), items: (r.data || []).filter(x => x.status === 'APPROVED').map(x => {
+        const body = (x.components || []).find(k => k.type === 'BODY') || {}, head = (x.components || []).find(k => k.type === 'HEADER') || {};
+        return { name: x.name, lang: x.language, category: x.category, text: body.text || '', header: head.format === 'TEXT' ? head.text : head.format ? '[' + head.format.toLowerCase() + ']' : '', params: ((body.text || '').match(/\{\{\d+\}\}/g) || []).length, media_header: !!(head.format && head.format !== 'TEXT') };
+      }) };
+    }
+    res.json({ items: WA_TPL.items });
+  } catch (e) { res.json({ items: [], error: e.message }); }
+}));
+// this month: messages sent and an estimate of Meta's bill
+app.get('/api/wa/usage', waNeed, wrap(async (req, res) => {
+  const m = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : (await todayIST()).slice(0, 7);
+  const rows = (await q(`SELECT t.line, COALESCE(m.category,'service') cat, COUNT(*)::int n FROM wa_messages m JOIN wa_threads t ON t.id=m.thread_id
+    WHERE m.dir='out' AND m.status<>'failed' AND to_char(m.created_at AT TIME ZONE '${TZ}','YYYY-MM')=$1 GROUP BY 1,2`, [m])).rows;
+  const inN = (await q(`SELECT t.line, COUNT(*)::int n FROM wa_messages m JOIN wa_threads t ON t.id=m.thread_id WHERE m.dir='in' AND to_char(m.created_at AT TIME ZONE '${TZ}','YYYY-MM')=$1 GROUP BY 1`, [m])).rows;
+  const out = WA_LINES.map(l => {
+    const g = k => (rows.find(r => r.line === l && r.cat === k) || {}).n || 0, svc = g('service') + g('free_customer_service'), mk = g('marketing'), ut = g('utility'), au = g('authentication');
+    const cost = Math.max(0, svc - WA_RATES.free) * WA_RATES.service + mk * WA_RATES.marketing + ut * WA_RATES.utility + au * WA_RATES.authentication;
+    return { line: l, received: (inN.find(r => r.line === l) || {}).n || 0, replies: svc, free_left: Math.max(0, WA_RATES.free - svc), marketing: mk, utility: ut + au, cost: Math.round(cost * 100) / 100, with_gst: Math.round(cost * (1 + WA_RATES.gst) * 100) / 100 };
+  });
+  res.json({ month: m, rates: WA_RATES, lines: out, total: Math.round(out.reduce((t, x) => t + x.with_gst, 0) * 100) / 100 });
+}));
+// ---------- setup (Super Admin) ----------
+const mask = v => v ? '••••' + String(v).slice(-4) : '';
+app.get('/api/wa/settings', superOnly, wrap(async (req, res) => {
+  const c = await waCfg(true); let db = {}; try { db = JSON.parse(((await q(`SELECT v FROM settings WHERE k='wa_cfg'`)).rows[0] || {}).v || '{}'); } catch (e) { db = {}; }
+  if (!c.verify_token) { db.verify_token = crypto.randomBytes(12).toString('hex'); await q(`INSERT INTO settings(k,v) VALUES('wa_cfg',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [JSON.stringify(db)]); await waCfg(true); }
+  const C = await waCfg();
+  res.json({ token: mask(C.token), app_secret: mask(C.app_secret), verify_token: C.verify_token, waba_id: C.waba_id, sales_phone_id: C.sales.phone_id, service_phone_id: C.service.phone_id,
+    sales_number: C.sales.number, service_number: C.service.number, sales_brand_id: C.sales.brand_id, service_brand_id: C.service.brand_id, auto_lead: C.auto_lead, from_env: C.from_env });
+}));
+app.put('/api/wa/settings', superOnly, wrap(async (req, res) => {
+  let db = {}; try { db = JSON.parse(((await q(`SELECT v FROM settings WHERE k='wa_cfg'`)).rows[0] || {}).v || '{}'); } catch (e) { db = {}; }
+  const b = req.body || {}, str = (k, max = 600) => { if (b[k] !== undefined && !/^••••/.test(String(b[k]))) db[k] = String(b[k] || '').trim().slice(0, max); };
+  ['token', 'app_secret'].forEach(k => str(k, 1200)); ['verify_token', 'waba_id', 'sales_phone_id', 'service_phone_id', 'sales_number', 'service_number'].forEach(k => str(k, 80));
+  for (const k of ['sales_brand_id', 'service_brand_id']) if (b[k] !== undefined) db[k] = +b[k] || null;
+  if (b.auto_lead !== undefined) db.auto_lead = !!b.auto_lead;
+  await q(`INSERT INTO settings(k,v) VALUES('wa_cfg',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [JSON.stringify(db)]); await waCfg(true); WA_TPL.at = 0;
+  res.json({ ok: true });
+}));
+app.post('/api/wa/test', superOnly, wrap(async (req, res) => {   // check the keys with Meta
+  const c = await waCfg(true), out = {};
+  for (const l of WA_LINES) {
+    if (!c[l].phone_id) { out[l] = { ok: false, error: 'Phone number ID missing' }; continue; }
+    try { const r = await graph(`/${c[l].phone_id}?fields=display_phone_number,verified_name,quality_rating,code_verification_status,name_status`); out[l] = { ok: true, ...r }; }
+    catch (e) { out[l] = { ok: false, error: e.message }; }
+  }
+  if (c.waba_id) { try { const r = await graph(`/${c.waba_id}/message_templates?fields=name,status&limit=200`); out.templates = { ok: true, approved: (r.data || []).filter(x => x.status === 'APPROVED').length, total: (r.data || []).length }; } catch (e) { out.templates = { ok: false, error: e.message }; } }
+  res.json(out);
+}));
+
+init().then(initChat).then(initProjects).then(initWA).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
   .catch(e => { console.error('DB init failed', e.message); process.exit(1); });

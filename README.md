@@ -109,3 +109,43 @@ Profile → "Google Calendar · Siri & Google Assistant" → Set up.
 - Each note has a **day** (📅 chip). It shows in that day's To-do, and the date strip shows a yellow dot.
 - **All notes ›** opens the Notes list, with search, a Pinned group and notes grouped by day.
 - The **Super Admin** can write a note for any staff member (👤 chip). They get a notification and the note shows on their chosen day, marked "From …". The Super Admin's Notes list can show *Notes I wrote for staff*, *Everyone's notes* or one person's notes.
+
+## Version 13
+- **Feature switches per person** (Team → Add / Edit member): team attendance (who came, leave, absent), approve leave & mark attendance, payroll, billing, edit customers, lead sources & interests, team chat, projects, sending voice messages / tasks to others. Existing Admin staff keep what they had.
+- **Profile photo** can be added while creating a member. All profile pictures are round.
+- **New service**: person name and company are optional; only the phone is needed.
+- **Edit customer** (name, title, company, phone, email, address) from the ticket or the Customers list.
+- **Customer history**: tap a customer to see tickets, payments received (with discounts), money outstanding, money still with the technician, and leads with the same phone.
+- **Billing**: the technician can finish a job as **🧾 Billing**. It leaves their list and appears in the **Billing** tab for staff with the billing switch. Write the quotation (lines + notes), save it, print it, **Convert to bill**, then **Payment received** (Cash / UPI / Bank). The ticket is then Resolved.
+- **Discount** on every payment confirmation: No / Yes. With Yes, enter the actual amount and the discount, and the final amount is calculated. It is saved on the customer's history.
+- **Services month filter** starts on this month. Open tickets from earlier months stay visible. Pick any earlier month or All months.
+- **Allocation**: technicians on leave, on their week off, on a holiday or on permission right now show as ⛔ and can't be picked. A permission later in the day is shown next to the name.
+- **Lead sources & interests** can be edited (Leads → ⚙ Sources).
+- **Won lead → New job**.
+- **Give leave / permission** (Holidays page, Super Admin): a full-day leave or a time permission for everyone or chosen people. It's not counted in anyone's leave or permissions, and nobody is marked late or absent for it.
+- **Voice messages & tasks** can be sent between admin staff (with the switch). The Super Admin sees who sent what to whom.
+
+## Version 14 — WhatsApp (Sales & Service numbers)
+A shared WhatsApp inbox inside the CRM, using Meta's official WhatsApp Cloud API.
+- **WhatsApp menu**: a 💼 Sales tab and a 🛠 Service tab, each with its own unread count. Chats look like WhatsApp: green bubbles, photos, PDFs, voice notes, locations, replies to a message, and ✓ / ✓✓ / blue ✓✓ ticks.
+- **Everyone with the WhatsApp switch** (Team → member → Features) can see and reply. The customer only sees your business number. Each reply shows which staff member sent it.
+- **New number on the Sales number** becomes a new chat and a **New Enquiry lead** (source WhatsApp). This can be turned off in setup. A known number is linked to its lead or customer automatically.
+- **New number on the Service number** becomes a new chat linked to the customer with that phone. ⋯ → *New service ticket* or *Make a lead* creates one from the chat.
+- **Inside a lead pop-up** there is a WhatsApp chat on the Sales number. **Inside a ticket pop-up** there is one on the Service number.
+- **24-hour rule (Meta)**: you can reply freely for 24 hours after the customer's last message (the chat header shows the time left). After that, or for a first message, send an approved **template** (📋 button). Its blanks are pre-filled with the name and shown in a preview.
+- **Notifications**: a push notification for every incoming message, a bell notification for every new WhatsApp lead, and badges on the menu.
+- **Voice notes** recorded in the app are converted to WhatsApp's format automatically (ffmpeg is included).
+- **📊 This month**: messages sent, free replies left, and an estimated Meta bill with GST.
+- Not supported yet: templates with a photo or video header.
+
+### Meta setup (one time, Super Admin)
+1. At business.facebook.com, complete **Business verification**.
+2. At developers.facebook.com/apps, create an app of type **Business** and add the **WhatsApp** product.
+3. Go to WhatsApp → API Setup → **Add phone number** and add the Sales number and the Service number. Copy each **Phone number ID** and the **WhatsApp Business Account ID**.
+4. Go to Business settings → System users → add an Admin user. Assign the app and the WhatsApp account to it. Generate a token with `whatsapp_business_messaging` and `whatsapp_business_management` and expiry **Never**.
+5. Go to App settings → Basic and copy the **App secret**.
+6. In the CRM: Profile → 🟢 WhatsApp numbers → **Set up**. Paste the token, the app secret, the WABA ID and both Phone number IDs, then press **Save** and **Test connection**.
+7. In Meta: WhatsApp → Configuration → Webhook. Paste the **Callback URL** (`https://YOUR-APP.onrender.com/webhook/whatsapp`) and the **Verify token** shown in the CRM setup, verify, then subscribe to **messages**.
+8. In WhatsApp Manager, add a payment method and create message templates.
+
+Instead of step 6 you can put the keys in Render → Environment: `WA_TOKEN`, `WA_APP_SECRET`, `WA_VERIFY_TOKEN`, `WA_WABA_ID`, `WA_SALES_PHONE_ID`, `WA_SERVICE_PHONE_ID`. Environment values override what is set in the app.
