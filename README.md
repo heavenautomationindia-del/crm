@@ -100,3 +100,12 @@ Profile → "Google Calendar · Siri & Google Assistant" → Set up.
   - **Overtime pay**: ₹ per hour. Time after the check-out time counts once it passes the set minutes. Working on the week off or a holiday counts in full. Overtime is shown in attendance and added to the salary.
 - **Week off change**: staff can ask "this week I'll take Wednesday off" (Attendance → Change this week, or 🔄 Week off in Apply leave). Once admin approves, that day is off and that week's usual off day becomes a working day.
 - **Disabling a member** (Status → Disabled) signs them out everywhere. They can't log in until they're set Active again, and the login page says the account is disabled.
+
+## Notes (Version 12)
+- **To-do → New note** opens an Apple Notes style editor:
+  - The first line is a big bold title, and the note saves itself as you type.
+  - 📌 pins a note, and the trash icon deletes it.
+  - The checklist button adds ☐ boxes. Tap a box to tick it ☑, and Enter starts the next box.
+- Each note has a **day** (📅 chip). It shows in that day's To-do, and the date strip shows a yellow dot.
+- **All notes ›** opens the Notes list, with search, a Pinned group and notes grouped by day.
+- The **Super Admin** can write a note for any staff member (👤 chip). They get a notification and the note shows on their chosen day, marked "From …". The Super Admin's Notes list can show *Notes I wrote for staff*, *Everyone's notes* or one person's notes.

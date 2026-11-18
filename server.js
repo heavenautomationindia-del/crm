@@ -426,6 +426,9 @@ async function init() {
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS company TEXT;
   ALTER TABLE services ADD COLUMN IF NOT EXISTS created_by INT;
   ALTER TABLE users ADD COLUMN IF NOT EXISTS att_rules JSONB;
+  CREATE TABLE IF NOT EXISTS notes (id SERIAL PRIMARY KEY, user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE, day DATE NOT NULL, title TEXT, body TEXT,
+    pinned BOOLEAN DEFAULT false, created_by INT, created_by_name TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
+  CREATE INDEX IF NOT EXISTS idx_notes_user_day ON notes(user_id, day);
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS location_by TEXT;
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS location_on TIMESTAMPTZ;
   CREATE TABLE IF NOT EXISTS notifications (id SERIAL PRIMARY KEY, user_id INT NOT NULL, title TEXT, body TEXT, service_id INT, read BOOLEAN DEFAULT false, created_at TIMESTAMPTZ DEFAULT now());
@@ -935,6 +938,7 @@ const WIPE = {
   todos: 'TRUNCATE todos RESTART IDENTITY',
   attendance: 'TRUNCATE attendance, leave_requests RESTART IDENTITY',
   notifications: 'TRUNCATE notifications RESTART IDENTITY',
+  notes: 'TRUNCATE notes RESTART IDENTITY',
   projects: `DELETE FROM chats WHERE project_id IS NOT NULL; TRUNCATE projects, project_tasks RESTART IDENTITY`,
   chat: `DELETE FROM chats WHERE kind NOT IN ('all','project'); TRUNCATE chat_messages RESTART IDENTITY; UPDATE chat_members SET last_read=0`,
   users: 'SELECT 1',   // staff logins: handled below
@@ -1064,6 +1068,8 @@ app.get('/api/todos/days', wrap(async (req, res) => {
     (await q(`SELECT to_char(l.follow_up,'YYYY-MM-DD') d, COUNT(*)::int n FROM leads l WHERE l.stage IN ('New Enquiry','Contacted','Site Visit','Quotation','Negotiation') AND l.follow_up BETWEEN $1::date AND $2::date${lw} GROUP BY 1`, lp)).rows
       .forEach(r => { (out[r.d] = out[r.d] || { n: 0, v: 0, l: 0 }).l = r.n; });
   }
+  (await q(`SELECT to_char(day,'YYYY-MM-DD') d, COUNT(*)::int n FROM notes WHERE user_id=$1 AND day BETWEEN $2::date AND $3::date GROUP BY 1`, [req.user.id, from, to])).rows
+    .forEach(r => { (out[r.d] = out[r.d] || { n: 0, v: 0, l: 0 }).nt = r.n; });
   res.set('Cache-Control', 'no-store').json(out);
 }));
 
@@ -2402,6 +2408,59 @@ app.delete('/api/project-tasks/:id', wrap(async (req, res) => {
 app.get('/api/chats/:id/files', wrap(async (req, res) => {
   const c = await chatFor(req.user, +req.params.id); if (!c) return res.status(404).json({ error: 'Not found' });
   res.set('Cache-Control', 'no-store').json({ items: (await q(`SELECT id, kind, body, mime, fname, fsize, w, h, user_name, created_at FROM chat_messages WHERE chat_id=$1 AND kind IN ('image','file') AND NOT deleted ORDER BY id DESC`, [c.id])).rows });
+}));
+
+
+// =====================================================================
+// ---------- Notes (Apple Notes style) — each note belongs to a person and a day; the Super Admin can write notes for anyone ----------
+// =====================================================================
+const NCOLS = `n.id, n.user_id, to_char(n.day,'YYYY-MM-DD') AS day, n.title, n.body, n.pinned, n.created_by, n.created_by_name, n.created_at, n.updated_at, u.name user_name, u.photo_v`;
+const noteFor = async (u, id) => {
+  const n = (await q(`SELECT n.*, to_char(n.day,'YYYY-MM-DD') AS day FROM notes n WHERE n.id=$1`, [id])).rows[0];
+  return n && (n.user_id === u.id || n.created_by === u.id || isSuper(u)) ? n : null;
+};
+const noteBody = b => ({ title: String(b.title || '').trim().slice(0, 200), body: String(b.body || '').replace(/\s+$/, '').slice(0, 20000) });
+app.get('/api/notes', wrap(async (req, res) => {
+  const u = req.user, p = [], w = [];
+  const who = req.query.user;
+  if (isSuper(u) && who === 'all') w.push('TRUE');
+  else if (isSuper(u) && who === 'sent') { p.push(u.id); w.push(`n.created_by=$${p.length} AND n.user_id<>$${p.length}`); }
+  else if (isSuper(u) && Number.isInteger(+who) && +who > 0) { p.push(+who); w.push(`n.user_id=$${p.length}`); }
+  else { p.push(u.id); w.push(`n.user_id=$${p.length}`); }
+  if (isDate(req.query.day)) { p.push(req.query.day); w.push(`n.day=$${p.length}`); }
+  if (req.query.q) { p.push('%' + String(req.query.q).slice(0, 80) + '%'); w.push(`(n.title ILIKE $${p.length} OR n.body ILIKE $${p.length})`); }
+  res.set('Cache-Control', 'no-store').json({ today: await todayIST(), items: (await q(`SELECT ${NCOLS} FROM notes n JOIN users u ON u.id=n.user_id WHERE ${w.join(' AND ')} ORDER BY n.pinned DESC, n.day DESC, n.updated_at DESC LIMIT 500`, p)).rows });
+}));
+app.get('/api/notes/:id', wrap(async (req, res) => {
+  const n = await noteFor(req.user, +req.params.id); if (!n) return res.status(404).json({ error: 'Note not found' });
+  res.json((await q(`SELECT ${NCOLS} FROM notes n JOIN users u ON u.id=n.user_id WHERE n.id=$1`, [n.id])).rows[0]);
+}));
+app.post('/api/notes', wrap(async (req, res) => {
+  const b = req.body || {}, u = req.user, { title, body } = noteBody(b);
+  if (!title && !body.trim()) return res.status(400).json({ error: 'Write something first' });
+  let uid = u.id;
+  if (b.user_id && +b.user_id !== u.id) {
+    if (!isSuper(u)) return res.status(403).json({ error: 'Only the Super Admin can write notes for other people' });
+    if (!(await q('SELECT 1 FROM users WHERE id=$1 AND active', [+b.user_id])).rows.length) return res.status(404).json({ error: 'Person not found' });
+    uid = +b.user_id;
+  }
+  const day = isDate(b.day) ? b.day : await todayIST();
+  const r = (await q(`INSERT INTO notes(user_id,day,title,body,pinned,created_by,created_by_name) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`, [uid, day, title || null, body || null, !!b.pinned, u.id, u.name])).rows[0];
+  if (uid !== u.id) await notifyLink([uid], `📝 Note from ${u.name}`, `${title || body.split('\n')[0].slice(0, 80)} · for ${new Date(day + 'T12:00:00Z').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}`, 'note:' + r.id);
+  res.json({ id: r.id });
+}));
+app.patch('/api/notes/:id', wrap(async (req, res) => {
+  const n = await noteFor(req.user, +req.params.id); if (!n) return res.status(404).json({ error: 'Note not found' });
+  const b = req.body || {}, set = [], val = [n.id], add = (k, v) => { val.push(v); set.push(`${k}=$${val.length}`); };
+  if (b.title !== undefined || b.body !== undefined) { const x = noteBody({ title: b.title ?? n.title, body: b.body ?? n.body }); add('title', x.title || null); add('body', x.body || null); }
+  if (b.day !== undefined && isDate(b.day)) add('day', b.day);
+  if (b.pinned !== undefined) add('pinned', !!b.pinned);
+  if (set.length) await q(`UPDATE notes SET ${set.join(',')}, updated_at=now() WHERE id=$1`, val);
+  res.json({ ok: true });
+}));
+app.delete('/api/notes/:id', wrap(async (req, res) => {
+  const n = await noteFor(req.user, +req.params.id); if (!n) return res.status(404).json({ error: 'Note not found' });
+  await q('DELETE FROM notes WHERE id=$1', [n.id]); res.json({ ok: true });
 }));
 
 init().then(initChat).then(initProjects).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))

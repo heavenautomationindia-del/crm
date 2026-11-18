@@ -581,6 +581,35 @@ body.dark .att-today{background:#1d1a12;border:1px solid rgba(240,189,74,.25)}
 .rv{margin-top:10px;transition:opacity .2s}.rv.off{opacity:.4}.fg.three{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}@media(max-width:520px){.fg.three{grid-template-columns:1fr 1fr}.fg.three .fld:last-child{grid-column:1/-1}}
 .slt .pos{color:#1f9255;font-weight:700}
 .rline{font-size:13.5px;color:var(--dim);margin:2px 0 10px;line-height:1.6}.rline b{color:var(--text)}.lnk{border:0;background:none;color:var(--accent);font-weight:700;cursor:pointer;padding:0 4px;font-size:13.5px}body:not(.dark) .lnk{color:#9a6a00}
+.napple{--ny:#e3a400;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',system-ui,sans-serif}body.dark .napple,body.dark .notesheet{--ny:#ffd60a}
+.ngrp{margin:0 0 18px}.nghd{font-size:20px;font-weight:700;margin:0 4px 8px;letter-spacing:-.01em}
+.ncard{background:var(--surface);border-radius:12px;overflow:hidden;border:1px solid var(--border)}
+.nrow{display:block;width:100%;text-align:left;border:0;background:none;padding:11px 16px 11px 16px;cursor:pointer;color:var(--text);position:relative;font:inherit}
+.nrow+.nrow:before{content:'';position:absolute;top:0;left:16px;right:0;height:1px;background:var(--border)}
+.nrow:active,.nrow:hover{background:var(--hover)}
+.nrow b{display:block;font-size:16px;font-weight:700;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nrow span{display:block;font-size:14.5px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}.nrow em{font-style:normal;color:var(--text);opacity:.75;margin-right:8px}
+.nrow small{display:block;font-size:12.5px;color:var(--faint);margin-top:3px}.npin{font-size:13px;margin-right:4px;font-style:normal}.ntop .sp{flex:1}body.nv #fab{display:none!important}
+.nempty{display:flex;align-items:center;gap:14px;width:100%;border:1.5px dashed var(--border);background:none;border-radius:14px;padding:14px 16px;cursor:pointer;color:var(--text);text-align:left;font:inherit}
+.nempty>span:first-child{width:44px;height:44px;border-radius:12px;background:#e3a40022;color:#c48a00;display:flex;align-items:center;justify-content:center;flex-shrink:0}.nempty b{display:block}.nempty small{color:var(--dim)}
+.dchip .dots i.nt{background:#e3a400}.qa.nq .qi{background:#e3a40022;color:#c48a00}.qact .qa.nq{grid-column:1/-1}@media(min-width:901px){.qact{grid-template-columns:repeat(3,1fr);max-width:980px}.qact .qa.nq{grid-column:auto}}
+.nhome{max-width:760px;margin:0 auto}.ntop{display:flex;align-items:center;gap:6px;min-height:44px}
+.nback{display:flex;align-items:center;gap:0;border:0;background:none;color:var(--ny);font-size:17px;font-weight:500;cursor:pointer;padding:6px 6px 6px 0;font-family:inherit}
+.nicon{width:42px;height:42px;border:0;background:none;color:var(--ny);display:flex;align-items:center;justify-content:center;border-radius:50%;cursor:pointer}.nicon:hover{background:var(--hover)}.nicon.on{background:#e3a40026}
+.ndone{border:0;background:none;color:var(--ny);font-weight:700;font-size:17px;cursor:pointer;padding:6px 4px 6px 10px;font-family:inherit}
+.nh1{font-size:34px;font-weight:800;letter-spacing:-.02em;margin:2px 4px 10px}
+.nsearch{display:flex;align-items:center;gap:8px;background:var(--s2);border-radius:11px;padding:0 10px;color:var(--faint);margin:0 0 16px}.nsearch input{border:0!important;background:none!important;box-shadow:none!important;flex:1;height:38px;font-size:16px;padding:0!important;color:var(--text);outline:0;min-width:0}
+.nfilt{margin:-6px 0 16px}.nfilt select{width:100%}.nnone{text-align:center;color:var(--faint);font-size:17px;padding:60px 0}
+.nfoot{position:sticky;bottom:calc(var(--bnh,0px) + 8px);display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,var(--bg) 85%,transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-radius:14px;padding:4px 6px 4px 16px;margin-top:10px;font-size:13px;color:var(--dim)}.nfoot span{flex:1;text-align:center;margin-left:42px}
+.md.notesheet{padding:12px 18px 0;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',system-ui,sans-serif;--ny:#e3a400;display:flex;flex-direction:column}
+.ned{display:flex;flex-direction:column;min-height:min(78vh,720px)}.ndate{text-align:center;color:var(--faint);font-size:13px;margin:2px 0 8px}
+.nmeta{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-bottom:10px}.nchip{position:relative;display:inline-flex;align-items:center;gap:6px;background:var(--s2);border-radius:99px;padding:6px 12px;font-size:13.5px;font-weight:600;color:var(--dim)}
+.nchip input[type=date]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%}.nchip select{border:0!important;background:none!important;padding:0 4px!important;height:auto!important;font-weight:600;color:var(--text);box-shadow:none!important;min-height:0!important;width:auto!important}
+.ntitle{border:0!important;background:none!important;box-shadow:none!important;outline:0;font-size:27px!important;font-weight:800;letter-spacing:-.02em;padding:4px 0!important;color:var(--text);width:100%;height:auto!important;font-family:inherit}
+.nbody{flex:1;border:0!important;background:none!important;box-shadow:none!important;outline:0;resize:none;font-size:17px!important;line-height:1.55;padding:4px 0 20px!important;color:var(--text);width:100%;min-height:240px;font-family:inherit}
+.ntitle::placeholder,.nbody::placeholder{color:var(--faint)}
+.nbar{position:sticky;bottom:0;display:flex;align-items:center;justify-content:space-between;background:var(--surface);border-top:1px solid var(--border);margin:0 -18px;padding:4px 10px calc(4px + env(safe-area-inset-bottom))}.nsaved{font-size:12.5px;color:var(--faint)}
+@media(max-width:700px){.md.notesheet{max-height:100dvh!important;height:100dvh;border-radius:0!important;width:100%!important;margin:0!important;padding-top:calc(8px + env(safe-area-inset-top))}.ned{min-height:0;flex:1}}
 .pjl{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
 .pjcard{display:flex;flex-direction:column;gap:10px;text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:22px;padding:16px;cursor:pointer;color:var(--text);font:inherit;transition:transform .12s,box-shadow .12s}
 .pjcard:hover{box-shadow:var(--shl)}.pjcard:active{transform:scale(.985)}.pjic{width:42px;height:42px;border-radius:14px;background:var(--ink);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
@@ -678,7 +707,7 @@ const emH=h=>/<|\s/.test(h)&&!/</.test(h)?h.replace(/\s+([A-Za-z][\w-]*\.?)\s*$/
 const head=(h,p,a='')=>`<div class="ph"><div><div class="kick">${KICK[view]||''}</div><h1>${emH(h)}</h1><p>${p}</p></div><div class="pha">${a}</div></div>`;
 const ADD=()=>'';
 function modal(h){document.body.classList.add('mo');$('mroot').innerHTML=`<div class="ov" onclick="if(event.target==this)closeM()"><div class="md">${h}</div></div>`}
-function closeM(){if(window.JV&&JV.st=='rec')jvStop(true);if(window.CH&&CH.inModal)leaveLeadChat();document.body.classList.remove('mo');$('mroot').innerHTML='';if(pend)setTimeout(softRefresh,150)}
+function closeM(){if(window.JV&&JV.st=='rec')jvStop(true);if(window.NT&&NT.dirty)noteSave();if(window.CH&&CH.inModal)leaveLeadChat();document.body.classList.remove('mo');$('mroot').innerHTML='';if(pend)setTimeout(softRefresh,150)}
 // safety net: page can never stay locked when no pop-up is open
 new MutationObserver(()=>{if(!$('mroot').innerHTML.trim())document.body.classList.remove('mo')}).observe($('mroot'),{childList:true});
 addEventListener('pageshow',()=>{if(!$('mroot').innerHTML.trim())document.body.classList.remove('mo')});
@@ -695,7 +724,7 @@ async function doLogin(e){e.preventDefault();$('lb').textContent='Signing in…'
  if(r.error){$('le').textContent=r.error;$('lb').textContent='Sign in';return}ME=r;closeM();boot()}
 async function logout(){await api('/api/logout',{m:'POST',b:{}}).catch(()=>{});ME=null;showLogin()}
 async function boot(){M=await api('/api/meta');lastUn=-1;nav(menu()[0][0]);startPulse();if(pushOK()&&Notification.permission=='granted')pushOn(true);const qs=new URLSearchParams(location.search),j=qs.get('job'),td=qs.get('todo'),at=qs.get('att');if(j)setTimeout(()=>gotoJob(+j),500);if(td)setTimeout(()=>openTodo(+td),600);if(at)setTimeout(()=>openAttLink(at),300);const cq=qs.get('chat');if(cq)setTimeout(()=>openChatLink(+cq),400);setTimeout(()=>greetCheck(),cq||at||j||td?2500:900);const sy=qs.get('say'),ld=qs.get('lead');if(sy&&ME.role!='Staff')setTimeout(()=>{nav('todo');setTimeout(()=>sayRem(),300)},300);if(ld&&can('leads'))setTimeout(()=>{nav('leads');setTimeout(()=>leadForm(),500)},300);if(j||td||at||sy||ld||cq)history.replaceState(null,'','/')}
-function nav(v,t){if(!menu().some(m=>m[0]==v))v=menu()[0][0];if((view=='chat'||view=='proj')&&v!=view){if(CH.rec)chRecCancel();VA.pause();document.body.classList.remove('chat-open');if(view=='proj')CH.id=null}view=v;if(t)tab=t;$('page').classList.toggle('pchat',v=='chat');
+function nav(v,t){if(!menu().some(m=>m[0]==v))v=menu()[0][0];if((view=='chat'||view=='proj')&&v!=view){if(CH.rec)chRecCancel();VA.pause();document.body.classList.remove('chat-open');if(view=='proj')CH.id=null}if(v!='todo'){NV=false;document.body.classList.remove('nv')}view=v;if(t)tab=t;$('page').classList.toggle('pchat',v=='chat');
  document.title='Rago · '+menu().find(n=>n[0]==v)[1];
  $('snav').innerHTML=menu().filter(n=>n[0]!='me').map(n=>`<button class="ni ${n[0]==v?'on':''}" title="${n[1]}" onclick="nav('${n[0]}')">${ic(n[2],22)}${n[0]=='chat'?'<i class="cbn" hidden></i>':''}</button>`).join('');
  $('sset').className='ni'+(v=='me'?' on':'');$('sset').innerHTML=ic('cog',22);
@@ -992,7 +1021,7 @@ const officePanel=()=>{const o=M.office||{};return `<div class="panel"><div clas
 let OFG=null;function ofGPS(b){b.textContent='Getting location…';getGPS().then(g=>{b.textContent='📍 Use my current location';if(!g)return alert('Could not get location. Turn on GPS.');OFG=g;$('ofU').value=g.lat.toFixed(7)+', '+g.lng.toFixed(7)})}
 async function saveOffice(){const o=M.office||{},u=$('ofU').value.trim(),b={name:$('ofN').value,radius:$('ofR').value,late:$('ofL').value};if(u)b.map_url=u;else{b.lat=o.lat;b.lng=o.lng}
  const r=await api('/api/attendance/office',{m:'POST',b});if(r.error){$('ofE').textContent=r.error;return}toast('Office settings saved ✓');Me()}
-const APPV='Version 11 · 18 Nov 2026';
+const APPV='Version 12 · 18 Nov 2026';
 function shrinkImg(file,size=320){return new Promise((ok,no)=>{const r=new FileReader();r.onerror=no;r.onload=()=>{const im=new Image();im.onerror=()=>no(new Error('bad image'));im.onload=()=>{const s=Math.min(im.width,im.height),c=document.createElement('canvas');c.width=c.height=size;
  c.getContext('2d').drawImage(im,(im.width-s)/2,(im.height-s)/2,s,s,0,0,size,size);ok(c.toDataURL('image/jpeg',.85))};im.src=r.result};r.readAsDataURL(file)})}
 async function upPhoto(id,inp){const f=inp.files&&inp.files[0];if(!f)return;toast('Uploading photo…');let data;try{data=await shrinkImg(f)}catch(e){return toast('Could not read that image')}
@@ -1245,21 +1274,84 @@ const longD=s=>new Date(s+'T12:00:00').toLocaleDateString('en-IN',{weekday:'long
 const people=()=>{const m=new Map();[...(M.agents||[]),...(M.technicians||[])].forEach(u=>m.set(u.id,u.name));if(!m.has(ME.id))m.set(ME.id,ME.name);return [...m].map(([id,name])=>({id,name}))};
 const greet=()=>{const h=+istNow().slice(0,2);return h<12?'Good morning':h<17?'Good afternoon':'Good evening'};
 
-async function Todo(){const today=ymd(new Date());if(!TD)TD=today;
+
+/* =====================================================================
+   ---------- Notes (Apple Notes style) ----------
+   ===================================================================== */
+Object.assign(IC,{compose:'<path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/><path d="M18.4 2.6a2 2 0 0 1 2.9 2.9L12 14.8l-3.6.9.9-3.6z"/>',pin:'<path d="M12 17v5"/><path d="M9 4h6l-1 6 3 3v2H7v-2l3-3z"/>',checklist:'<rect x="3" y="4" width="5" height="5" rx="1.2"/><path d="M4.3 6.6l1 1 1.8-2"/><rect x="3" y="14" width="5" height="5" rx="1.2"/><path d="M11 6.5h10"/><path d="M11 16.5h10"/>'});
+let NV=false,NQ='',NW='me',NT=null,NTIM=null;
+const nTitle=n=>n.title||(n.body||'').split('\n').find(l=>l.trim())||'New Note';
+const nPrev=n=>{const ls=(n.body||'').split('\n').map(l=>l.trim()).filter(Boolean);return (n.title?ls[0]:ls[1])||'No additional text'};
+const nWhen=(n,today)=>{const u=new Date(n.updated_at),k=u.toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'});return k==today?u.toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'numeric',minute:'2-digit',hour12:true}):u.toLocaleDateString('en-IN',{timeZone:'Asia/Kolkata',day:'numeric',month:'numeric',year:'2-digit'})};
+const nDayLabel=(d,today)=>d==today?'Today':d==addD(today,-1)?'Yesterday':d==addD(today,1)?'Tomorrow':new Date(d+'T12:00:00').toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long',year:d.slice(0,4)==today.slice(0,4)?undefined:'numeric'});
+function noteRow(n,today,showWho){return `<button class="nrow" onclick="openNote(${n.id})"><b>${n.pinned?'<i class="npin">📌</i>':''}${esc(nTitle(n))}</b><span><em>${nWhen(n,today)}</em>${esc(nPrev(n))}</span>${showWho||n.created_by!=n.user_id?`<small>${n.created_by!=n.user_id?(n.created_by==ME.id?`📝 For ${esc(n.user_name)}`:`👔 From ${esc(n.created_by_name||'')}`):`👤 ${esc(n.user_name)}`}</small>`:''}</button>`}
+const noteGroup=(title,list,today,who)=>list.length?`<div class="ngrp">${title?`<div class="nghd">${title}</div>`:''}<div class="ncard">${list.map(n=>noteRow(n,today,who)).join('')}</div></div>`:'';
+// notes for one day, shown inside the To-do page
+async function todoNotes(day){const r=await api('/api/notes?day='+day);const L=r.items||[];
+ return sect('Notes',`${L.length?L.length+' for this day · ':''}<button class="lnk" onclick="NV=true;Todo()">All notes ›</button>`,L.length?`<div class="napple">${noteGroup('',L,r.today)}</div>`:`<button class="nempty" onclick="newNote('${day}')"><span>${ic('compose',22)}</span><span><b>Write a note for this day</b><small>Jot anything down — like Apple Notes.</small></span></button>`)}
+// the Notes app (all notes, grouped like Apple Notes)
+async function notesHome(){document.body.classList.add('nv');const sup=SUP();const r=await api('/api/notes?'+(NQ?'q='+encodeURIComponent(NQ)+'&':'')+(sup&&NW!='me'?'user='+NW:''));const L=r.items||[],today=r.today,who=sup&&NW!='me';
+ const pin=L.filter(n=>n.pinned),rest=L.filter(n=>!n.pinned),by={};rest.forEach(n=>{(by[n.day]=by[n.day]||[]).push(n)});
+ const ppl=sup?await chPeople():[];
+ $('page').innerHTML=`<div class="napple nhome"><div class="ntop"><button class="nback" onclick="NV=false;Todo()">${ic('back',22)} To-do</button><span class="sp"></span><button class="nicon" onclick="newNote()" aria-label="New note">${ic('compose',24)}</button></div>
+ <h1 class="nh1">Notes</h1>
+ <div class="nsearch">${ic('search',17)}<input type="search" placeholder="Search" value="${esc(NQ)}" oninput="clearTimeout(window._nqT);window._nqT=setTimeout(()=>{NQ=this.value;notesHome().then(()=>{const i=document.querySelector('.nsearch input');i.focus();i.setSelectionRange(i.value.length,i.value.length)})},350)"></div>
+ ${sup?`<div class="nfilt"><select onchange="NW=this.value;notesHome()"><option value="me" ${NW=='me'?'selected':''}>My notes</option><option value="sent" ${NW=='sent'?'selected':''}>Notes I wrote for staff</option><option value="all" ${NW=='all'?'selected':''}>Everyone's notes</option>${ppl.filter(p=>p.id!=ME.id).map(p=>`<option value="${p.id}" ${NW==p.id?'selected':''}>${esc(p.name)}</option>`).join('')}</select></div>`:''}
+ ${noteGroup('📌 Pinned',pin,today,who)}${Object.keys(by).sort().reverse().map(d=>noteGroup(nDayLabel(d,today),by[d],today,who)).join('')}
+ ${!L.length?`<div class="nnone">${NQ?'No notes match your search.':'No Notes'}</div>`:''}
+ <div class="nfoot"><span>${L.length} Note${L.length==1?'':'s'}</span><button class="nicon" onclick="newNote()" aria-label="New note">${ic('compose',24)}</button></div></div>`}
+// editor
+function newNote(day,uid){NT={id:0,day:day||TD||ymd(new Date()),title:'',body:'',pinned:false,user_id:uid||ME.id,created_by:ME.id,user_name:ME.name,updated_at:new Date().toISOString(),dirty:false};noteEditor()}
+async function openNote(id){const n=await api('/api/notes/'+id);if(n.error)return toast(n.error);NT={...n,title:n.title||'',body:n.body||'',dirty:false};noteEditor()}
+async function noteEditor(){const n=NT,sup=SUP(),ppl=sup&&!n.id?await chPeople():[],mine=n.user_id==ME.id;
+ const dt=new Date(n.updated_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'numeric',month:'long',year:'numeric',hour:'numeric',minute:'2-digit',hour12:true}).replace(',',' at').replace(/, (\d)/,' at $1');
+ modal(`<div class="ned"><div class="ntop"><button class="nback" onclick="noteClose()">${ic('back',22)} Notes</button><span class="sp"></span>
+  <button class="nicon ${n.pinned?'on':''}" id="npin" onclick="NT.pinned=!NT.pinned;this.classList.toggle('on',NT.pinned);noteQueue(1)" aria-label="Pin">${ic('pin',22)}</button>
+  ${n.id?`<button class="nicon" onclick="noteDel()" aria-label="Delete">${ic('trash',22)}</button>`:''}<button class="ndone" onclick="noteClose()">Done</button></div>
+  <div class="ndate">${dt}</div>
+  <div class="nmeta"><label class="nchip">📅 <input type="date" id="nday" value="${n.day}" onchange="NT.day=this.value;noteQueue(1)"><span id="ndayl">${nDayLabel(n.day,ymd(new Date()))}</span></label>
+  ${sup&&!n.id?`<label class="nchip">👤 <select id="nfor" onchange="NT.user_id=+this.value"><option value="${ME.id}">Me</option>${ppl.filter(p=>p.id!=ME.id).map(p=>`<option value="${p.id}" ${p.id==n.user_id?'selected':''}>${esc(p.name)}</option>`).join('')}</select></label>`
+   :!mine?`<span class="nchip">👤 For ${esc(n.user_name)}</span>`:n.created_by!=ME.id?`<span class="nchip">👔 From ${esc(n.created_by_name||'')}</span>`:''}</div>
+  <input class="ntitle" id="ntt" placeholder="Title" value="${esc(n.title)}" oninput="NT.title=this.value;noteQueue()" onkeydown="if(event.key=='Enter'){event.preventDefault();$('nbd').focus()}">
+  <textarea class="nbody" id="nbd" placeholder="Start writing…" oninput="NT.body=this.value;nGrow();noteQueue()" onclick="nTick(event)" onkeydown="nKey(event)">${esc(n.body)}</textarea>
+  <div class="nbar"><button class="nicon" onmousedown="event.preventDefault()" onclick="nCheck()" aria-label="Checklist">${ic('checklist',24)}</button><span class="nsaved" id="nsv">${n.id?'Saved':''}</span><button class="nicon" onmousedown="event.preventDefault()" onclick="noteClose().then(()=>newNote(NT?NT.day:TD))" aria-label="New note">${ic('compose',24)}</button></div></div>`);
+ $('mroot').querySelector('.md').classList.add('notesheet');nGrow();setTimeout(()=>{const e=n.id?null:$('ntt');e&&e.focus()},80)}
+function nGrow(){const t=$('nbd');if(!t)return;t.style.height='auto';t.style.height=Math.max(240,t.scrollHeight)+'px'}
+function noteQueue(now){if(!NT)return;NT.dirty=true;const s=$('nsv');if(s)s.textContent='Editing…';clearTimeout(NTIM);NTIM=setTimeout(noteSave,now?50:700);const l=$('ndayl');if(l&&NT.day)l.textContent=nDayLabel(NT.day,ymd(new Date()))}
+async function noteSave(){const n=NT;if(!n||!n.dirty)return;clearTimeout(NTIM);n.dirty=false;
+ if(!n.id&&!n.title.trim()&&!n.body.trim())return;
+ const b={title:n.title,body:n.body,day:n.day,pinned:n.pinned};if(!n.id)b.user_id=n.user_id;
+ const r=await api('/api/notes'+(n.id?'/'+n.id:''),{m:n.id?'PATCH':'POST',b}).catch(()=>({error:'No internet — not saved'}));
+ if(r.error){n.dirty=true;const s=$('nsv');if(s)s.textContent='⚠ '+r.error;return}
+ if(!n.id)n.id=r.id;const s=$('nsv');if(s&&NT===n)s.textContent='Saved'}
+const noteFlush=()=>{if(NT&&NT.dirty)noteSave()};
+async function noteClose(){await noteSave();const n=NT;NT=null;closeM();if(n&&!n.id&&!n.title.trim()&&!n.body.trim())return;if(view=='todo')Todo()}
+async function noteDel(){if(!confirm('Delete this note?'))return;const id=NT.id;NT=null;const r=await api('/api/notes/'+id,{m:'DELETE'});if(r.error)return toast(r.error);closeM();toast('Note deleted');if(view=='todo')Todo()}
+// checklists: ☐ / ☑ at the start of a line — tap the box to tick it
+function nCheck(){const t=$('nbd'),p=t.selectionStart,s=t.value,ls=s.lastIndexOf('\n',p-1)+1,line=s.slice(ls);
+ if(/^[☐☑] /.test(line))t.value=s.slice(0,ls)+line.slice(2);else t.value=s.slice(0,ls)+'☐ '+line;
+ const np=Math.max(ls,p+(t.value.length-s.length));t.focus();t.setSelectionRange(np,np);NT.body=t.value;nGrow();noteQueue()}
+function nTick(e){const t=e.target,p=t.selectionStart,s=t.value,ls=s.lastIndexOf('\n',p-1)+1;if(p-ls>2||!/^[☐☑]/.test(s.slice(ls)))return;
+ t.value=s.slice(0,ls)+(s[ls]=='☐'?'☑':'☐')+s.slice(ls+1);t.setSelectionRange(ls+2,ls+2);NT.body=t.value;noteQueue()}
+function nKey(e){if(e.key!='Enter')return;const t=e.target,p=t.selectionStart,s=t.value,ls=s.lastIndexOf('\n',p-1)+1,line=s.slice(ls,p);
+ if(/^[☐☑] /.test(line)){e.preventDefault();const ins=line.trim().length<=1?'':'\n☐ ';if(!ins){t.value=s.slice(0,ls)+s.slice(p);t.setSelectionRange(ls,ls)}else{t.value=s.slice(0,p)+ins+s.slice(p);t.setSelectionRange(p+ins.length,p+ins.length)}NT.body=t.value;nGrow();noteQueue()}}
+
+async function Todo(){if(NV)return notesHome();document.body.classList.remove('nv');const today=ymd(new Date());if(!TD)TD=today;
  const from=addD(today,-3),to=addD(today,27);
- const [d,days]=await Promise.all([api('/api/todos?date='+TD),api(`/api/todos/days?from=${from}&to=${to}`)]);TDD=d;TDAYS=days;
+ const [d,days,nts]=await Promise.all([api('/api/todos?date='+TD),api(`/api/todos/days?from=${from}&to=${to}`),todoNotes(TD)]);TDD=d;TDAYS=days;
  const isT=TD==d.today,V=d.items.filter(x=>x.kind=='voice'),T=d.items.filter(x=>x.kind!='voice'),openN=d.items.filter(x=>!x.done).length;
  const strip=[];for(let i=0;i<31;i++){const s=addD(from,i),dt=new Date(s+'T12:00:00'),c=days[s]||{};
-  strip.push(`<button class="dchip ${s==TD?'on':''} ${s==d.today?'tdy':''} ${s<d.today?'past':''}" data-d="${s}" onclick="pickDay('${s}')"><small>${s==d.today?'Today':dt.toLocaleDateString('en-IN',{weekday:'short'})}</small><b>${dt.getDate()}</b><span class="dots">${c.v?'<i class="v"></i>':''}${(c.n||0)>(c.v||0)?'<i class="t"></i>':''}${c.l?'<i class="l"></i>':''}</span></button>`)}
+  strip.push(`<button class="dchip ${s==TD?'on':''} ${s==d.today?'tdy':''} ${s<d.today?'past':''}" data-d="${s}" onclick="pickDay('${s}')"><small>${s==d.today?'Today':dt.toLocaleDateString('en-IN',{weekday:'short'})}</small><b>${dt.getDate()}</b><span class="dots">${c.v?'<i class="v"></i>':''}${(c.n||0)>(c.v||0)?'<i class="t"></i>':''}${c.l?'<i class="l"></i>':''}${c.nt?'<i class="nt"></i>':''}</span></button>`)}
  const sub=isT?`${openN} open item${openN==1?'':'s'} · ${d.leads.length} lead follow-up${d.leads.length==1?'':'s'}`:longD(TD);
  $('page').innerHTML=`<div class="ph todo-h"><div style="flex:1"><button class="btn sm sayb" onclick="sayRem()">🗣 Say a reminder</button><div class="kick">To-do list</div><h1>${greet()}, ${esc(ME.name.split(' ')[0])}.<em>${isT?'Here’s your day.':TD<d.today?'Looking back.':'Plan ahead.'}</em></h1><p>${sub}</p></div></div>
  <div class="dstrip-w"><div class="dstrip" id="dstrip">${strip.join('')}</div><label class="dpick" title="Pick a date">${ic('cal',20)}<input type="date" value="${TD}" onchange="this.value&&pickDay(this.value)"></label></div>
  ${!isT?`<div class="dayline"><b>${longD(TD)}</b><button class="btn g sm" onclick="pickDay('${d.today}')">Back to today</button></div>`:''}
- <div class="qact"><button class="qa rec" onclick="openVoice()"><span class="qi">${ic('mic',22)}</span><span><b>Record voice</b><small>Schedule a voice message</small></span></button><button class="qa" onclick="openTask()"><span class="qi">${ic('plus',22)}</span><span><b>Add task</b><small>Write a to-do</small></span></button></div>
+ <div class="qact"><button class="qa rec" onclick="openVoice()"><span class="qi">${ic('mic',22)}</span><span><b>Record voice</b><small>Schedule a voice message</small></span></button><button class="qa" onclick="openTask()"><span class="qi">${ic('plus',22)}</span><span><b>Add task</b><small>Write a to-do</small></span></button><button class="qa nq" onclick="newNote(TD)"><span class="qi">${ic('compose',22)}</span><span><b>New note</b><small>${SUP()?'For you or any staff':'Like Apple Notes'}</small></span></button></div>
  <div class="tsum"><div><b>${V.filter(x=>!x.done).length}</b><small>Voice</small></div><div><b>${T.filter(x=>!x.done).length}</b><small>Tasks</small></div><div><b>${d.leads.length}</b><small>Leads</small></div>${d.overdue.length?`<div class="bad"><b>${d.overdue.length}</b><small>Overdue</small></div>`:''}</div>
  ${d.overdue.length?sect('Overdue','Not finished on their day',d.overdue.map(x=>x.kind=='voice'?vCard(x,1):tRow(x,1)).join(''),'bad'):''}
  ${sect('Voice messages',V.length?`${V.length} for ${isT?'today':'this day'}`:'',V.map(x=>vCard(x)).join('')||emptyB('mic','No voice messages for this day','Record one and pick the date & time — it will remind you then.','openVoice()','Record voice'))}
  ${sect('Tasks',T.length?`${T.filter(x=>x.done).length}/${T.length} done`:'',T.map(x=>tRow(x)).join('')||emptyB('check','No tasks for this day','Add what needs to get done.','openTask()','Add task'))}
+ ${nts}
  ${can('leads')?sect('Lead follow-ups',d.leads.length?(isT?'Due today & overdue':'Due this day'):'',d.leads.map(lRow).join('')||emptyB('user','No follow-ups due','Set a follow-up date on a lead and it shows up here.','nav(\'leads\')','Open leads')):''}
  ${d.jobs&&d.jobs.length?sect('Your open jobs',`${d.jobs.length} waiting`,jobList(d.jobs)):''}`;
  const on=$('dstrip').querySelector('.on');if(on)on.scrollIntoView({inline:'center',block:'nearest'});
@@ -1462,7 +1554,7 @@ const distT=m=>m==null?'':m<1000?m+' m':(m/1000).toFixed(1)+' km';
 const mDist=(a,b,c,d)=>{const R=6371000,r=x=>x*Math.PI/180,dl=r(c-a),dg=r(d-b),h=Math.sin(dl/2)**2+Math.cos(r(a))*Math.cos(r(c))*Math.sin(dg/2)**2;return Math.round(2*R*Math.asin(Math.sqrt(h)))};
 const istClock=()=>{const d=new Date(),o={timeZone:'Asia/Kolkata'};return d.toLocaleDateString('en-IN',{...o,weekday:'short',day:'numeric',month:'short',year:'numeric'})+' · '+d.toLocaleTimeString('en-IN',{...o,hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true})+' IST'};
 const hm=h=>{const m=Math.round(h*60);return Math.floor(m/60)+'h '+String(m%60).padStart(2,'0')+'m'};
-const openAttLink=k=>{if(/^project:\d+$/.test(k||'')){closeM();return openProj(+k.slice(8))}if(/^leadchat:\d+$/.test(k||'')){closeM();const lid=+k.slice(9);if(view!='leads')nav('leads');return setTimeout(async()=>{await openLead(lid);setTimeout(()=>{const e=document.querySelector('.ldc');e&&e.scrollIntoView({behavior:'smooth',block:'center'})},500)},view=='leads'?50:450)}if(/^chat:\d+$/.test(k||''))return openChatLink(+k.slice(5));if(k=='greet'){closeM();return greetCheck(true)}if(k=='salary'){closeM();return nav('salary')}ATab=k=='leave'&&canAtt()?'req':SUP()?'md':'me';AREQ='Pending';AU=null;closeM();nav('att')};
+const openAttLink=k=>{if(/^note:\d+$/.test(k||'')){closeM();if(view!='todo')nav('todo');return setTimeout(()=>openNote(+k.slice(5)),300)}if(/^project:\d+$/.test(k||'')){closeM();return openProj(+k.slice(8))}if(/^leadchat:\d+$/.test(k||'')){closeM();const lid=+k.slice(9);if(view!='leads')nav('leads');return setTimeout(async()=>{await openLead(lid);setTimeout(()=>{const e=document.querySelector('.ldc');e&&e.scrollIntoView({behavior:'smooth',block:'center'})},500)},view=='leads'?50:450)}if(/^chat:\d+$/.test(k||''))return openChatLink(+k.slice(5));if(k=='greet'){closeM();return greetCheck(true)}if(k=='salary'){closeM();return nav('salary')}ATab=k=='leave'&&canAtt()?'req':SUP()?'md':'me';AREQ='Pending';AU=null;closeM();nav('att')};
 const getGPS=onUpd=>bestGPS(onUpd,{want:30,soft:5000,max:12000});
 async function Att(){if(!AM)AM=ymd(new Date()).slice(0,7);if(SUP())return AttMD();const boss=canAtt();if(!boss&&ATab!='me')ATab='me';
  const [t,pend]=await Promise.all([api('/api/attendance/today'),boss?api('/api/leave?all=1&status=Pending'):Promise.resolve([])]);AT=t;const pc=Array.isArray(pend)?pend.filter(r=>r.user_id!=ME.id||SUP()).length:0;
