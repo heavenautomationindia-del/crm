@@ -90,3 +90,13 @@ Profile → "Google Calendar · Siri & Google Assistant" → Set up.
 - When the Super Admin (MD) creates a service or job, that brand's admin staff get a notification. The ticket shows a **👔 From MD** badge and "Created by".
 - When the MD allocates a technician or helper, the brand's admin staff are notified too.
 - The brand choice in New service starts on **Heaven**. The note under it says that brand's admin staff will handle the ticket.
+
+## Shift, week off, pay rules and overtime (Version 11)
+- **Team → Add / Edit member** (Super Admin only) has *Attendance & pay rules* for each person. Each part has an on/off switch:
+  - **Shift timing**: check-in time, check-out time and grace minutes. Late = after check-in + grace.
+  - **Weekly off**: any day, Sunday by default. No check-in is needed and the person is never absent on that day.
+  - **Leave & absent salary cut**: leave and absent days share the free days (default 1 a month). After that, 1 day's salary per day (loss of pay).
+  - **Permission salary cut**: free permissions (default 2). Each extra one = half a day's salary.
+  - **Overtime pay**: ₹ per hour. Time after the check-out time counts once it passes the set minutes. Working on the week off or a holiday counts in full. Overtime is shown in attendance and added to the salary.
+- **Week off change**: staff can ask "this week I'll take Wednesday off" (Attendance → Change this week, or 🔄 Week off in Apply leave). Once admin approves, that day is off and that week's usual off day becomes a working day.
+- **Disabling a member** (Status → Disabled) signs them out everywhere. They can't log in until they're set Active again, and the login page says the account is disabled.

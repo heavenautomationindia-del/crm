@@ -92,8 +92,9 @@ app.post('/api/login', wrap(async (req, res) => {
   if (Date.now() - t.at > 600000) { t.n = 0; t.at = Date.now(); }
   if (t.n >= 8) return res.status(429).json({ error: 'Too many attempts. Try again in 10 minutes.' });
   const { username, password } = req.body || {};
-  const u = (await q('SELECT * FROM users WHERE lower(username)=lower($1) AND active', [String(username || '').trim()])).rows[0];
+  const u = (await q('SELECT * FROM users WHERE lower(username)=lower($1)', [String(username || '').trim()])).rows[0];
   if (!u || !verify(String(password || ''), u.password_hash)) { tries[ip] = { n: t.n + 1, at: t.at }; return res.status(401).json({ error: 'Wrong username or password' }); }
+  if (!u.active) return res.status(403).json({ error: 'Your account has been disabled. Please contact the Super Admin.' });
   delete tries[ip];
   if (u.brand_id) u.brand_name = ((await q('SELECT name FROM brands WHERE id=$1', [u.brand_id])).rows[0] || {}).name;
   const secure = req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
@@ -424,6 +425,7 @@ async function init() {
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS map_url TEXT;
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS company TEXT;
   ALTER TABLE services ADD COLUMN IF NOT EXISTS created_by INT;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS att_rules JSONB;
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS location_by TEXT;
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS location_on TIMESTAMPTZ;
   CREATE TABLE IF NOT EXISTS notifications (id SERIAL PRIMARY KEY, user_id INT NOT NULL, title TEXT, body TEXT, service_id INT, read BOOLEAN DEFAULT false, created_at TIMESTAMPTZ DEFAULT now());
@@ -544,9 +546,10 @@ const payFields = (me, b, cur) => {
   if (b.salary !== undefined) o.salary = Math.max(0, money(b.salary));
   if (b.join_date !== undefined) o.join_date = isDate(b.join_date) ? b.join_date : null;
   if (b.pay_brand_id !== undefined) o.pay_brand_id = Number.isInteger(+b.pay_brand_id) && +b.pay_brand_id > 0 ? +b.pay_brand_id : null;
+  if (b.att_rules && typeof b.att_rules === 'object') { const c = cleanRules(b.att_rules, cur && cur.att_rules); if (c.error) o.error = c.error; else o.att_rules = c.rules; }
   return o;
 };
-app.get('/api/users', need('team'), wrap(async (req, res) => res.json((await q(`SELECT u.id,u.name,u.email,u.phone,u.role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at,u.pay_brand_id,to_char(u.join_date,'YYYY-MM-DD') join_date,${isSuper(req.user) ? 'u.salary' : 'NULL salary'}, COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id ORDER BY u.active DESC, u.role, u.name`)).rows.map(pub))));
+app.get('/api/users', need('team'), wrap(async (req, res) => res.json((await q(`SELECT u.id,u.name,u.email,u.phone,u.role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at,u.pay_brand_id,to_char(u.join_date,'YYYY-MM-DD') join_date,${isSuper(req.user) ? 'u.salary, u.att_rules' : 'NULL salary'}, COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id ORDER BY u.active DESC, u.role, u.name`)).rows.map(pub))));
 app.post('/api/users', need('team'), wrap(async (req, res) => {
   const b = req.body || {};
   if (!b.name || !b.email || !b.phone) return res.status(400).json({ error: 'Name, email and phone are required' });
@@ -558,13 +561,14 @@ app.post('/api/users', need('team'), wrap(async (req, res) => {
   for (let i = 0; i < 20; i++) { username = base + crypto.randomInt(100, 999); if (!(await q('SELECT 1 FROM users WHERE username=$1', [username])).rows.length) break; }
   const password = randPw();
   const pay = payFields(req.user, b, {});
+  if (pay.error) return res.status(400).json({ error: pay.error });
   if (!isSuper(req.user) && ['Technician', 'Staff'].includes(b.role) && b.home_brand_id !== undefined) {
     const hb = Number.isInteger(+b.home_brand_id) && +b.home_brand_id > 0 ? +b.home_brand_id : null;
     if (req.user.brand_id && hb !== req.user.brand_id) return res.status(403).json({ error: 'You can only choose your own brand' });
     pay.pay_brand_id = hb;
   }
-  const r = await q('INSERT INTO users(name,email,phone,role,username,password_hash,permissions,brand_id,salary,join_date,pay_brand_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *',
-    [b.name.trim(), b.email.trim(), b.phone.trim(), b.role, username, hash(password), cleanPerms(b.role, b.permissions), br.id, pay.salary ?? 0, pay.join_date ?? null, pay.pay_brand_id ?? br.id]);
+  const r = await q('INSERT INTO users(name,email,phone,role,username,password_hash,permissions,brand_id,salary,join_date,pay_brand_id,att_rules) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *',
+    [b.name.trim(), b.email.trim(), b.phone.trim(), b.role, username, hash(password), cleanPerms(b.role, b.permissions), br.id, pay.salary ?? 0, pay.join_date ?? null, pay.pay_brand_id ?? br.id, pay.att_rules ? JSON.stringify(pay.att_rules) : null]);
   res.json({ user: pub(r.rows[0]), credentials: { username, password } });
 }));
 app.patch('/api/users/:id', need('team'), wrap(async (req, res) => {
@@ -575,6 +579,7 @@ app.patch('/api/users/:id', need('team'), wrap(async (req, res) => {
   if (cur.id === req.user.id && (b.active === false || role !== cur.role)) return res.status(400).json({ error: "You can't deactivate yourself or change your own role" });
   const br = await brandFor(role, b.brand_id !== undefined ? b.brand_id : cur.brand_id); if (br.error) return res.status(400).json({ error: br.error });
   const pay = payFields(req.user, b, cur);
+  if (pay.error) return res.status(400).json({ error: pay.error });
   if (!isSuper(req.user) && ['Technician', 'Staff'].includes(role) && b.home_brand_id !== undefined) {   // admin staff may set the home brand of technicians / support staff
     const hb = Number.isInteger(+b.home_brand_id) && +b.home_brand_id > 0 ? +b.home_brand_id : null;
     if (req.user.brand_id && hb !== req.user.brand_id) return res.status(403).json({ error: 'You can only choose your own brand' });
@@ -583,6 +588,8 @@ app.patch('/api/users/:id', need('team'), wrap(async (req, res) => {
   await q('UPDATE users SET name=$1,email=$2,phone=$3,role=$4,permissions=$5,active=$6,brand_id=$7,salary=$8,join_date=$9,pay_brand_id=$10 WHERE id=$11',
     [b.name || cur.name, b.email ?? cur.email, b.phone ?? cur.phone, role, cleanPerms(role, b.permissions ?? cur.permissions), b.active ?? cur.active, br.id,
      pay.salary ?? cur.salary, pay.join_date !== undefined ? pay.join_date : cur.join_date, pay.pay_brand_id !== undefined ? pay.pay_brand_id : (cur.pay_brand_id ?? br.id), cur.id]);
+  if (pay.att_rules) await q('UPDATE users SET att_rules=$2 WHERE id=$1', [cur.id, JSON.stringify(pay.att_rules)]);
+  if ((b.active ?? cur.active) === false && cur.active) { await q('DELETE FROM push_subs WHERE user_id=$1', [cur.id]).catch(() => {}); }   // disabled → signed out everywhere (every request checks "active")
   res.json({ ok: true });
 }));
 app.post('/api/users/:id/reset', need('team'), wrap(async (req, res) => {
@@ -1383,10 +1390,39 @@ app.delete('/api/service-voice/:id', superOnly, wrap(async (req, res) => { await
 //   extra leave days, absent days → per-day each · half days and extra permissions → half-day each
 //   advances (normal / petrol) given in the month are deducted.  Joined mid-month → paid from the joining day.
 const PAY_RULES = { paid_leaves: 1, free_permissions: 2, day_div: 30, half_div: 60 };
+// each person's own shift, week off and pay rules (set by the Super Admin when adding / editing the person)
+const WDN = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const RULE_DEF = { shift_on: true, in: '09:30', out: '18:30', grace: 15, week_off: 0, leave_on: true, paid_leaves: 1, perm_on: true, free_perms: 2, ot_on: false, ot_rate: 0, ot_min: 30 };
+const hm2m = t => { const [h, m] = String(t || '0:0').split(':').map(Number); return h * 60 + (m || 0); };
+const m2hm = n => `${String(Math.floor(n / 60) % 24).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
+const rulesOf = (u, off) => {
+  let r = null; try { r = u && u.att_rules ? (typeof u.att_rules === 'string' ? JSON.parse(u.att_rules) : u.att_rules) : null; } catch (e) { r = null; }
+  const R = { ...RULE_DEF, ...(r || {}) };
+  R.late_after = R.shift_on ? (r ? m2hm(hm2m(R.in) + (+R.grace || 0)) : (off && off.late) || m2hm(hm2m(R.in) + (+R.grace || 0))) : null;
+  return R;
+};
+const cleanRules = (b, cur) => {
+  const R = { ...RULE_DEF, ...(cur || {}) }, o = {}, bool = k => { if (b[k] !== undefined) o[k] = !!b[k]; }, num = (k, lo, hi) => { if (b[k] !== undefined && b[k] !== '') o[k] = Math.min(hi, Math.max(lo, Math.round(+b[k] || 0))); };
+  ['shift_on', 'leave_on', 'perm_on', 'ot_on'].forEach(bool);
+  if (isTime(b.in)) o.in = b.in; if (isTime(b.out)) o.out = b.out;
+  num('grace', 0, 180); num('week_off', 0, 6); num('paid_leaves', 0, 31); num('free_perms', 0, 31); num('ot_min', 0, 600);
+  if (b.ot_rate !== undefined && b.ot_rate !== '') o.ot_rate = Math.min(100000, Math.max(0, Math.round((+b.ot_rate || 0) * 100) / 100));
+  const out = { ...R, ...o };
+  if (hm2m(out.out) <= hm2m(out.in)) return { error: 'Check-out time must be after check-in time' };
+  return { rules: out };
+};
+const dAdd = (d, n) => { const x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
+// week-off for a person: their weekly day, moved for a week when a "week off change" was approved (weeks run Monday–Sunday)
+async function offDaysFor(uid, R, from, to) {
+  const sw = (await q(`SELECT to_char(from_date,'YYYY-MM-DD') d FROM leave_requests WHERE user_id=$1 AND kind='WeekOff' AND status='Approved' AND from_date BETWEEN $2 AND $3`, [uid, dAdd(from, -7), dAdd(to, 7)])).rows.map(r => r.d);
+  const on = new Set(sw), cancel = new Set();
+  for (const d of sw) { const mon = dAdd(d, -((wday(d) + 6) % 7)), reg = dAdd(mon, (R.week_off + 6) % 7); if (reg !== d) cancel.add(reg); }
+  return d => on.has(d) || (wday(d) === R.week_off && !cancel.has(d));
+}
 const ADV_KINDS = ['Advance', 'Petrol Advance'];
 const r2 = v => Math.round(v * 100) / 100;
 async function salaryFor(u, m, today, start, off) {
-  const x = await monthFor(u, m, today, start, off), S = x.summary, sal = Number(u.salary) || 0;
+  const x = await monthFor(u, m, today, start, off), S = x.summary, sal = Number(u.salary) || 0, R = x.rules;
   const perDay = sal / PAY_RULES.day_div, half = sal / PAY_RULES.half_div, days = daysOf(m), last = days[days.length - 1];
   const jd = u.join_date ? String(u.join_date).slice(0, 10) : null;
   let gross = sal, notJoined = 0;
@@ -1394,21 +1430,26 @@ async function salaryFor(u, m, today, start, off) {
   // approved leave / permission count for the whole month (also later dates); absent days only up to today
   const from = jd && jd > days[0] ? jd : days[0], inM = x.days.filter(d => d.d >= from);
   S.leave = inM.filter(d => d.code === 'leave').length;
-  const perms = inM.reduce((t, d) => t + d.perm.length, 0), unpaidLeave = Math.max(0, S.leave - PAY_RULES.paid_leaves), extraPerm = Math.max(0, perms - PAY_RULES.free_permissions);
+  const perms = inM.reduce((t, d) => t + d.perm.length, 0);
+  // leave + absent share the free days (loss of pay only beyond them)
+  const lop = S.leave + S.absent, freeL = R.leave_on ? Math.min(lop, R.paid_leaves) : 0, unpaid = R.leave_on ? Math.max(0, lop - R.paid_leaves) : 0;
+  const extraPerm = R.perm_on ? Math.max(0, perms - R.free_perms) : 0;
   const adv = (await q(`SELECT id, kind, amount, to_char(given_on,'YYYY-MM-DD') given_on, note, given_by, created_at FROM advances WHERE user_id=$1 AND deduct_month=$2 ORDER BY given_on, id`, [u.id, m])).rows;
   const advN = adv.filter(a => a.kind !== 'Petrol Advance').reduce((t, a) => t + Number(a.amount), 0), advP = adv.filter(a => a.kind === 'Petrol Advance').reduce((t, a) => t + Number(a.amount), 0);
   const lines = [
-    { k: 'leave', label: `Leave beyond ${PAY_RULES.paid_leaves} paid leave`, qty: unpaidLeave, rate: perDay, of: S.leave },
-    { k: 'absent', label: 'Absent days', qty: S.absent, rate: perDay },
-    { k: 'half', label: 'Half days', qty: S.half, rate: half },
-    { k: 'perm', label: `Permissions beyond ${PAY_RULES.free_permissions} free`, qty: extraPerm, rate: half, of: perms },
+    { k: 'leave', label: R.leave_on ? `Leave / absent days beyond ${R.paid_leaves} free` : 'Leave / absent (no deduction)', qty: unpaid, rate: perDay, of: lop, detail: `${S.leave} leave + ${S.absent} absent` },
+    { k: 'half', label: 'Half days', qty: R.leave_on ? S.half : 0, rate: half, of: S.half },
+    { k: 'perm', label: R.perm_on ? `Permissions beyond ${R.free_perms} free (half day each)` : 'Permissions (no deduction)', qty: extraPerm, rate: half, of: perms },
   ].map(l => ({ ...l, rate: r2(l.rate), amount: r2(l.qty * l.rate) }));
-  const attDed = r2(lines.reduce((t, l) => t + l.amount, 0)), net = r2(gross - attDed - advN - advP);
+  const otH = r2((S.ot_min || 0) / 60), otAmt = R.ot_on ? r2(otH * (+R.ot_rate || 0)) : 0;
+  const attDed = r2(lines.reduce((t, l) => t + l.amount, 0)), net = r2(gross + otAmt - attDed - advN - advP);
   return { user_id: u.id, month: m, salary: sal, per_day: r2(perDay), half_day: r2(half), join_date: jd, not_joined_days: notJoined, gross: r2(gross),
-    leave_days: S.leave, paid_leave_used: Math.min(S.leave, PAY_RULES.paid_leaves), permissions: perms, absent: S.absent, half_days: S.half, present: S.present, working: S.working,
-    lines, att_deduction: attDed, advances: adv, advance: r2(advN), petrol: r2(advP), net, final: m < today.slice(0, 7), rules: PAY_RULES };
+    leave_days: S.leave, paid_leave_used: freeL, permissions: perms, absent: S.absent, half_days: S.half, present: S.present, working: S.working,
+    ot: { on: !!R.ot_on, minutes: S.ot_min || 0, hours: otH, rate: +R.ot_rate || 0, amount: otAmt, days: inM.filter(d => d.ot > 0).map(d => ({ d: d.d, min: d.ot, out: d.out })) },
+    lines, att_deduction: attDed, advances: adv, advance: r2(advN), petrol: r2(advP), net, final: m < today.slice(0, 7),
+    rules: { ...PAY_RULES, paid_leaves: R.paid_leaves, free_permissions: R.free_perms, leave_on: R.leave_on, perm_on: R.perm_on, ot_on: R.ot_on, ot_rate: R.ot_rate, shift: R.shift_on ? `${R.in}–${R.out} (+${R.grace} min)` : null, week_off: WDN[R.week_off] } };
 }
-const PSEL = `SELECT u.id,u.name,u.role,u.salary,u.created_at,u.photo_v,u.brand_id,u.pay_brand_id,to_char(u.join_date,'YYYY-MM-DD') join_date, COALESCE(pb.name,b.name) pay_brand
+const PSEL = `SELECT u.id,u.name,u.role,u.salary,u.att_rules,u.created_at,u.photo_v,u.brand_id,u.pay_brand_id,to_char(u.join_date,'YYYY-MM-DD') join_date, COALESCE(pb.name,b.name) pay_brand
   FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id`;
 const slipFor = async (uid, m) => { const today = await todayIST(), u = (await q(`${PSEL} WHERE u.id=$1`, [uid])).rows[0]; return u ? { user: u, ...(await salaryFor(u, m, today, await attStart(), await office())) } : null; };
 const moneyIN = v => '₹' + Number(v || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
@@ -1471,7 +1512,7 @@ const isMonth = v => /^\d{4}-(0[1-9]|1[0-2])$/.test(String(v || ''));
 const daysOf = m => { const [y, mo] = m.split('-').map(Number), n = new Date(Date.UTC(y, mo, 0)).getUTCDate(); return Array.from({ length: n }, (_, i) => `${m}-${String(i + 1).padStart(2, '0')}`); };
 const wday = s => new Date(s + 'T00:00:00Z').getUTCDay();   // 0 = Sunday
 const MARKS = ['Present', 'Half Day', 'Absent', 'Week Off', 'Holiday'];
-const KINDS = ['Leave', 'Permission', 'Attendance'];
+const KINDS = ['Leave', 'Permission', 'Attendance', 'WeekOff'];
 const canAtt = u => isBoss(u) || can(u, 'attendance');
 const attNeed = (req, res, next) => canAtt(req.user) ? next() : res.status(403).json({ error: 'Not allowed' });
 const attStart = async () => ((await q(`SELECT v FROM settings WHERE k='att_start'`)).rows[0] || {}).v || '2000-01-01';
@@ -1493,11 +1534,13 @@ async function monthFor(u, m, today, start, off) {
   const days = daysOf(m), from = days[0], to = days[days.length - 1];
   const recs = {}; (await q(`SELECT *, to_char(day,'YYYY-MM-DD') d FROM attendance WHERE user_id=$1 AND day BETWEEN $2 AND $3`, [u.id, from, to])).rows.forEach(r => { recs[r.d] = r; });
   const reqs = (await q(`SELECT *, to_char(from_date,'YYYY-MM-DD') f, to_char(to_date,'YYYY-MM-DD') t FROM leave_requests WHERE user_id=$1 AND status IN ('Pending','Approved') AND from_date<=$3 AND to_date>=$2 ORDER BY id`, [u.id, from, to])).rows;
+  if (u.join_date === undefined || u.att_rules === undefined) u = { ...u, ...((await q(`SELECT to_char(join_date,'YYYY-MM-DD') join_date, att_rules FROM users WHERE id=$1`, [u.id])).rows[0] || {}) };
   const jd = u.join_date ? String(u.join_date).slice(0, 10) : null;
   const joined = jd || (u.created_at ? new Date(u.created_at).toLocaleDateString('en-CA', { timeZone: TZ }) : start), first = joined > start ? joined : start;
   const HOL = await officeHolidays(from, to);
+  const R = rulesOf(u, off), isOff = await offDaysFor(u.id, R, from, to);
   const out = days.map(d => {
-    const r = recs[d], sun = wday(d) === 0, on = reqs.filter(x => x.f <= d && x.t >= d);
+    const r = recs[d], sun = isOff(d), on = reqs.filter(x => x.f <= d && x.t >= d && x.kind !== 'WeekOff');
     const lv = on.find(x => x.kind === 'Leave' && x.status === 'Approved'), pm = on.filter(x => x.kind === 'Permission' && x.status === 'Approved'), pend = on.find(x => x.status === 'Pending');
     let code = '';
     if (r && r.marked_by && !['Present'].includes(r.status)) code = { 'Half Day': 'half', Absent: 'absent', 'Week Off': 'off', Holiday: 'holiday' }[r.status] || 'present';
@@ -1508,13 +1551,20 @@ async function monthFor(u, m, today, start, off) {
     else if (sun) code = 'off';
     else if (d < today && d >= first) code = 'absent';
     else if (d === today) code = 'today';
-    const inT = r && r.check_in, late = !!(inT && off.late && ist24(inT) > off.late && !pm.some(x => x.session === 'Morning'));
+    const inT = r && r.check_in, late = !!(inT && R.late_after && ist24(inT) > R.late_after && !pm.some(x => x.session === 'Morning'));
+    // overtime: minutes after the shift ends (whole time when working on a week off / holiday)
+    let ot = 0; const outT = r && r.check_out;
+    if (R.ot_on && inT && outT) {
+      if (sun || HOL[d]) ot = Math.round((new Date(outT) - new Date(inT)) / 60000);
+      else { const o = hm2m(ist24(outT)) - hm2m(R.out); if (o >= (+R.ot_min || 0)) ot = o; }
+      ot = Math.max(0, ot);
+    }
     return { d, sun, code, pending: !!pend, pend_kind: pend ? pend.kind : null, in: istHM(inT), out: istHM(r && r.check_out), in24: ist24(inT), out24: ist24(r && r.check_out),
-      hours: +hrs(inT, r && r.check_out).toFixed(2), late, in_dist: r ? r.in_dist : null, out_dist: r ? r.out_dist : null,
+      hours: +hrs(inT, r && r.check_out).toFixed(2), late, ot, in_dist: r ? r.in_dist : null, out_dist: r ? r.out_dist : null,
       status: r ? r.status : null, note: r ? r.note : null, by: r ? r.marked_by : null,
       holiday: HOL[d] || null, leave: lv ? (lv.leave_type || 'Leave') : null, perm: pm.map(x => ({ session: x.session, from: x.from_time, to: x.to_time })), counts: d >= first && d <= today };
   });
-  const S = { present: 0, half: 0, absent: 0, leave: 0, perm_m: 0, perm_e: 0, off: 0, working: 0, late: 0, hours: 0 };
+  const S = { present: 0, half: 0, absent: 0, leave: 0, perm_m: 0, perm_e: 0, off: 0, working: 0, late: 0, hours: 0, ot_min: 0 };
   for (const x of out) {
     if (!x.counts) continue;
     if (!x.sun && x.code !== 'holiday' && x.code !== 'off') S.working++;
@@ -1526,11 +1576,13 @@ async function monthFor(u, m, today, start, off) {
     if (x.perm.some(p => p.session === 'Morning')) S.perm_m++;
     if (x.perm.some(p => p.session === 'Evening')) S.perm_e++;
     if (x.late) S.late++;
+    S.ot_min += x.ot || 0;
     S.hours += x.hours;
   }
   S.hours = +S.hours.toFixed(1);
   S.pending = reqs.filter(x => x.status === 'Pending').length;
-  return { days: out, summary: S, requests: reqs.map(({ f, t, ...x }) => ({ ...x, from_date: f, to_date: t })) };
+  const wk = (await q(`SELECT *, to_char(from_date,'YYYY-MM-DD') f FROM leave_requests WHERE user_id=$1 AND kind='WeekOff' AND status IN ('Pending','Approved') AND from_date BETWEEN $2 AND $3 ORDER BY id`, [u.id, from, to])).rows;
+  return { rules: { ...R, week_off_name: WDN[R.week_off] }, days: out, summary: S, weekoff: wk.map(x => ({ id: x.id, date: x.f, status: x.status, reason: x.reason })), requests: reqs.map(({ f, t, ...x }) => ({ ...x, from_date: f, to_date: t })) };
 }
 
 app.get('/api/attendance/today', wrap(async (req, res) => {
@@ -1538,7 +1590,10 @@ app.get('/api/attendance/today', wrap(async (req, res) => {
   const r = (await q(`SELECT * FROM attendance WHERE user_id=$1 AND day=$2`, [req.user.id, today])).rows[0];
   const pend = (await q(`SELECT id, from_time, to_time FROM leave_requests WHERE user_id=$1 AND kind='Attendance' AND status='Pending' AND from_date=$2 LIMIT 1`, [req.user.id, today])).rows[0];
   res.set('Cache-Control', 'no-store').json({ today, now: new Date().toISOString(), check_in: r && r.check_in, check_out: r && r.check_out, in: istHM(r && r.check_in), out: istHM(r && r.check_out),
-    status: r ? r.status : null, by: r ? r.marked_by : null, office: off, anywhere: isSuper(req.user), pending: pend || null });
+    status: r ? r.status : null, by: r ? r.marked_by : null, office: off, anywhere: isSuper(req.user), pending: pend || null, ...(await (async () => {
+      const R = rulesOf((await q('SELECT att_rules FROM users WHERE id=$1', [req.user.id])).rows[0], off), hol = (await officeHolidays(today, today))[today] || null;
+      return { week_off: (await offDaysFor(req.user.id, R, today, today))(today), holiday: hol, shift: R.shift_on ? { in: R.in, out: R.out, late_after: R.late_after } : null };
+    })()) });
 }));
 // is this phone at the office? (accuracy slack up to 100 m so weak indoor GPS still works)
 const atOffice = async (u, b) => {
@@ -1603,16 +1658,18 @@ app.get('/api/attendance/report', attNeed, wrap(async (req, res) => {
 // dashboard: who is on leave / permission today, who is in, what is waiting for approval
 app.get('/api/attendance/board', attNeed, wrap(async (req, res) => {
   const today = await todayIST(), off = await office();
-  const staff = (await q(`SELECT u.id,u.name,u.role,u.photo_v,COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id WHERE u.active AND u.role<>$1 ORDER BY u.name`, [SUPER])).rows;
+  const staff = (await q(`SELECT u.id,u.name,u.role,u.photo_v,u.att_rules,COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id WHERE u.active AND u.role<>$1 ORDER BY u.name`, [SUPER])).rows;
   const att = {}; (await q(`SELECT * FROM attendance WHERE day=$1`, [today])).rows.forEach(r => { att[r.user_id] = r; });
   const tr = (await q(`${LSELR} WHERE r.status='Approved' AND r.kind IN ('Leave','Permission') AND r.from_date<=$1 AND r.to_date>=$1 ORDER BY r.kind, r.session, u.name`, [today])).rows;
   const pending = (await q(`${LSELR} WHERE r.status='Pending' ORDER BY r.created_at LIMIT 20`)).rows;
   const leave = tr.filter(r => r.kind === 'Leave'), perm = tr.filter(r => r.kind === 'Permission'), away = new Set(leave.map(r => r.user_id));
   const holToday = (await officeHolidays(today, today))[today] || null;
   const sunday = wday(today) === 0 || !!holToday;
-  const inn = staff.filter(u => att[u.id] && att[u.id].check_in).map(u => ({ ...u, in: istHM(att[u.id].check_in), out: istHM(att[u.id].check_out), late: ist24(att[u.id].check_in) > off.late }));
-  const notIn = sunday ? [] : staff.filter(u => !(att[u.id] && att[u.id].check_in) && !away.has(u.id) && !(att[u.id] && ['Week Off', 'Holiday', 'Absent'].includes(att[u.id].status)));
-  res.set('Cache-Control', 'no-store').json({ today, holiday: holToday, total: staff.length, inn, notIn, leave, perm, pending, late: off.late });
+  const RU = {}; for (const u of staff) { RU[u.id] = rulesOf(u, off); RU[u.id].off = (await offDaysFor(u.id, RU[u.id], today, today))(today); }
+  const inn = staff.filter(u => att[u.id] && att[u.id].check_in).map(u => ({ ...u, in: istHM(att[u.id].check_in), out: istHM(att[u.id].check_out), late: !!(RU[u.id].late_after && ist24(att[u.id].check_in) > RU[u.id].late_after) }));
+  const weekOff = staff.filter(u => RU[u.id].off && !(att[u.id] && att[u.id].check_in)).map(u => ({ id: u.id, name: u.name, role: u.role, photo_v: u.photo_v, brand: u.brand }));
+  const notIn = sunday ? [] : staff.filter(u => !RU[u.id].off && !(att[u.id] && att[u.id].check_in) && !away.has(u.id) && !(att[u.id] && ['Week Off', 'Holiday', 'Absent'].includes(att[u.id].status)));
+  res.set('Cache-Control', 'no-store').json({ today, holiday: holToday, total: staff.length, inn: inn.map(({ att_rules, ...x }) => x), notIn: notIn.map(({ att_rules, ...x }) => x), weekOff, leave, perm, pending, late: off.late });
 }));
 // MD (Super Admin) overview: everything about the team's attendance on one screen
 app.get('/api/attendance/md', superOnly, wrap(async (req, res) => {
@@ -1670,7 +1727,7 @@ async function setAtt(uid, date, status, inT, outT, note, by) {
 
 const LSELR = `SELECT r.*, to_char(r.from_date,'YYYY-MM-DD') from_date, to_char(r.to_date,'YYYY-MM-DD') to_date, u.name, u.role, u.photo_v, c.name customer, c.phone customer_phone
   FROM leave_requests r JOIN users u ON u.id=r.user_id LEFT JOIN customers c ON c.id=r.customer_id`;
-const reqWhen = r => r.kind === 'Permission' ? `${r.session} permission on ${fdIN(r.from_date)}${r.from_time ? ` (${r.from_time}${r.to_time ? '–' + r.to_time : ''})` : ''}`
+const reqWhen = r => r.kind === 'WeekOff' ? `week off on ${fdIN(r.from_date)} instead of the usual day that week` : r.kind === 'Permission' ? `${r.session} permission on ${fdIN(r.from_date)}${r.from_time ? ` (${r.from_time}${r.to_time ? '–' + r.to_time : ''})` : ''}`
   : r.kind === 'Attendance' ? `attendance on ${fdIN(r.from_date)}: ${[r.from_time && 'in ' + r.from_time, r.to_time && 'out ' + r.to_time].filter(Boolean).join(', ')}`
   : `${r.leave_type || 'Leave'} ${fdIN(r.from_date)}${r.to_date !== r.from_date ? ' → ' + fdIN(r.to_date) : ''}`;
 const fdIN = d => new Date(d + 'T12:00:00Z').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', weekday: 'short' });
@@ -1707,14 +1764,19 @@ app.post('/api/leave', wrap(async (req, res) => {
     if (custId) { const cp = [custId], sc = custScope(req.user, cp); if (!(await q(`SELECT 1 FROM customers c WHERE c.id=$1 AND ${sc}`, cp)).rows.length) return res.status(400).json({ error: 'Customer not found' }); }
     if (!custId && !place) return res.status(400).json({ error: 'Choose the customer you went to (or type the place)' });
     acc = Number.isFinite(+b.acc) ? Math.round(+b.acc) : null;
+  } else if (kind === 'WeekOff') {
+    const R = rulesOf((await q('SELECT att_rules FROM users WHERE id=$1', [req.user.id])).rows[0]);
+    if (wday(from) === R.week_off) return res.status(400).json({ error: `${WDN[R.week_off]} is already your week off` });
+    if ((await q(`SELECT 1 FROM leave_requests WHERE user_id=$1 AND kind='WeekOff' AND status IN ('Pending','Approved') AND from_date BETWEEN $2 AND $3`, [req.user.id, dAdd(from, -((wday(from) + 6) % 7)), dAdd(from, 6 - ((wday(from) + 6) % 7))])).rows.length)
+      return res.status(409).json({ error: 'You already changed your week off for that week' });
   } else lt = LEAVE_TYPES.includes(b.leave_type) ? b.leave_type : 'Casual Leave';
   const clash = (await q(`SELECT kind, session, to_char(from_date,'DD Mon') f FROM leave_requests WHERE user_id=$1 AND status IN ('Pending','Approved') AND from_date<=$3 AND to_date>=$2
-    AND (CASE WHEN $4='Attendance' THEN kind='Attendance' AND status='Pending' ELSE kind<>'Attendance' AND (kind='Leave' OR $4='Leave' OR session=$5) END) LIMIT 1`, [req.user.id, from, to, kind, session])).rows[0];
+    AND $4<>'WeekOff' AND kind<>'WeekOff' AND (CASE WHEN $4='Attendance' THEN kind='Attendance' AND status='Pending' ELSE kind<>'Attendance' AND (kind='Leave' OR $4='Leave' OR session=$5) END) LIMIT 1`, [req.user.id, from, to, kind, session])).rows[0];
   if (clash) return res.status(409).json({ error: `You already have a ${clash.kind.toLowerCase()}${clash.session ? ' (' + clash.session + ')' : ''} request on ${clash.f}` });
   const r = await q(`INSERT INTO leave_requests(user_id,kind,leave_type,session,from_date,to_date,from_time,to_time,reason,lat,lng,distance,customer_id,place,accuracy) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
     [req.user.id, kind, lt, session, from, to, ft, tt, reason, lat, lng, dist, custId, place, acc]);
   const cname = custId ? (await q('SELECT name FROM customers WHERE id=$1', [custId])).rows[0].name : place;
-  const title = kind === 'Permission' ? '🕘 Permission request' : kind === 'Attendance' ? '📍 Attendance request' : '🌴 Leave request';
+  const title = kind === 'WeekOff' ? '🔄 Week off change request' : kind === 'Permission' ? '🕘 Permission request' : kind === 'Attendance' ? '📍 Attendance request' : '🌴 Leave request';
   await notifyLink((await approvers()).filter(id => id !== req.user.id), title, `${req.user.name}: ${reqWhen({ kind, session, from_date: from, to_date: to, from_time: ft, to_time: tt, leave_type: lt })}${kind === 'Attendance' ? ` at ${cname} (${distTxt(dist)} from office)` : ''} — ${reason}`, 'leave');
   res.json({ id: r.rows[0].id });
 }));
@@ -1735,7 +1797,7 @@ app.post('/api/leave/:id/decide', attNeed, wrap(async (req, res) => {
   if (st === 'Approved' && ['Leave', 'Permission'].includes(r.kind)) {
     const s = await slipFor(r.user_id, r.from_date.slice(0, 7));
     if (s && s.salary > 0) { const ln = s.lines.find(l => l.k === (r.kind === 'Leave' ? 'leave' : 'perm'));
-      extra = ln && ln.amount > 0 ? ` · Salary deduction ${moneyIN(ln.amount)} (${r.kind === 'Leave' ? `${PAY_RULES.paid_leaves} paid leave a month` : `${PAY_RULES.free_permissions} free permissions a month`}). ${slipMsg(s)}`
+      extra = ln && ln.amount > 0 ? ` · Salary deduction ${moneyIN(ln.amount)} (${r.kind === 'Leave' ? `${s.rules.paid_leaves} free leave / absent day(s) a month` : `${s.rules.free_permissions} free permissions a month`}). ${slipMsg(s)}`
         : ` · No salary deduction (${r.kind === 'Leave' ? 'paid leave' : 'free permission'}).`; }
   }
   await notifyLink([r.user_id], st === 'Approved' ? '✅ Request approved' : '❌ Request rejected', `Your ${reqWhen(r)} was ${st.toLowerCase()} by ${req.user.name}${note ? ' — ' + note : ''}${extra}`, 'att');
