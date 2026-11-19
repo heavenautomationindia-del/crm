@@ -688,6 +688,11 @@ body.dark .att-today{background:#1d1a12;border:1px solid rgba(240,189,74,.25)}
 .bin small{font-size:11.5px;font-weight:500}
 .sidebar .nav{overflow-y:auto;overflow-x:hidden;min-height:0;scrollbar-width:none;-ms-overflow-style:none;padding:4px 0;scroll-behavior:smooth;-webkit-mask-image:linear-gradient(transparent,#000 14px,#000 calc(100% - 14px),transparent);mask-image:linear-gradient(transparent,#000 14px,#000 calc(100% - 14px),transparent)}
 .sidebar .nav::-webkit-scrollbar{display:none}.sidebar .ni,.sidebar .nav>*{flex:none}
+.st[data-all].on{background:linear-gradient(135deg,#3b2d0c 0%,#121213 68%);box-shadow:0 14px 30px rgba(20,16,24,.28)}
+.gstw{display:flex;gap:8px;align-items:center}.gstw input{flex:1;min-width:0;text-transform:uppercase;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.04em}.gstw .btn{flex:none;white-space:nowrap}
+.gstm{font-size:12.5px;margin-top:5px;line-height:1.45;min-height:0}.gstm:empty{display:none}.gstm.ok{color:var(--ok)}.gstm.bad{color:var(--bad)}.gstm.warn{color:var(--text)}.gstm .warnt{color:var(--warn)}.gstm b{color:var(--text)}
+.gstm .spin{display:inline-block;width:11px;height:11px;border:2px solid var(--line,#ccc);border-top-color:var(--gold,#c79a2b);border-radius:50%;animation:gsp .7s linear infinite;vertical-align:-1px}@keyframes gsp{to{transform:rotate(1turn)}}
+.fld.gstf{grid-column:1/-1}
 .napple{--ny:#e3a400;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',system-ui,sans-serif}body.dark .napple,body.dark .notesheet{--ny:#ffd60a}
 .ngrp{margin:0 0 18px}.nghd{font-size:20px;font-weight:700;margin:0 4px 8px;letter-spacing:-.01em}
 .ncard{background:var(--surface);border-radius:12px;overflow:hidden;border:1px solid var(--border)}
@@ -1129,7 +1134,7 @@ const officePanel=()=>{const o=M.office||{};return `<div class="panel"><div clas
 let OFG=null;function ofGPS(b){b.textContent='Getting location…';getGPS().then(g=>{b.textContent='📍 Use my current location';if(!g)return alert('Could not get location. Turn on GPS.');OFG=g;$('ofU').value=g.lat.toFixed(7)+', '+g.lng.toFixed(7)})}
 async function saveOffice(){const o=M.office||{},u=$('ofU').value.trim(),b={name:$('ofN').value,radius:$('ofR').value,late:$('ofL').value};if(u)b.map_url=u;else{b.lat=o.lat;b.lng=o.lng}
  const r=await api('/api/attendance/office',{m:'POST',b});if(r.error){$('ofE').textContent=r.error;return}toast('Office settings saved ✓');Me()}
-const APPV='Version 18 · 19 Nov 2026';
+const APPV='Version 19 · 19 Nov 2026';
 function shrinkImg(file,size=320){return new Promise((ok,no)=>{const r=new FileReader();r.onerror=no;r.onload=()=>{const im=new Image();im.onerror=()=>no(new Error('bad image'));im.onload=()=>{const s=Math.min(im.width,im.height),c=document.createElement('canvas');c.width=c.height=size;
  c.getContext('2d').drawImage(im,(im.width-s)/2,(im.height-s)/2,s,s,0,0,size,size);ok(c.toDataURL('image/jpeg',.85))};im.src=r.result};r.readAsDataURL(file)})}
 let NEWPH=null;async function pickNewPhoto(inp){const f=inp.files&&inp.files[0];if(!f)return;try{NEWPH=await shrinkImg(f)}catch(e){return toast('Could not read that image')}$('nph').querySelector('.av').outerHTML=`<div class="av ph lg"><img src="${NEWPH}" alt=""></div>`}
@@ -1184,7 +1189,7 @@ async function saveC(){const ne=$('ce'),n=cKind=='New Customer';ne.textContent='
  if(can('services'))nav('services','New Ticket');else nav(view)}
 
 /* ---------- service detail (admin / sales) ---------- */
-const photosHTML=s=>s.photos.length?`<div class="thumbs">${s.photos.map(p=>`<figure onclick="window.open('/api/photos/${p.id}')"><img loading="lazy" src="/api/photos/${p.id}"><figcaption>${p.stage}</figcaption></figure>`).join('')}</div>`:'<div class="dim">No photos yet</div>';
+const photosHTML=s=>s.photos.length?`<div class="thumbs">${s.photos.map(p=>`<figure onclick="imgView('/api/photos/${p.id}')"><img loading="lazy" src="/api/photos/${p.id}"><figcaption>${p.stage}</figcaption></figure>`).join('')}</div>`:'<div class="dim">No photos yet</div>';
 async function openView(id){FORCE=0;const [s,mm]=await Promise.all([api('/api/services/'+id),api('/api/meta')]);M=mm;if(s.error)return toast(s.error);window._VS=s;
  const E=can('service_edit'),A=can('service_assign'),ch=s.charges_applied!==undefined,due=Number(s.amount_received||0)-Number(s.received_settled||0),open=!['Resolved','Cancelled'].includes(s.status),
  bdue=Number(s.bank_amount||0)-Number(s.bank_settled||0),money=ch&&(s.status=='Awaiting Payment'||s.status=='Resolved'||due>0||bdue>0);
@@ -2310,9 +2315,12 @@ async function editCust(id,after){const r=await api(`/api/customers/${id}/full`)
  <div class="fld"><label>Name</label><div class="tname">${titleSel('ecT',st.t)}<input id="ecN" value="${esc(st.name)}"></div></div>
  <div class="fld" style="margin-top:10px"><label>Company</label><input id="ecC" value="${esc(c.company||'')}"></div>
  <div class="fg" style="margin-top:10px"><div class="fld"><label>Phone</label><input id="ecP" type="tel" value="${esc(c.phone||'')}"></div><div class="fld"><label>Email</label><input id="ecE" type="email" value="${esc(c.email||'')}"></div></div>
- <div class="fld" style="margin-top:10px"><label>Address</label><input id="ecA" value="${esc(c.address||'')}"></div><div class="ferr" id="ecErr"></div>
+ <div class="fg2" style="margin-top:10px">${gstFld('ecG',c.gstin,{company:'ecC',address:'ecA',city:'ecCi',pincode:'ecPi',state:'ecS'})}</div>
+ <div class="fld" style="margin-top:10px"><label>Address</label><input id="ecA" value="${esc(c.address||'')}"></div>
+ <div class="fg" style="margin-top:10px"><div class="fld"><label>City</label><input id="ecCi" value="${esc(c.city||'')}"></div><div class="fld"><label>Pincode</label><input id="ecPi" value="${esc(c.pincode||'')}"></div></div>
+ <div class="fld" style="margin-top:10px"><label>State</label><select id="ecS"><option value="">—</option>${[...new Set(GST_STATES)].sort().map(x=>`<option ${c.state==x?'selected':''}>${esc(x)}</option>`).join('')}</select></div><div class="ferr" id="ecErr"></div>
  <button class="btn big" style="width:100%;margin-top:14px" onclick="saveCust(${id})">Save</button>`)}
-async function saveCust(id){const b={name:withTitle($('ecT').value,$('ecN').value),company:$('ecC').value,phone:$('ecP').value,email:$('ecE').value,address:$('ecA').value};
+async function saveCust(id){const b={name:withTitle($('ecT').value,$('ecN').value),company:$('ecC').value,phone:$('ecP').value,email:$('ecE').value,address:$('ecA').value,gstin:$('ecG').value,city:$('ecCi').value,pincode:$('ecPi').value,state:$('ecS').value};
  const r=await api('/api/customers/'+id,{m:'PATCH',b});if(r.error){$('ecErr').textContent=r.error;return}toast('Customer updated ✓');closeM();if(window._ecA)window._ecA();else if(view=='customers')Customers()}
 const sheetOr=h=>modal(h),X2=()=>X;
 async function custFull(id){const r=await api(`/api/customers/${id}/full`);if(r.error)return toast(r.error);const c=r.customer,t=r.totals,today=ymd(new Date());
@@ -2531,20 +2539,24 @@ const BSC={Paid:'ok',Unpaid:'bad',Partial:'warn',Open:'info',Converted:'ok',Acce
 async function biMeta(force){if(!BI.meta||force)BI.meta=await api('/api/bl/meta');return BI.meta}
 const biBrand=id=>(BI.meta.brands||[]).find(b=>b.id==id)||BI.meta.brands[0]||{};
 function biWide(){const m=$('mroot').querySelector('.md');if(m)m.classList.add('wide')}
+const BICOL={home:'#1d1d20',invoice:'#2e9e6a',quotation:'#4a6fd1',proforma:'#7a5bd1',challan:'#3b9fd8',credit_note:'#d1495b',purchase:'#e07b2e',expenses:'#c79a2b',products:'#14a3a3',bcust:'#5b6fd1',vendors:'#a0603a',reports:'#6a7280',bset:'#46464d'};
+const BIGL={home:'◎',reports:'↗',bset:'⚙'};
 const biTabs=()=>[['home','Overview'],['invoice','Invoices'],['quotation','Quotations'],['proforma','Proforma'],['challan','Challans'],['credit_note','Credit notes'],['purchase','Purchases',1],['expenses','Expenses',1],['products','Products'],['bcust','Customers'],['vendors','Vendors',1],['reports','Reports'],['bset','Settings',2]]
  .filter(t=>t[2]==2?SUP():t[2]==1?biBuy():(['home','reports','products'].includes(t[0])?biOk():can('billing')));
 
 async function Bill(){if(!biOk())return nav(menu()[0][0]);await biMeta();
  if(!biTabs().some(t=>t[0]==BI.tab))BI.tab=biTabs()[0][0];
  const nb=BI.meta.brands.length>1&&!ME.brand_id;
- $('page').innerHTML=head('Billing','Quotations, GST invoices, payments, stock & reports',`${can('billing')?`<button class="btn" onclick="biNew()">＋ New</button>`:biBuy()?`<button class="btn" onclick="biEdit('purchase')">＋ Purchase</button>`:''}`)
- +`<div class="bitabs" id="bitabs">${biTabs().map(t=>`<button class="${BI.tab==t[0]?'on':''}" onclick="BI.tab='${t[0]}';BI.q='';BI.st='';Bill()">${t[1]}</button>`).join('')}</div>
- ${nb&&!['products','bset','vendors'].includes(BI.tab)?`<div class="bibrand"><select onchange="BI.brand=this.value;biBody()"><option value="">All brands</option>${BI.meta.brands.map(b=>`<option value="${b.id}" ${BI.brand==b.id?'selected':''}>${esc(b.name)}</option>`).join('')}</select></div>`:''}
+ if(!BI.cnt)BI.cnt={};$('page').innerHTML=head('Billing Desk','Quotations, GST invoices, payments, stock & reports',`${can('billing')?`<button class="btn" onclick="biNew()">＋ New</button>`:biBuy()?`<button class="btn" onclick="biEdit('purchase')">＋ Purchase</button>`:''}`)
+ +`<div class="stabs grid bistabs" id="bitabs">${biTabs().map(t=>`<button class="st ${BI.tab==t[0]?'on':''}" style="--c:${BICOL[t[0]]||'#1d1d20'}" data-k="${t[0]}" ${t[0]=='home'?'data-all="1"':''} onclick="BI.tab='${t[0]}';BI.q='';BI.st='';Bill()"><small>${t[1]}</small><b>${BIGL[t[0]]||(BI.cnt[t[0]]??'·')}</b></button>`).join('')}</div>
+ ${nb&&!['products','bset','vendors'].includes(BI.tab)?`<div class="bibrand"><select onchange="BI.brand=this.value;biCounts();biBody()"><option value="">All brands</option>${BI.meta.brands.map(b=>`<option value="${b.id}" ${BI.brand==b.id?'selected':''}>${esc(b.name)}</option>`).join('')}</select></div>`:''}
  <div id="bibody"><div class="dim" style="padding:20px">Loading…</div></div>`;
  const on=$('bitabs').querySelector('.on');if(on)on.scrollIntoView({inline:'center',block:'nearest'});
- await biBody()}
+ biCounts();await biBody()}
+async function biCounts(){const r=await api('/api/bl/counts?brand='+(BI.brand||''));if(!r||r.error)return;BI.cnt=r;const g=$('bitabs');if(!g)return;
+ g.querySelectorAll('.st').forEach(b=>{const k=b.dataset.k;if(!BIGL[k])b.querySelector('b').textContent=r[k]??0})}
 async function biBody(){const t=BI.tab;if(BT[t])return biList(t);
- return ({home:biHome,products:biProducts,bcust:biCustomers,vendors:biVendors,expenses:biExpenses,reports:biReports,bset:biSettings})[t]()}
+ return ({home:biHome,products:biProducts,bcust:biCustomers,vendors:biVendors,expenses:biExpenses,reports:biReports,bset:()=>biSettings().then(gstKeyPanel)})[t]()}
 function biNew(){const it=t=>`<button class="bin" onclick="closeM();biEdit('${t}')"><span>${BTI[t]}</span><b>${BT1[t]}</b></button>`;
  modal(`<div class="row"><h2 class="sp">Create new</h2>${X}</div><div class="bigrid">${['invoice','quotation','proforma','challan','credit_note'].map(it).join('')}${biBuy()?it('purchase'):''}
  <button class="bin" onclick="closeM();biProd()"><span>📦</span><b>Product</b></button><button class="bin" onclick="closeM();biCustForm()"><span>👤</span><b>Customer</b></button>${biBuy()?`<button class="bin" onclick="closeM();biExpForm()"><span>💸</span><b>Expense</b></button>`:''}<button class="bin" onclick="closeM();biImport('products')"><span>⬆️</span><b>Import</b></button></div>`)}
@@ -2614,8 +2626,9 @@ function biParty(){const P=BE.party,vend=BE.type=='purchase',has=P.name||P.compa
  :has||BE._pnew?biPartyForm():`<div class="bips"><input id="bePq" placeholder="Search ${vend?'vendor':'customer'} by name, phone or GSTIN…" oninput="clearTimeout(window._bpq);window._bpq=setTimeout(biPartyFind,250)" onfocus="biPartyFind()" autocomplete="off"><div class="bidd" id="bePr"></div></div><button class="lnk" onclick="BE._pnew=1;biParty()">＋ New ${vend?'vendor':'customer'}</button>`;
  if(!has&&!BE._pnew)setTimeout(()=>{const i=$('bePq');if(i&&!COARSE())i.focus()},60)}
 function biPartyForm(){const P=BE.party,f=(k,l,t='text',ph='')=>`<div class="fld"><label>${l}</label><input id="bp_${k}" type="${t}" value="${esc(P[k]||'')}" placeholder="${ph}" oninput="BE.party.${k}=this.value${k=='gstin'?';biGstState()':''}${k=='state'?';biCalc()':''}"></div>`;
- return `<div class="box bipf"><div class="fg2">${f('name','Name')}${f('company','Company / business')}${f('phone','Phone','tel')}${f('gstin','GSTIN','text','33ABCDE1234F1Z5')}</div>
- <div class="fg2"><div class="fld"><label>State (place of supply)</label><select id="bp_state" onchange="BE.party.state=this.value;biCalc()"><option value="">—</option>${BI.meta.states.map(s=>`<option ${P.state==s?'selected':''}>${esc(s)}</option>`).join('')}</select></div>${f('email','Email','email')}</div>
+ return `<div class="box bipf"><div class="fg2">${f('name','Name')}${f('company','Company / business')}${f('phone','Phone','tel')}${f('email','Email','email')}</div>
+ <div class="fg2">${gstFld('bp_gstin',P.gstin,{name:'bp_name',company:'bp_company',address:'bp_address',city:'bp_city',pincode:'bp_pincode',state:'bp_state'})}</div>
+ <div class="fg2"><div class="fld"><label>State (place of supply)</label><select id="bp_state" onchange="BE.party.state=this.value;biCalc()"><option value="">—</option>${BI.meta.states.map(s=>`<option ${P.state==s?'selected':''}>${esc(s)}</option>`).join('')}</select></div></div>
  ${f('address','Billing address')}${BE.type!='purchase'?`<div class="fg2">${f('city','City')}${f('pincode','Pincode','text')}</div>${biShipHTML(P,'bps_',1)}`:''}
  <div class="row" style="padding:8px 0 0;gap:8px"><button class="btn g sm" onclick="BE._pnew=0;if(!(BE.party.name||BE.party.company||BE.party.phone))BE.party={};biParty();biCalc()">Done</button><span class="dim" style="font-size:12px">${BE.customer_id||BE.vendor_id?'Changes are saved on this bill; new details are added to the profile.':'A new '+(BE.type=='purchase'?'vendor':'customer')+' is created when you save.'}</span></div></div>`}
 const biShipHTML=(P,pre,on)=>{const f=(k,l,t='text')=>`<div class="fld"><label>${l}</label><input id="${pre}${k}" type="${t}" value="${esc(P[k]||'')}" ${on?`oninput="BE.party.${k}=this.value${k=='ship_state'?';biCalc()':''}"`:''}></div>`,same=!(P.ship_address||P.ship_name||P.ship_city||P.ship_pincode||P.ship_phone);
@@ -2769,7 +2782,7 @@ async function biCust(id){const [L,docs]=await Promise.all([api(`/api/bl/ledger/
 function biCustForm(c,vend){c=c||{};const f=(k,l,t='text',ph='')=>`<div class="fld"><label>${l}</label><input id="bc_${k}" type="${t}" value="${esc(c[k]??'')}" placeholder="${ph}"></div>`;
  sheet(`<div class="row"><h2 class="sp">${c.id?'Edit':'New'} ${vend?'vendor':'customer'}</h2>${X2s()}</div>
  <div class="fg2">${f('name','Name')}${f('company','Company / business')}</div><div class="fg2" style="margin-top:10px">${f('phone','Phone','tel')}${f('email','Email','email')}</div>
- <div class="fg2" style="margin-top:10px">${f('gstin','GSTIN','text','33ABCDE1234F1Z5')}<div class="fld"><label>State</label><select id="bc_state"><option value="">—</option>${BI.meta.states.map(s=>`<option ${c.state==s?'selected':''}>${esc(s)}</option>`).join('')}</select></div></div>
+ <div class="fg2" style="margin-top:10px">${gstFld('bc_gstin',c.gstin,{name:'bc_name',company:'bc_company',address:'bc_address',city:'bc_city',pincode:'bc_pincode',state:'bc_state'})}</div><div class="fg2" style="margin-top:10px"><div class="fld"><label>State</label><select id="bc_state"><option value="">—</option>${BI.meta.states.map(s=>`<option ${c.state==s?'selected':''}>${esc(s)}</option>`).join('')}</select></div></div>
  <div style="margin-top:10px">${f('address',vend?'Address':'Billing address')}</div>${vend?'':`<div class="fg2" style="margin-top:10px">${f('city','City')}${f('pincode','Pincode')}</div>${biShipHTML(c,'bcs_',0)}`}
  <div class="fg2" style="margin-top:10px">${f('opening_bal',vend?'Opening balance (we owe them) ₹':'Opening balance (they owe us) ₹','number','0')}${!vend&&!c.id&&BI.meta.brands.length>1&&!ME.brand_id?`<div class="fld"><label>Brand</label><select id="bc_brand">${BI.meta.brands.map(b=>`<option value="${b.id}">${esc(b.name)}</option>`).join('')}</select></div>`:''}</div>
  <div class="ferr" id="bcE"></div><button class="btn big" id="bcS" style="width:100%;margin-top:14px" onclick="biCustSave(${c.id||0},${vend?1:0})">Save</button>`)}
@@ -2904,13 +2917,17 @@ const WCI={'New':'🆕','In progress':'🔧','With vendor':'🚚','Ready':'✅',
 let WCF={st:'open',q:'',tab:'cases'};
 async function Wc(){const man=can('warranty');if(!man)WCF.tab='cases';
  $('page').innerHTML=head('Warranty & Service','Material collected from customers — on site or with a W&S vendor, until it goes back.',man?`<button class="btn g" onclick="wcVendorForm()">＋ W&amp;S vendor</button>`:'')
- +(man?`<div class="seg" style="max-width:360px;margin-bottom:12px"><button class="${WCF.tab=='cases'?'on':''}" onclick="WCF.tab='cases';Wc()">🛡 Cases</button><button class="${WCF.tab=='vendors'?'on':''}" onclick="WCF.tab='vendors';Wc()">🏭 W&amp;S vendors</button></div>`:'')
- +`<div id="wcbody"><div class="dim" style="padding:20px">Loading…</div></div>`;WCF.tab=='vendors'?wcVendors():wcList()}
+ +`<div class="stabs grid" id="wctabs">${wcTiles()}</div><div id="wcbody"><div class="dim" style="padding:20px">Loading…</div></div>`;WCF.tab=='vendors'?wcVendors():wcList();
+ if(man&&WCF.tab!='vendors')api('/api/wc-vendors').then(r=>{if(Array.isArray(r)){WCF.vn=r.length;if($('wctabs'))$('wctabs').innerHTML=wcTiles()}});
+ if(WCF.tab=='vendors')api('/api/wc?status=open').then(r=>{if(r&&r.counts){WCF.cnt=r.counts;if($('wctabs'))$('wctabs').innerHTML=wcTiles()}})}
+const WCCOL={open:'#1d1d20','New':'#c79a2b','In progress':'#3b9fd8','With vendor':'#7a5bd1','Ready':'#2e9e6a','Converted':'#14a3a3','Closed':'#6a7280','Cancelled':'#d1495b',all:'#46464d',vendors:'#a0603a'};
+const WCST=['New','In progress','With vendor','Ready','Converted','Closed','Cancelled'];
+function wcTiles(){const C=WCF.cnt||{},T=(k,l,n,on)=>`<button class="st ${on?'on':''}" style="--c:${WCCOL[k]}" data-k="${esc(k)}" ${k=='open'?'data-all="1"':''} onclick="${k=='vendors'?"WCF.tab='vendors'":`WCF.tab='cases';WCF.st='${k}'`};Wc()"><small>${l}</small><b>${n??'·'}</b></button>`,cs=WCF.tab=='cases';
+ return T('open','Open',C.open,cs&&WCF.st=='open')+WCST.map(k=>T(k,k,C[k]||(WCF.cnt?0:'·'),cs&&WCF.st==k)).join('')+T('all','All cases',WCF.cnt?Object.entries(C).filter(([k])=>k!='open'&&k!='vendors').reduce((t,[,v])=>t+v,0):'·',cs&&WCF.st=='all')+(can('warranty')?T('vendors','W&S vendors',WCF.vn,!cs):'')}
 async function wcList(){const r=await api(`/api/wc?status=${WCF.st}&q=${encodeURIComponent(WCF.q)}`);if(r.error)return $('wcbody').innerHTML=`<div class="dim">${esc(r.error)}</div>`;window._WCL=r;
- const C=r.counts,chips=[['open','Open',C.open],...r.statuses.map(s=>[s,s,C[s]||0]),['all','All',Object.entries(C).filter(([k])=>k!='open').reduce((t,[,v])=>t+v,0)]];
+ WCF.cnt=r.counts;if($('wctabs'))$('wctabs').innerHTML=wcTiles();
  $('wcbody').innerHTML=`<div class="tb bitb"><input type="search" placeholder="Search WS no, item, serial, customer, vendor…" value="${esc(WCF.q)}" onchange="WCF.q=this.value;wcList()"></div>
- <div class="chips" style="margin:8px 0 12px">${chips.map(c=>`<button class="chp ${WCF.st==c[0]?'on':''}" onclick="WCF.st='${c[0]}';wcList()">${WCI[c[0]]||''} ${c[1]} · ${c[2]}</button>`).join('')}</div>
- <div class="wcgrid">${r.items.map(wcCard).join('')||'<div class="dim" style="padding:26px;text-align:center">Nothing here.</div>'}</div>`}
+ <div class="wcgrid" style="margin-top:12px">${r.items.map(wcCard).join('')||'<div class="dim" style="padding:26px;text-align:center">Nothing here.</div>'}</div>`}
 const wcPh=c=>(c.media||[]).filter(m=>m.kind=='photo');
 const wcCard=c=>`<button class="wcc" onclick="wcView(${c.id})"><div class="row" style="padding:0;gap:10px;align-items:flex-start">${wcPh(c)[0]?`<img src="/api/wc/media/${wcPh(c)[0].id}" alt="" loading="lazy">`:'<div class="wcni">🛡</div>'}<div class="sp" style="min-width:0;text-align:left">
  <div class="row" style="padding:0;gap:6px"><b class="mono">${c.case_no}</b><span class="badge ${WCS[c.status]||''}">${WCI[c.status]||''} ${esc(c.status)}</span>${c.kind?`<span class="badge">${esc(c.kind)}</span>`:''}</div>
@@ -3005,7 +3022,7 @@ async function wcBoxLoad(sid,st){const el=$('wcbox');if(!el||el.dataset.s!=sid)r
  const add=ME.role!='Technician'&&can('warranty')&&!['Cancelled'].includes(st);if(!r.items.length&&!add)return;
  $('wcbox').innerHTML=`<div class="sec3">🛡 Warranty &amp; service</div>${r.items.map(c=>`<button class="crow1" onclick="wcView(${c.id})"><b>${c.case_no}</b><span>${esc(c.item||'Material')} · <span class="badge ${WCS[c.status]||''}">${esc(c.status)}</span>${c.vendor?' · 🏭 '+esc(c.vendor):''}</span><i>›</i></button>`).join('')}${add?`<button class="btn g sm" style="margin-top:6px" onclick="jWcForm(${sid})">🛡 Material received for warranty / service</button>`:''}`}
 // W&S vendors
-async function wcVendors(){const r=await api('/api/wc-vendors');if(r.error)return $('wcbody').innerHTML=`<div class="dim">${esc(r.error)}</div>`;
+async function wcVendors(){const r=await api('/api/wc-vendors');if(r.error)return $('wcbody').innerHTML=`<div class="dim">${esc(r.error)}</div>`;WCF.vn=r.length;if($('wctabs'))$('wctabs').innerHTML=wcTiles();
  $('wcbody').innerHTML=`<div class="bitot"><span>${r.length} vendors</span><span>Holding <b>${r.reduce((t,v)=>t+v.holding,0)}</b> items</span><span class="${r.some(v=>v.balance>0)?'warn':''}">To pay <b>${inr(r.reduce((t,v)=>t+Math.max(0,v.balance),0))}</b></span></div>
  <div class="panel tlist" style="margin-top:0">${r.map(v=>`<div class="trow birow" onclick="wcVendor(${v.id})"><div class="av mid">🏭</div><div class="tinfo"><b>${esc(v.name)}${v.company?' · '+esc(v.company):''}</b><div class="dim tsub">${[v.phone,v.handles].filter(Boolean).map(esc).join(' · ')}</div></div><div class="biamt">${v.holding?`<span class="badge info">${v.holding} with them</span>`:''}${v.balance>0.5?`<b class="neg">${inr(v.balance)}</b><small>to pay</small>`:`<small class="dim">${v.cases} cases</small>`}</div></div>`).join('')||'<div class="dim" style="padding:22px;text-align:center">No W&amp;S vendors yet.<br><button class="btn sm" style="margin-top:10px" onclick="wcVendorForm()">＋ Add vendor</button></div>'}</div>`}
 async function wcVendor(id){const r=await api('/api/wc-vendors/'+id);if(r.error)return toast(r.error);const v=r.vendor;window._WVD=r;
@@ -3023,9 +3040,10 @@ function wcVPay(vid){const banks=(window._WVD||{}).banks||[];sheet(`<div class="
 async function wcVPayGo(vid){const r=await api(`/api/wc-vendors/${vid}/payments`,{m:'POST',b:{amount:$('vpA').value,mode:$('vpM').querySelector('.on').dataset.v,account:$('vpAc').value,note:$('vpN').value}});if(r.error){$('vpE').textContent=r.error;return}closeS();toast('Saved ✓');wcVendor(vid);if(view=='wc'&&WCF.tab=='vendors')wcVendors()}
 function wcVendorForm(v,after){v=v||{};window._WVA=after;const f=(k,l,t='text',ph='')=>`<div class="fld"><label>${l}</label><input id="wv_${k}" type="${t}" value="${esc(v[k]??'')}" placeholder="${ph}"></div>`;
  sheet(`<div class="row"><h2 class="sp">${v.id?'Edit':'New'} W&amp;S vendor</h2><button class="ib" onclick="closeS()">✕</button></div><div class="fg2">${f('name','Name *')}${f('company','Company')}</div><div class="fg2" style="margin-top:10px">${f('phone','Phone','tel')}${f('handles','Brands / products they repair','text','e.g. Hikvision, CP Plus, biometric')}</div>
- <div style="margin-top:10px">${f('address','Address')}</div><div class="fg2" style="margin-top:10px">${f('opening_bal','Opening balance (we owe) ₹','number','0')}</div><div class="fld" style="margin-top:10px"><label>Notes</label><textarea id="wv_notes" rows="2">${esc(v.notes||'')}</textarea></div><div class="ferr" id="wvE"></div>
+ <div class="fg2" style="margin-top:10px">${gstFld('wv_gstin',v.gstin,{name:'wv_name',company:'wv_company',address:'wv_address',pincode:'wv_pincode',state:'wv_state'})}</div>
+ <div style="margin-top:10px">${f('address','Address')}</div><div class="fg2" style="margin-top:10px"><div class="fld"><label>State</label><select id="wv_state"><option value="">—</option>${[...new Set(GST_STATES)].sort().map(x=>`<option ${v.state==x?'selected':''}>${esc(x)}</option>`).join('')}</select></div>${f('pincode','Pincode')}</div><div class="fg2" style="margin-top:10px">${f('opening_bal','Opening balance (we owe) ₹','number','0')}</div><div class="fld" style="margin-top:10px"><label>Notes</label><textarea id="wv_notes" rows="2">${esc(v.notes||'')}</textarea></div><div class="ferr" id="wvE"></div>
  <button class="btn big" style="width:100%;margin-top:12px" onclick="wcVendorSave(${v.id||0})">Save</button>`)}
-async function wcVendorSave(id){const g=k=>$('wv_'+k).value,b={name:g('name'),company:g('company'),phone:g('phone'),handles:g('handles'),address:g('address'),opening_bal:g('opening_bal'),notes:g('notes')};
+async function wcVendorSave(id){const g=k=>$('wv_'+k).value,b={name:g('name'),company:g('company'),phone:g('phone'),handles:g('handles'),address:g('address'),opening_bal:g('opening_bal'),notes:g('notes'),gstin:g('gstin'),state:g('state'),pincode:g('pincode')};
  const r=await api(id?'/api/wc-vendors/'+id:'/api/wc-vendors',{m:id?'PATCH':'POST',b});if(r.error){$('wvE').textContent=r.error;return}closeS();toast('Vendor saved ✓');const a=window._WVA;window._WVA=null;
  if(a)a(r.id||id);else if(id&&$('mroot').innerHTML.trim())wcVendor(id);if(view=='wc'){WCF.tab='vendors';if(!a)Wc()}}
 // Settings: bank & cash accounts
@@ -3037,6 +3055,35 @@ function bankUI(){modal(`<div class="row"><h2 class="sp">🏦 Bank &amp; cash ac
 function bankAdd(){const v=$('bkN').value.trim();if(v&&!window._BK.includes(v))window._BK.push(v);bankUI();setTimeout(()=>$('bkN').focus(),30)}
 async function bankSave(){const r=await api('/api/settings/banks',{m:'PUT',b:{banks:window._BK}});if(r.error){$('bkE').textContent=r.error;return}if(M)M.BANKS=r.banks;if(BI.meta)BI.meta.banks=r.banks;closeM();toast('Accounts saved ✓')}
 
+async function gstKeyPanel(){const r=await api('/api/settings/gst');if(r.error||!$('bibody'))return;const d=document.createElement('div');d.className='panel bisets';d.id='gstkp';d.style.marginTop='14px';
+ d.innerHTML=`<div class="sec3" style="margin-top:0">🔍 GSTIN auto-fill</div><p class="dim" style="margin:0 0 10px;font-size:13px">When someone types a GSTIN, the state and PAN fill in straight away. To fill the <b>business name, address and pincode</b> too, add a lookup key from <a href="https://www.gstinapi.in/api-keys" target="_blank" rel="noopener">gstinapi.in</a> (free key includes a few lookups; buy credits for more). Each GSTIN is saved for 30 days, so looking it up again costs nothing.</p>
+ ${r.env?`<div class="dim">✅ Key set on the server (GSTIN_API_KEY): <span class="mono">${esc(r.masked)}</span></div>`:`<div class="gstw"><input id="gstK" type="password" autocomplete="off" placeholder="${r.set?esc(r.masked):'Paste API key'}"><button class="btn sm" onclick="gstKeySave()">Save</button>${r.set?`<button class="btn g sm" onclick="gstKeySave(1)">Remove</button>`:''}</div><div class="dim" style="font-size:12px;margin-top:6px">${r.set?'✅ Key saved: <span class="mono">'+esc(r.masked)+'</span>':'No key yet — only state and PAN fill automatically.'}</div>`}`;
+ $('bibody').appendChild(d)}
+async function gstKeySave(rm){const k=rm?'':($('gstK').value||'').trim();if(!rm&&!k)return toast('Paste the key first');const r=await api('/api/settings/gst',{m:'PUT',b:{key:k}});if(r.error)return toast(r.error);toast(rm?'Key removed':'Key saved ✓');const o=$('gstkp');if(o)o.remove();gstKeyPanel()}
+/* ---------- GSTIN: type it → name, company, address, state, pincode fill in ---------- */
+const GST_STATES=['Jammu and Kashmir','Himachal Pradesh','Punjab','Chandigarh','Uttarakhand','Haryana','Delhi','Rajasthan','Uttar Pradesh','Bihar','Sikkim','Arunachal Pradesh','Nagaland','Manipur','Mizoram','Tripura','Meghalaya','Assam','West Bengal','Jharkhand','Odisha','Chhattisgarh','Madhya Pradesh','Gujarat','Dadra and Nagar Haveli and Daman and Diu','Dadra and Nagar Haveli and Daman and Diu','Maharashtra','Andhra Pradesh','Karnataka','Goa','Lakshadweep','Kerala','Tamil Nadu','Puducherry','Andaman and Nicobar Islands','Telangana','Andhra Pradesh','Ladakh'];
+const gstFmt=g=>/^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]$/.test(g);
+window.GSTM={};
+/* id = GSTIN input id; map = {name,company,address,city,pincode,state} → element ids */
+function gstFld(id,val,map,label='GSTIN'){GSTM[id]=map;return `<div class="fld gstf"><label>${label} <small class="faint">· details fill in automatically</small></label><div class="gstw"><input id="${id}" value="${esc(val||'')}" placeholder="33ABCDE1234F1Z5" maxlength="15" autocomplete="off" autocapitalize="characters" spellcheck="false" oninput="gstIn(this)"><button type="button" class="btn g sm" onclick="gstGo('${id}',1)">🔍 Fetch</button></div><div class="gstm" id="${id}_m"></div></div>`}
+function gstIn(el){const v=el.value.toUpperCase().replace(/[^A-Z0-9]/g,'');if(v!==el.value){const p=el.selectionStart;el.value=v;try{el.setSelectionRange(p,p)}catch(e){}}
+ if(el.id=='bp_gstin'&&typeof BE!='undefined'&&BE.party){BE.party.gstin=v;if(typeof biGstState=='function')biGstState()}
+ const m=$(el.id+'_m');if(m&&v.length<15){m.textContent='';m.className='gstm'}
+ if(v.length==15&&el.dataset.got!=v){if(gstFmt(v))gstGo(el.id);else if(m){m.textContent='⚠️ GSTIN should look like 33ABCDE1234F1Z5';m.className='gstm bad'}}}
+async function gstGo(id,force){const el=$(id),m=$(id+'_m');if(!el)return;const g=el.value.trim().toUpperCase();
+ if(!gstFmt(g)){if(m){m.textContent='⚠️ GSTIN should look like 33ABCDE1234F1Z5';m.className='gstm bad'}return}
+ el.dataset.got=g;if(m){m.innerHTML='<span class="spin"></span> Looking up '+g+'…';m.className='gstm'}
+ const r=await api('/api/gst/'+g+(force?'?fresh=1':''));if(!$(id))return;
+ if(r.error&&!r.state_code){if(m){m.textContent='⚠️ '+r.error;m.className='gstm bad'}return}
+ const n=gstApply(GSTM[id]||{},r,!!force),on=r.source=='online'||r.source=='cache';
+ if(m){m.innerHTML=on?`✅ <b>${esc(r.company||r.name||'Found')}</b>${r.status?` · ${esc(r.status)}`:''}${r.state?' · '+esc(r.state):''}${n?` · ${n} field${n==1?'':'s'} filled`:''}`
+  :`✅ Valid · ${esc(r.state||'State '+r.state_code)} · PAN ${esc(r.pan||'')}${r.error?`<br><span class="warnt">⚠️ ${esc(r.error)}</span>`:r.note?`<br><small class="faint">${esc(r.note)}</small>`:''}`;
+  m.className='gstm '+(r.error?'warn':'ok')}}
+function gstApply(map,r,force){let n=0;for(const k of ['company','name','address','city','pincode','state']){const e=map[k]&&$(map[k]),v=r[k];if(!e||!v)continue;
+  if(!force&&String(e.value||'').trim()&&!(k=='state'))continue;
+  if(e.tagName=='SELECT'){if(![...e.options].some(o=>(o.value||o.text)==v))continue;e.value=v}else e.value=v;
+  e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));n++}
+ if(map.after)try{window[map.after](r)}catch(e){}return n}
 const PRIM=['todo','tdash','jobs','dash','chat','services','leads','att','salary'];
 function bottomNav(v){const all=menu().filter(n=>n[0]!='me'),prim=PRIM.map(k=>all.find(n=>n[0]==k)).filter(Boolean).slice(0,4),rest=all.filter(n=>!prim.includes(n));
  const moreOn=v=='me'||rest.some(n=>n[0]==v);

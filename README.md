@@ -220,3 +220,17 @@ A full GST billing section inside the CRM: **Billing** in the menu. It needs the
   - Swipe / Excel import and export include the shipping columns.
 - **Desktop left menu scrolls** when there are more items than fit on the screen.
 - **Billing → Settings logo** now saves correctly and prints on bills.
+
+## Version 19 — GSTIN auto-fill, box headers, photo viewer
+- **Billing Desk and Warranty & Service headers** now use the same box tiles as Services and Leads, each with a live count.
+  - Billing tiles: Invoices, Quotations, Proforma, Challans, Credit notes, Purchases, Expenses, Products, Customers and Vendors.
+  - Warranty & Service tiles: Open, New, In progress, With vendor, Ready, Converted, Closed, Cancelled, All cases and W&S vendors.
+  - On a phone, the tiles scroll sideways.
+- **GSTIN everywhere:** billing customers, billing vendors, W&S vendors, the customer edit screen and the party on any bill.
+  - **Auto-fill:** type a 15-character GSTIN and the details fill in by themselves (or tap 🔍 Fetch): company (legal name), name (trade name), address, city, pincode and state. On a bill the GST type updates too (IGST for another state).
+  - **Checks first:** a GSTIN with a wrong check digit is caught before any lookup, so no credit is wasted.
+  - **Without a lookup key:** only the state and PAN are filled from the GSTIN.
+  - **With a key:** add one in Billing → Settings → 🔍 GSTIN auto-fill (get it at gstinapi.in/api-keys), or set the `GSTIN_API_KEY` env var. The key is shown masked.
+  - **Caching:** each GSTIN result is kept for 30 days, so repeat lookups are free.
+- **Ticket photos (report book, work photos)** now open inside the app with ⟲ / ⟳ Rotate and Save, instead of a new browser tab.
+- Env (optional): `GSTIN_API_KEY`, `GSTIN_API_URL` (default `https://www.gstinapi.in`).

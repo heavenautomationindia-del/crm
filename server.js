@@ -706,6 +706,9 @@ app.patch('/api/customers/:id', need('customer_edit'), wrap(async (req, res) => 
   if (b.company !== undefined) { const n = String(b.company || '').trim().slice(0, 120) || null; if (n !== c.company) { add('company', n); ch.push(`company → ${n || '—'}`); } }
   if (b.phone !== undefined) { const n = String(b.phone || '').trim(); if (digits(n).length < 7) return res.status(400).json({ error: 'Enter a valid phone number' }); if (n !== c.phone) { add('phone', n); ch.push(`phone ${c.phone || '—'} → ${n}`); } }
   for (const k of ['email', 'address']) if (b[k] !== undefined) add(k, String(b[k] || '').trim().slice(0, 300) || null);
+  if (b.gstin !== undefined) { const g = String(b.gstin || '').trim().toUpperCase() || null; if (g && !blGstOk(g)) return res.status(400).json({ error: 'GSTIN should look like 33ABCDE1234F1Z5' }); if (g !== c.gstin) { add('gstin', g); ch.push(`GSTIN → ${g || '—'}`); } }
+  if (b.state !== undefined) add('state', blState(b.state) || null);
+  for (const k of ['city', 'pincode']) if (b[k] !== undefined) add(k, String(b[k] || '').trim().slice(0, 60) || null);
   if (!set.length) return res.json({ ok: true });
   await q(`UPDATE customers SET ${set.join(',')} WHERE id=$1`, val);
   if (ch.length) for (const sv of (await q(`SELECT id FROM services WHERE customer_id=$1 AND status NOT IN ('Resolved','Cancelled')`, [c.id])).rows) await log(sv.id, req.user.name, 'Customer edited: ' + ch.join(', '));
@@ -3033,6 +3036,7 @@ async function initWC() {
     vendor_back_on DATE, vendor_charge NUMERIC(14,2) DEFAULT 0, charge_type TEXT, customer_charge NUMERIC(14,2) DEFAULT 0, received NUMERIC(14,2) DEFAULT 0, cancel_reason TEXT, cancel_where TEXT,
     converted_service_id INT, history JSONB DEFAULT '[]', created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now(), closed_at TIMESTAMPTZ);
   CREATE INDEX IF NOT EXISTS idx_wc_status ON wc_cases(status);
+  ALTER TABLE wc_vendors ADD COLUMN IF NOT EXISTS gstin TEXT; ALTER TABLE wc_vendors ADD COLUMN IF NOT EXISTS state TEXT; ALTER TABLE wc_vendors ADD COLUMN IF NOT EXISTS pincode TEXT;
   CREATE TABLE IF NOT EXISTS wc_media (id SERIAL PRIMARY KEY, case_id INT REFERENCES wc_cases(id) ON DELETE CASCADE, kind TEXT, mime TEXT, data BYTEA, duration INT, uploaded_by TEXT, created_at TIMESTAMPTZ DEFAULT now());
   CREATE TABLE IF NOT EXISTS wc_payments (id SERIAL PRIMARY KEY, case_id INT REFERENCES wc_cases(id) ON DELETE CASCADE, vendor_id INT REFERENCES wc_vendors(id), dir TEXT, amount NUMERIC(14,2) NOT NULL, mode TEXT, account TEXT, note TEXT, by_name TEXT, paid_on DATE DEFAULT CURRENT_DATE, created_at TIMESTAMPTZ DEFAULT now());`);
   if (!(await q(`SELECT 1 FROM settings WHERE k='wc_perm_v1'`)).rows.length) {   // admins who handle services get Warranty & service once
@@ -3227,13 +3231,17 @@ app.get('/api/wc-vendors', wcVendorNeed, wrap(async (req, res) => {
 app.post('/api/wc-vendors', wcVendorNeed, wrap(async (req, res) => {
   const b = req.body || {}, t = (k, n = 300) => String(b[k] || '').trim().slice(0, n) || null;
   if (!t('name', 120)) return res.status(400).json({ error: 'Enter the vendor name' });
-  const r = (await q(`INSERT INTO wc_vendors(name,company,phone,address,handles,notes,opening_bal) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`, [t('name', 120), t('company', 120), t('phone', 30), t('address', 500), t('handles', 300), t('notes', 1000), money(b.opening_bal)])).rows[0];
+  if (!blGstOk((t('gstin', 15) || '').toUpperCase())) return res.status(400).json({ error: 'GSTIN looks wrong — check the 15 characters' });
+  const r = (await q(`INSERT INTO wc_vendors(name,company,phone,address,handles,notes,opening_bal,gstin,state,pincode) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, [t('name', 120), t('company', 120), t('phone', 30), t('address', 500), t('handles', 300), t('notes', 1000), money(b.opening_bal), (t('gstin', 15) || '').toUpperCase() || null, blState(t('state', 60)) || t('state', 60), t('pincode', 10)])).rows[0];
   res.json({ ok: true, id: r.id });
 }));
 app.patch('/api/wc-vendors/:id', wcVendorNeed, wrap(async (req, res) => {
   const b = req.body || {}, set = {};
   for (const k of ['name', 'company', 'phone', 'address', 'handles', 'notes']) if (b[k] !== undefined) set[k] = String(b[k] || '').trim().slice(0, 500) || null;
+  if (set.gstin === undefined && b.gstin !== undefined) set.gstin = String(b.gstin || '').trim().toUpperCase().slice(0, 15) || null;
+  if (b.state !== undefined) set.state = blState(b.state) || String(b.state || '').trim().slice(0, 60) || null; if (b.pincode !== undefined) set.pincode = String(b.pincode || '').trim().slice(0, 10) || null;
   if (set.name === null) return res.status(400).json({ error: 'Enter the vendor name' });
+  if (!blGstOk(set.gstin)) return res.status(400).json({ error: 'GSTIN looks wrong — check the 15 characters' });
   if (b.opening_bal !== undefined) set.opening_bal = money(b.opening_bal); if (b.active !== undefined) set.active = !!b.active;
   const ks = Object.keys(set); if (ks.length) await q(`UPDATE wc_vendors SET ${ks.map((k, i) => `${k}=$${i + 2}`).join(',')} WHERE id=$1`, [+req.params.id, ...ks.map(k => set[k])]);
   res.json({ ok: true });
@@ -3250,6 +3258,57 @@ app.post('/api/wc-vendors/:id/payments', wcVendorNeed, wrap(async (req, res) => 
   const acc = BANKS.includes(b.account) ? b.account : null; if (!acc) return res.status(400).json({ error: 'Choose the account' });
   await q(`INSERT INTO wc_payments(vendor_id,dir,amount,mode,account,note,by_name) VALUES($1,'vendor',$2,$3,$4,$5,$6)`, [+req.params.id, amt, b.mode === 'Bank' ? 'Bank' : 'Cash', acc, String(b.note || '').slice(0, 300) || null, req.user.name]);
   res.json({ ok: true });
+}));
+
+// ===================== GSTIN lookup (auto-fill party details) =====================
+const GST_RE = /^[0-9]{2}[A-Z0-9]{10}[0-9A-Z][Z1-9A-Z][0-9A-Z]$/;
+const GST_CH = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+const gstSum = g => { let t = 0; for (let i = 0; i < 14; i++) { const v = GST_CH.indexOf(g[i]) * (i % 2 ? 2 : 1); t += Math.floor(v / 36) + (v % 36); } return GST_CH[(36 - (t % 36)) % 36]; };
+const gstOk = v => { const g = String(v || '').trim().toUpperCase(); return g.length === 15 && /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(g) && gstSum(g) === g[14]; };
+let GSTKEY = '';
+const gstKey = () => process.env.GSTIN_API_KEY || GSTKEY;
+async function initGST() {
+  await q(`CREATE TABLE IF NOT EXISTS gst_cache (gstin TEXT PRIMARY KEY, data JSONB, at TIMESTAMPTZ DEFAULT now())`);
+  const r = (await q(`SELECT v FROM settings WHERE k='gst_api_key'`)).rows[0]; GSTKEY = r ? String(r.v || '') : '';
+}
+const gstOffline = g => { const st = (BL_STATES.find(x => x[0] === g.slice(0, 2)) || [])[1] || null; return { gstin: g, state: st, state_code: g.slice(0, 2), pan: g.slice(2, 12) }; };
+const gstShape = (g, d) => {   // provider record → our party fields
+  d = d || {}; const pick = (...k) => { for (const x of k) { const v = d[x]; if (v && typeof v === 'string' && v.trim()) return v.trim(); } return null; };
+  let addr = d.address; if (addr && typeof addr === 'object') addr = [addr.building_number || addr.bno, addr.building_name || addr.bnm, addr.floor || addr.flno, addr.street || addr.st, addr.location || addr.loc, addr.locality, addr.city || addr.dst, addr.district].filter(Boolean).join(', ');
+  addr = addr ? String(addr).replace(/\s+/g, ' ').trim() : null;
+  const pin = pick('pincode', 'pin') || ((/\b(\d{6})\b/.exec(addr || '') || [])[1]) || null;
+  const legal = pick('legal_name', 'lgnm', 'legalName'), trade = pick('trade_name', 'tradeNam', 'tradeName');
+  const city = pick('city', 'district') || (d.address && typeof d.address === 'object' && (d.address.city || d.address.dst)) || null;
+  const off = gstOffline(g);
+  return { ...off, state: blState(pick('state', 'state_name')) || off.state, company: legal || trade, name: trade || legal, legal_name: legal, trade_name: trade, address: addr, city, pincode: pin,
+    status: pick('status', 'sts'), taxpayer_type: pick('taxpayer_type', 'dty', 'taxpayerType'), registered_on: pick('registration_date', 'rgdt') };
+};
+app.get('/api/gst/:gstin', need('billing', 'purchases', 'warranty', 'leads', 'services', 'customers'), wrap(async (req, res) => {
+  const g = String(req.params.gstin || '').trim().toUpperCase();
+  if (!GST_RE.test(g) || !gstOk(g)) return res.status(400).json({ error: 'GSTIN looks wrong — it should be 15 characters like 33AAACH1234K1Z5' });
+  const off = gstOffline(g);
+  const c = (await q(`SELECT data FROM gst_cache WHERE gstin=$1 AND at>now()-interval '30 days'`, [g])).rows[0];
+  if (c && req.query.fresh !== '1') return res.json({ ...c.data, source: 'cache' });
+  if (!gstKey()) return res.json({ ...off, source: 'offline', note: 'Only state and PAN filled. Add a GSTIN lookup key in Settings to fill the name and address too.' });
+  try {
+    const ctl = new AbortController(), tm = setTimeout(() => ctl.abort(), 12000);
+    const r = await fetch(`${process.env.GSTIN_API_URL || 'https://www.gstinapi.in'}/v1/gstin/${encodeURIComponent(g)}`, { headers: { 'x-api-key': gstKey(), accept: 'application/json' }, signal: ctl.signal });
+    clearTimeout(tm); const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.success === false) {
+      const msg = r.status === 404 ? 'No business found for this GSTIN' : r.status === 401 || r.status === 403 ? 'GSTIN lookup key is not valid — check it in Settings' : r.status === 402 ? 'GSTIN lookup credits are used up — recharge at gstinapi.in' : r.status === 429 ? 'Too many lookups — try again in a minute' : (j.error || j.message || 'GSTIN lookup failed');
+      return res.json({ ...off, source: 'offline', error: msg });
+    }
+    const out = gstShape(g, j.data || j);
+    await q(`INSERT INTO gst_cache(gstin,data,at) VALUES($1,$2,now()) ON CONFLICT (gstin) DO UPDATE SET data=$2, at=now()`, [g, out]);
+    res.json({ ...out, source: 'online', credits_remaining: j.credits_remaining ?? null });
+  } catch (e) { res.json({ ...off, source: 'offline', error: e.name === 'AbortError' ? 'GSTIN lookup timed out' : 'Could not reach the GSTIN lookup service' }); }
+}));
+app.get('/api/settings/gst', superOnly, wrap(async (req, res) => {
+  const k = gstKey(); res.json({ set: !!k, env: !!process.env.GSTIN_API_KEY, masked: k ? k.slice(0, 4) + '••••' + k.slice(-3) : '' });
+}));
+app.put('/api/settings/gst', superOnly, wrap(async (req, res) => {
+  const k = String((req.body || {}).key || '').trim().slice(0, 200);
+  await q(`INSERT INTO settings(k,v) VALUES('gst_api_key',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [k]); GSTKEY = k; res.json({ ok: true, set: !!gstKey() });
 }));
 
 // ===================== BILLING (Swipe-style): quotations, invoices, proforma, challans, credit notes, purchases, stock, expenses =====================
@@ -3812,6 +3871,19 @@ app.delete('/api/bl/expenses/:id', blBuy, wrap(async (req, res) => { await q('DE
 // ---------- dashboard & reports ----------
 const blRange = Q => { const t = new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10); return { from: /^\d{4}-\d{2}-\d{2}$/.test(Q.from) ? Q.from : t.slice(0, 8) + '01', to: /^\d{4}-\d{2}-\d{2}$/.test(Q.to) ? Q.to : t }; };
 const blBrandW = (u, Q, p, alias = 'd') => { const b = u.brand_id && !isSuper(u) ? u.brand_id : +Q.brand || 0; if (!b) return 'true'; p.push(b); return `${alias}.brand_id=$${p.length}`; };
+app.get('/api/bl/counts', need('billing', 'purchases'), wrap(async (req, res) => {
+  const u = req.user, out = {}, p = [], w = [`d.status<>'Cancelled'`]; blScopeDocs(u, p, w);
+  if (req.query.brand) { p.push(+req.query.brand); w.push(`d.brand_id=$${p.length}`); }
+  for (const r of (await q(`SELECT d.type, COUNT(*)::int n FROM bl_docs d WHERE ${w.join(' AND ')} GROUP BY d.type`, p)).rows) if (can(u, blTypeNeed(r.type))) out[r.type] = r.n;
+  out.products = (await q(`SELECT COUNT(*)::int n FROM bl_products WHERE active`)).rows[0].n;
+  if (can(u, 'billing')) { const cp = [], sc = custScope(u, cp); out.bcust = (await q(`SELECT COUNT(*)::int n FROM customers c WHERE ${sc}`, cp)).rows[0].n; }
+  if (can(u, 'purchases')) {
+    out.vendors = (await q(`SELECT COUNT(*)::int n FROM bl_vendors`)).rows[0].n;
+    const ep = [], ew = [`e.exp_date>=date_trunc('month',CURRENT_DATE)`]; if (u.brand_id && !isSuper(u)) { ep.push(u.brand_id); ew.push(`e.brand_id=$1`); }
+    out.expenses = (await q(`SELECT COUNT(*)::int n FROM bl_expenses e WHERE ${ew.join(' AND ')}`, ep)).rows[0].n;
+  }
+  res.json(out);
+}));
 app.get('/api/bl/summary', need('billing', 'purchases'), wrap(async (req, res) => {
   const { from, to } = blRange(req.query), p = [from, to], bw = blBrandW(req.user, req.query, p);
   const s = (await q(`SELECT
@@ -4029,5 +4101,5 @@ app.get('/api/bl/export/:what', need('billing', 'purchases'), wrap(async (req, r
   await wb.xlsx.write(res); res.end();
 }));
 
-init().then(initChat).then(initProjects).then(initWA).then(initBL).then(initWC).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
+init().then(initGST).then(initChat).then(initProjects).then(initWA).then(initBL).then(initWC).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
   .catch(e => { console.error('DB init failed', e.message); process.exit(1); });
