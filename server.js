@@ -46,6 +46,7 @@ const PERMS = [
   { k: 'customer_edit', l: 'Edit customer name, company & phone', g: 'Actions' },
   { k: 'billing', l: 'Billing — quotations, invoices, products, stock & payments', g: 'Actions' },
   { k: 'purchases', l: 'Purchases, vendors, expenses & profit reports', g: 'Actions' },
+  { k: 'warranty', l: 'Warranty & service — material cases, W&S vendors and charges', g: 'Actions' },
   { k: 'lead_lists', l: 'Add lead sources & interests', g: 'Actions' },
   { k: 'att_team', l: 'See team attendance — who came, leave, absent, late', g: 'Attendance & pay' },
   { k: 'leave_approve', l: 'Approve leave / permission / attendance requests & mark attendance', g: 'Attendance & pay' },
@@ -679,8 +680,8 @@ const pushTo = async (uid, title, body, sid, extra = {}) => {
   await Promise.all(subs.map(s => webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload, { TTL: 86400, urgency: 'high' })
     .catch(e => (e.statusCode === 404 || e.statusCode === 410) ? q('DELETE FROM push_subs WHERE id=$1', [s.id]) : console.error('push failed', e.statusCode || e.message))));
 };
-const notify = async (ids, title, body, sid) => {
-  for (const id of [...new Set(ids)].filter(Boolean)) { await q('INSERT INTO notifications(user_id,title,body,service_id) VALUES($1,$2,$3,$4)', [id, title, body, sid]); pushTo(id, title, body, sid).catch(() => {}); }
+const notify = async (ids, title, body, sid, link) => {
+  for (const id of [...new Set(ids)].filter(Boolean)) { await q('INSERT INTO notifications(user_id,title,body,service_id,link) VALUES($1,$2,$3,$4,$5)', [id, title, body, sid || null, link || null]); pushTo(id, title, body, sid).catch(() => {}); }
 };
 // who hears about a job: the Super Admin(s) + admin staff of that job's brand (or admin staff with no brand)
 const admins = async brandId => (await q(`SELECT id FROM users WHERE active AND (role=$1 OR (role='Admin' AND (brand_id IS NULL OR brand_id=$2)))`, [SUPER, brandId || 0])).rows.map(r => r.id);
@@ -753,6 +754,7 @@ app.get('/api/dashboard', need('dashboard'), wrap(async (req, res) => {
   const one = async sql => (await q(sql, p)).rows[0];
   const k = await one(`SELECT COUNT(*)::int total,
     COUNT(*) FILTER (WHERE status='New Ticket')::int new_tickets,
+    COUNT(*) FILTER (WHERE technician_id IS NULL AND status NOT IN ('Resolved','Cancelled'))::int unassigned,
     COUNT(*) FILTER (WHERE status='Work Not Started')::int assigned,
     COUNT(*) FILTER (WHERE status='On-Process')::int on_process,
     COUNT(*) FILTER (WHERE status='Work Pending')::int pending,
@@ -781,7 +783,9 @@ app.get('/api/services/counts', wrap(async (req, res) => {
   if (search) { p.push('%' + search + '%'); const n = p.length; p.push(String(search).replace(/\D/g, '')); w.push(`(c.name ILIKE $${n} OR s.request_details ILIKE $${n} OR c.phone ILIKE $${n} OR s.ticket_no::text=$${n + 1})`); }
   if (/^\d{4}-\d{2}$/.test(req.query.month || '')) { p.push(req.query.month); w.push(`(to_char(s.submitted_on AT TIME ZONE 'Asia/Kolkata','YYYY-MM')=$${p.length} OR (s.status NOT IN ('Resolved','Cancelled') AND to_char(s.submitted_on AT TIME ZONE 'Asia/Kolkata','YYYY-MM')<$${p.length}))`); }
   const r = await q(`SELECT s.status, COUNT(*)::int n FROM services s LEFT JOIN customers c ON c.id=s.customer_id ${w.length ? 'WHERE ' + w.join(' AND ') : ''} GROUP BY s.status`, p);
-  const out = { ALL: 0 }; r.rows.forEach(x => { out[x.status] = x.n; out.ALL += x.n; }); res.json(out);
+  const out = { ALL: 0 }; r.rows.forEach(x => { out[x.status] = x.n; out.ALL += x.n; });
+  out.UNASSIGNED = (await q(`SELECT COUNT(*)::int n FROM services s LEFT JOIN customers c ON c.id=s.customer_id WHERE s.technician_id IS NULL AND s.status NOT IN ('Resolved','Cancelled')${w.length ? ' AND ' + w.join(' AND ') : ''}`, p)).rows[0].n;
+  res.json(out);
 }));
 
 app.get('/api/services', wrap(async (req, res) => {
@@ -789,7 +793,8 @@ app.get('/api/services', wrap(async (req, res) => {
   const { status, type, tech, approval, kind, brand, q: search } = req.query, w = [], p = [];
   scope(req.user, p, w);
   const add = (c, v) => { p.push(v); w.push(c.replace('?', '$' + p.length)); };
-  if (status && status !== 'ALL') add('s.status=?', status);
+  if (status === 'UNASSIGNED') w.push(`s.technician_id IS NULL AND s.status NOT IN ('Resolved','Cancelled')`);
+  else if (status && status !== 'ALL') add('s.status=?', status);
   if (type) add('s.service_type=?', type);
   if (kind) add(`COALESCE(s.kind,'Service')=?`, kind);
   if (brand && !req.user.brand_id && !isTech(req.user)) add('s.brand_id=?', +brand);
@@ -1068,6 +1073,7 @@ const WIPE = {
   notifications: 'TRUNCATE notifications RESTART IDENTITY',
   notes: 'TRUNCATE notes RESTART IDENTITY',
   whatsapp: 'TRUNCATE wa_threads, wa_messages, wa_reads RESTART IDENTITY',
+  warranty: 'TRUNCATE wc_cases, wc_media, wc_payments, wc_vendors RESTART IDENTITY CASCADE',
   billing: 'TRUNCATE bl_docs, bl_payments, bl_stock, bl_expenses, bl_products, bl_vendors RESTART IDENTITY CASCADE',
   projects: `DELETE FROM chats WHERE project_id IS NOT NULL; TRUNCATE projects, project_tasks RESTART IDENTITY`,
   chat: `DELETE FROM chats WHERE kind NOT IN ('all','project'); TRUNCATE chat_messages RESTART IDENTITY; UPDATE chat_members SET last_read=0`,
@@ -2972,6 +2978,11 @@ app.post('/api/wa/test', superOnly, wrap(async (req, res) => {   // check the ke
     try { const r = await graph(`/${c[l].phone_id}?fields=display_phone_number,verified_name,quality_rating,code_verification_status,name_status`); out[l] = { ok: true, ...r }; }
     catch (e) { out[l] = { ok: false, error: e.message }; }
   }
+  if (c.waba_id) {   // the WhatsApp account must be subscribed to this app, or Meta sends it no messages — fix it automatically
+    try { let r = await graph(`/${c.waba_id}/subscribed_apps`); let apps = (r.data || []).map(x => (x.whatsapp_business_api_data || x).name || x.id).filter(Boolean);
+      if (!(r.data || []).length) { await graph(`/${c.waba_id}/subscribed_apps`, { method: 'POST' }); r = await graph(`/${c.waba_id}/subscribed_apps`); apps = (r.data || []).map(x => (x.whatsapp_business_api_data || x).name || x.id).filter(Boolean); out.subscribed = { ok: (r.data || []).length > 0, fixed: true, apps }; }
+      else out.subscribed = { ok: true, apps }; }
+    catch (e) { out.subscribed = { ok: false, error: e.message }; } }
   if (c.waba_id) { try { const r = await graph(`/${c.waba_id}/message_templates?fields=name,status&limit=200`); out.templates = { ok: true, approved: (r.data || []).filter(x => x.status === 'APPROVED').length, total: (r.data || []).length }; } catch (e) { out.templates = { ok: false, error: e.message }; } }
   res.json(out);
 }));
@@ -3001,6 +3012,245 @@ app.get('/data-deletion', (req, res) => res.send(legalPage('Data deletion', `
 <p>You can ask ${LEGAL_CO} to delete the personal information we hold about you, including your WhatsApp conversation history with us.</p>
 <h2>How to request deletion</h2><p>Either send the message <b>DELETE MY DATA</b> to the WhatsApp number you contacted us on, or email <a href="mailto:${LEGAL_MAIL}?subject=Data%20deletion%20request">${LEGAL_MAIL}</a> with your name and phone number.</p>
 <h2>What happens next</h2><p>We confirm your identity and delete your messages and contact details within 30 days. Invoices and payment records that we must keep under Indian tax law (GST) are retained only for the legally required period and then deleted.</p>`)));
+
+// ===================== WARRANTY & SERVICE: material collected from customers, handled on site or by a W&S vendor =====================
+const WC_ST = ['New', 'In progress', 'With vendor', 'Ready', 'Converted', 'Closed', 'Cancelled'];
+const WC_OPEN = ['New', 'In progress', 'With vendor', 'Ready'];
+const BANKS_DEF = [...BANKS];
+async function loadBanks() { let v = null; try { v = JSON.parse(((await q(`SELECT v FROM settings WHERE k='banks'`)).rows[0] || {}).v || 'null'); } catch (e) { v = null; } BANKS.splice(0, BANKS.length, ...(Array.isArray(v) && v.length ? v : BANKS_DEF)); }
+app.get('/api/settings/banks', wrap(async (req, res) => res.json(BANKS)));
+app.put('/api/settings/banks', superOnly, wrap(async (req, res) => {
+  const l = [...new Set((Array.isArray((req.body || {}).banks) ? req.body.banks : []).map(x => String(x || '').trim().slice(0, 80)).filter(Boolean))].slice(0, 30);
+  if (!l.length) return res.status(400).json({ error: 'Keep at least one account' });
+  await q(`INSERT INTO settings(k,v) VALUES('banks',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [JSON.stringify(l)]); await loadBanks(); res.json({ ok: true, banks: BANKS });
+}));
+async function initWC() {
+  await loadBanks();
+  await q(`
+  CREATE TABLE IF NOT EXISTS wc_vendors (id SERIAL PRIMARY KEY, name TEXT NOT NULL, company TEXT, phone TEXT, address TEXT, handles TEXT, notes TEXT, opening_bal NUMERIC(14,2) DEFAULT 0, active BOOLEAN DEFAULT true, created_at TIMESTAMPTZ DEFAULT now());
+  CREATE TABLE IF NOT EXISTS wc_cases (id SERIAL PRIMARY KEY, service_id INT, customer_id INT, brand_id INT, item TEXT, model TEXT, serial_no TEXT, qty INT DEFAULT 1, kind TEXT, engineer_note TEXT,
+    created_by TEXT, created_by_id INT, status TEXT DEFAULT 'New', mode TEXT, handler_id INT, work_status TEXT, vendor_id INT REFERENCES wc_vendors(id), sent_on DATE, vendor_ref TEXT, vendor_status TEXT,
+    vendor_back_on DATE, vendor_charge NUMERIC(14,2) DEFAULT 0, charge_type TEXT, customer_charge NUMERIC(14,2) DEFAULT 0, received NUMERIC(14,2) DEFAULT 0, cancel_reason TEXT, cancel_where TEXT,
+    converted_service_id INT, history JSONB DEFAULT '[]', created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now(), closed_at TIMESTAMPTZ);
+  CREATE INDEX IF NOT EXISTS idx_wc_status ON wc_cases(status);
+  CREATE TABLE IF NOT EXISTS wc_media (id SERIAL PRIMARY KEY, case_id INT REFERENCES wc_cases(id) ON DELETE CASCADE, kind TEXT, mime TEXT, data BYTEA, duration INT, uploaded_by TEXT, created_at TIMESTAMPTZ DEFAULT now());
+  CREATE TABLE IF NOT EXISTS wc_payments (id SERIAL PRIMARY KEY, case_id INT REFERENCES wc_cases(id) ON DELETE CASCADE, vendor_id INT REFERENCES wc_vendors(id), dir TEXT, amount NUMERIC(14,2) NOT NULL, mode TEXT, account TEXT, note TEXT, by_name TEXT, paid_on DATE DEFAULT CURRENT_DATE, created_at TIMESTAMPTZ DEFAULT now());`);
+  if (!(await q(`SELECT 1 FROM settings WHERE k='wc_perm_v1'`)).rows.length) {   // admins who handle services get Warranty & service once
+    await q(`UPDATE users SET permissions = (SELECT ARRAY(SELECT DISTINCT unnest(permissions || ARRAY['warranty']))) WHERE role='Admin' AND 'services'=ANY(permissions)`);
+    await q(`INSERT INTO settings(k,v) VALUES('wc_perm_v1','1') ON CONFLICT (k) DO NOTHING`);
+  }
+}
+const wcCan = u => can(u, 'warranty');
+const wcPeople = async brandId => (await q(`SELECT id FROM users WHERE active AND (role=$1 OR ('warranty'=ANY(permissions) AND (brand_id IS NULL OR brand_id=$2)))`, [SUPER, brandId || 0])).rows.map(r => r.id);
+const wcMedia = (d, kinds) => { const m = /^data:([\w/+.-]+)(?:;[^,]*)?;base64,(.+)$/.exec(String(d || '')); if (!m || !kinds.test(m[1])) return null; const b = Buffer.from(m[2], 'base64'); return b.length > 8e6 ? null : { mime: m[1], buf: b }; };
+const wcScope = (u, p, w) => {
+  if (!wcCan(u)) { p.push(u.id); w.push(`(c.created_by_id=$${p.length} OR c.handler_id=$${p.length})`); }   // engineers: cases they collected or handle
+  else if (u.brand_id && !isSuper(u)) { p.push(u.brand_id); w.push(`c.brand_id=$${p.length}`); }
+};
+const WC_SEL = `SELECT c.*, 'WS-' || c.id case_no, cu.name customer, cu.phone, cu.company customer_company, cu.address, s.ticket_no, b.name brand, h.name handler, v.name vendor, v.company vendor_company,
+  (SELECT COALESCE(json_agg(json_build_object('id',m.id,'kind',m.kind,'duration',m.duration,'by',m.uploaded_by) ORDER BY m.id),'[]') FROM wc_media m WHERE m.case_id=c.id) media,
+  COALESCE((SELECT SUM(amount) FROM wc_payments y WHERE y.case_id=c.id AND y.dir='vendor'),0) vendor_paid
+  FROM wc_cases c LEFT JOIN customers cu ON cu.id=c.customer_id LEFT JOIN services s ON s.id=c.service_id LEFT JOIN brands b ON b.id=c.brand_id LEFT JOIN users h ON h.id=c.handler_id LEFT JOIN wc_vendors v ON v.id=c.vendor_id`;
+const wcLoad = async (req, res) => {
+  const p = [+req.params.id], w = ['c.id=$1']; wcScope(req.user, p, w);
+  const c = (await q(`${WC_SEL} WHERE ${w.join(' AND ')}`, p)).rows[0];
+  if (!c) { res.status(404).json({ error: 'Not found' }); return null; }
+  ['vendor_charge', 'customer_charge', 'received', 'vendor_paid'].forEach(k => c[k] = Number(c[k] || 0)); return c;
+};
+const wcLog = async (id, by, text, status) => { await q(`UPDATE wc_cases SET history = history || $2::jsonb, updated_at=now() WHERE id=$1`, [id, JSON.stringify([{ at: new Date().toISOString(), by, text, status: status || null }])]); };
+// engineer (or office) records that the customer handed over material for warranty / service
+app.post('/api/services/:id/warranty', wrap(async (req, res) => {
+  const s = await mine(req, res); if (!s) return;
+  const b = req.body || {}, photos = (Array.isArray(b.photos) ? b.photos : []).map(x => wcMedia(x, /^image\//)).filter(Boolean).slice(0, 8);
+  if (!photos.length) return res.status(400).json({ error: 'Add at least one photo of the material' });
+  const tech = isTech(req.user);
+  if (tech && s.status !== 'On-Process') return res.status(400).json({ error: 'Start the job first' });
+  const t = (k, n = 300) => String(b[k] || '').trim().slice(0, n) || null;
+  const c = (await q(`INSERT INTO wc_cases(service_id,customer_id,brand_id,item,model,serial_no,qty,engineer_note,created_by,created_by_id,history) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+    [s.id, s.customer_id, s.brand_id, t('item', 200), t('model', 120), t('serial_no', 80), Math.max(1, Math.min(999, parseInt(b.qty) || 1)), t('note', 2000), req.user.name, req.user.id,
+      JSON.stringify([{ at: new Date().toISOString(), by: req.user.name, text: 'Material received from customer', status: 'New' }])])).rows[0];
+  for (const ph of photos) await q('INSERT INTO wc_media(case_id,kind,mime,data,uploaded_by) VALUES($1,$2,$3,$4,$5)', [c.id, 'photo', ph.mime, ph.buf, req.user.name]);
+  const vo = wcMedia(b.voice, /^audio\//); if (vo) await q('INSERT INTO wc_media(case_id,kind,mime,data,duration,uploaded_by) VALUES($1,$2,$3,$4,$5,$6)', [c.id, 'voice', vo.mime, vo.buf, Math.max(0, Math.min(600, parseInt(b.duration) || 0)), req.user.name]);
+  if (tech) {   // the engineer's job is finished — the material now follows the Warranty & Service flow
+    await q(`UPDATE services SET status='Awaiting Payment', work_status='Done', work_done_on=now(), completion_note=$2, pending_reason=NULL, billing_type='Free' WHERE id=$1`, [s.id, `Material collected for warranty / service → WS-${c.id}${b.note ? ' · ' + String(b.note).slice(0, 300) : ''}`]);
+  }
+  await log(s.id, req.user.name, `🛡 Warranty / service material received → WS-${c.id}${b.item ? ' · ' + String(b.item).slice(0, 100) : ''} · ${photos.length} photo${photos.length > 1 ? 's' : ''}${vo ? ' + voice' : ''}`);
+  await notify((await wcPeople(s.brand_id)).filter(id => id !== req.user.id), '🛡 Warranty / service material received', `${req.user.name} collected ${b.item ? String(b.item).slice(0, 80) : 'material'} from ${s.customer || 'customer'} (#${s.ticket_no}) → WS-${c.id}`, null, 'wc:' + c.id);
+  res.json({ ok: true, id: c.id, case_no: 'WS-' + c.id });
+}));
+app.get('/api/wc', wrap(async (req, res) => {
+  const p = [], w = []; wcScope(req.user, p, w);
+  const st = String(req.query.status || 'open');
+  const cw = [...w], cp = [...p];
+  if (req.query.service_id) {} else if (st === 'open') { p.push(WC_OPEN); w.push(`c.status=ANY($${p.length})`); } else if (WC_ST.includes(st)) { p.push(st); w.push(`c.status=$${p.length}`); }
+  if (req.query.vendor) { p.push(+req.query.vendor); w.push(`c.vendor_id=$${p.length}`); }
+  if (req.query.service_id) { p.push(+req.query.service_id); w.push(`c.service_id=$${p.length}`); }
+  if (req.query.q) { p.push('%' + req.query.q + '%'); const n = p.length; w.push(`(c.item ILIKE $${n} OR c.serial_no ILIKE $${n} OR c.model ILIKE $${n} OR cu.name ILIKE $${n} OR cu.phone ILIKE $${n} OR ('WS-'||c.id) ILIKE $${n} OR s.ticket_no::text ILIKE $${n} OR v.name ILIKE $${n})`); }
+  const items = (await q(`${WC_SEL} ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY c.updated_at DESC LIMIT 500`, p)).rows;
+  const counts = Object.fromEntries((await q(`SELECT c.status, COUNT(*)::int n FROM wc_cases c ${cw.length ? 'WHERE ' + cw.join(' AND ') : ''} GROUP BY 1`, cp)).rows.map(r => [r.status, r.n]));
+  counts.open = WC_OPEN.reduce((t, k) => t + (counts[k] || 0), 0);
+  res.json({ items, counts, statuses: WC_ST, banks: BANKS, manage: wcCan(req.user) });
+}));
+app.get('/api/wc/:id', wrap(async (req, res) => {
+  const c = await wcLoad(req, res); if (!c) return;
+  c.payments = (await q(`SELECT *, to_char(paid_on,'YYYY-MM-DD') paid_on FROM wc_payments p WHERE case_id=$1 ORDER BY p.id`, [c.id])).rows;
+  c.manage = wcCan(req.user); c.banks = BANKS; res.json(c);
+}));
+app.get('/api/wc/media/:mid', wrap(async (req, res) => {
+  const m = (await q('SELECT * FROM wc_media WHERE id=$1', [+req.params.mid])).rows[0]; if (!m) return res.status(404).end();
+  req.params.id = m.case_id; const c = await wcLoad(req, res); if (!c) return;
+  res.setHeader('Content-Type', m.mime || 'application/octet-stream'); res.setHeader('Cache-Control', 'private, max-age=86400'); res.end(m.data);
+}));
+app.post('/api/wc/:id/media', wrap(async (req, res) => {
+  const c = await wcLoad(req, res); if (!c) return;
+  const b = req.body || {}, ph = wcMedia(b.image, /^image\//), vo = wcMedia(b.voice, /^audio\//);
+  if (!ph && !vo) return res.status(400).json({ error: 'Add a photo or a voice message' });
+  if (ph) await q('INSERT INTO wc_media(case_id,kind,mime,data,uploaded_by) VALUES($1,$2,$3,$4,$5)', [c.id, 'photo', ph.mime, ph.buf, req.user.name]);
+  if (vo) await q('INSERT INTO wc_media(case_id,kind,mime,data,duration,uploaded_by) VALUES($1,$2,$3,$4,$5,$6)', [c.id, 'voice', vo.mime, vo.buf, Math.max(0, Math.min(600, parseInt(b.duration) || 0)), req.user.name]);
+  await wcLog(c.id, req.user.name, ph ? '📷 Photo added' : '🎙 Voice message added'); res.json({ ok: true });
+}));
+// office decides how it is handled: on site (our engineer) or off site (W&S vendor); free or paid; progress
+app.patch('/api/wc/:id', wrap(async (req, res) => {
+  const c = await wcLoad(req, res); if (!c) return;
+  const b = req.body || {}, set = {}, said = [];
+  if (!wcCan(req.user)) {   // the engineer handling it on site can only move the work along
+    if (c.handler_id !== req.user.id) return res.status(403).json({ error: 'Not allowed' });
+    if (['Not started', 'Started', 'Done'].includes(b.work_status) && b.work_status !== c.work_status) { set.work_status = b.work_status; said.push('Work ' + b.work_status.toLowerCase()); if (b.work_status !== 'Not started' && c.status === 'New') set.status = 'In progress'; if (b.work_status === 'Done') set.status = 'Ready'; }
+  } else {
+    if (['Closed', 'Converted', 'Cancelled'].includes(c.status)) return res.status(400).json({ error: 'This case is ' + c.status.toLowerCase() });
+    const t = (k, n = 200) => String(b[k] ?? '').trim().slice(0, n) || null;
+    for (const k of ['item', 'model', 'serial_no']) if (b[k] !== undefined && t(k) !== c[k]) set[k] = t(k);
+    if (['Warranty', 'Service'].includes(b.kind) && b.kind !== c.kind) { set.kind = b.kind; said.push(b.kind); }
+    if (['On site', 'Off site'].includes(b.mode) && b.mode !== c.mode) { set.mode = b.mode; said.push(b.mode === 'On site' ? 'Handled on site' : 'Sent off site (vendor)'); }
+    const mode = set.mode || c.mode;
+    if (mode === 'On site') {
+      if (b.handler_id !== undefined && (+b.handler_id || null) !== c.handler_id) {
+        const h = +b.handler_id ? (await q(`SELECT id, name FROM users WHERE id=$1 AND active`, [+b.handler_id])).rows[0] : null;
+        set.handler_id = h ? h.id : null; if (h) { said.push('Engineer: ' + h.name); if (h.id !== req.user.id) await notify([h.id], '🛡 Warranty / service work for you', `WS-${c.id} · ${c.item || 'material'} · ${c.customer || ''} — handle it on site`, null, 'wc:' + c.id); }
+      }
+      if (['Not started', 'Started', 'Done'].includes(b.work_status) && b.work_status !== c.work_status) { set.work_status = b.work_status; said.push('Work ' + b.work_status.toLowerCase()); }
+      if (set.mode) { set.vendor_status = null; }
+    }
+    if (mode === 'Off site') {
+      if (b.vendor_id !== undefined && (+b.vendor_id || null) !== c.vendor_id) {
+        const v = +b.vendor_id ? (await q('SELECT id, name FROM wc_vendors WHERE id=$1', [+b.vendor_id])).rows[0] : null;
+        set.vendor_id = v ? v.id : null; if (v) said.push('Vendor: ' + v.name);
+      }
+      if (b.vendor_ref !== undefined && t('vendor_ref', 80) !== c.vendor_ref) { set.vendor_ref = t('vendor_ref', 80); if (set.vendor_ref) said.push('Docket ' + set.vendor_ref); }
+      if (/^\d{4}-\d{2}-\d{2}$/.test(b.sent_on || '')) set.sent_on = b.sent_on;
+      if (['With vendor', 'Returned to us'].includes(b.vendor_status) && b.vendor_status !== c.vendor_status) {
+        if (!(set.vendor_id || c.vendor_id)) return res.status(400).json({ error: 'Choose the vendor first' });
+        set.vendor_status = b.vendor_status; said.push(b.vendor_status === 'With vendor' ? 'Given to vendor' : 'Material returned from vendor');
+        if (b.vendor_status === 'With vendor' && !set.sent_on && !c.sent_on) set.sent_on = new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10);
+        if (b.vendor_status === 'Returned to us') set.vendor_back_on = /^\d{4}-\d{2}-\d{2}$/.test(b.vendor_back_on || '') ? b.vendor_back_on : new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10);
+      }
+      if (b.vendor_charge !== undefined && money(b.vendor_charge) !== c.vendor_charge) { set.vendor_charge = money(b.vendor_charge); said.push('Vendor charge ₹' + set.vendor_charge); }
+    }
+    if (['Free', 'Paid'].includes(b.charge_type) && b.charge_type !== c.charge_type) { set.charge_type = b.charge_type; said.push(b.charge_type === 'Free' ? 'Free for customer' : 'Paid by customer'); if (b.charge_type === 'Free') set.customer_charge = 0; }
+    if ((set.charge_type || c.charge_type) === 'Paid' && b.customer_charge !== undefined && money(b.customer_charge) !== c.customer_charge) { set.customer_charge = money(b.customer_charge); said.push('Customer charge ₹' + set.customer_charge); }
+    // case status follows what is happening
+    const vs = set.vendor_status !== undefined ? set.vendor_status : c.vendor_status, ws = set.work_status !== undefined ? set.work_status : c.work_status;
+    const nst = mode === 'Off site' ? (vs === 'With vendor' ? 'With vendor' : vs === 'Returned to us' ? 'Ready' : 'In progress') : mode === 'On site' ? (ws === 'Done' ? 'Ready' : 'In progress') : c.status;
+    if (nst !== c.status) set.status = nst;
+  }
+  const note = String(b.note || '').trim().slice(0, 1000);
+  const ks = Object.keys(set);
+  if (!ks.length && !note) return res.json({ ok: true });
+  if (ks.length) await q(`UPDATE wc_cases SET ${ks.map((k, i) => `${k}=$${i + 2}`).join(',')}, updated_at=now() WHERE id=$1`, [c.id, ...ks.map(k => set[k])]);
+  await wcLog(c.id, req.user.name, [...said, note].filter(Boolean).join(' · ') || 'Details updated', set.status);
+  if (set.status === 'Ready') await notify((await wcPeople(c.brand_id)).filter(id => id !== req.user.id), '🛡 Ready to go back to customer', `WS-${c.id} · ${c.item || 'material'} · ${c.customer || ''} is ready — convert to a service visit`, null, 'wc:' + c.id);
+  if (c.service_id && set.status) await log(c.service_id, req.user.name, `🛡 WS-${c.id}: ${set.status}${said.length ? ' · ' + said.join(' · ') : ''}`);
+  res.json({ ok: true, status: set.status || c.status });
+}));
+// money: customer pays us, or we pay the vendor
+app.post('/api/wc/:id/payments', wrap(async (req, res) => {
+  if (!wcCan(req.user)) return res.status(403).json({ error: 'Not allowed' });
+  const c = await wcLoad(req, res); if (!c) return;
+  const b = req.body || {}, amt = money(b.amount), dir = b.dir === 'vendor' ? 'vendor' : 'customer';
+  if (amt <= 0) return res.status(400).json({ error: 'Enter the amount' });
+  const mode = b.mode === 'Bank' ? 'Bank' : 'Cash', acc = BANKS.includes(b.account) ? b.account : null;
+  if (!acc) return res.status(400).json({ error: mode === 'Cash' ? 'Choose which cash account' : 'Choose which bank account' });
+  if (dir === 'customer') { const due = Math.round((c.customer_charge - c.received) * 100) / 100; if (c.charge_type !== 'Paid' || c.customer_charge <= 0) return res.status(400).json({ error: 'Set the customer charge first (Paid)' }); if (amt > due + 0.009) return res.status(400).json({ error: `Only ₹${due} is due from the customer` }); }
+  else if (!c.vendor_id) return res.status(400).json({ error: 'This case has no vendor' });
+  await q(`INSERT INTO wc_payments(case_id,vendor_id,dir,amount,mode,account,note,by_name,paid_on) VALUES($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9::date,CURRENT_DATE))`,
+    [c.id, dir === 'vendor' ? c.vendor_id : null, dir, amt, mode, acc, String(b.note || '').slice(0, 300) || null, req.user.name, /^\d{4}-\d{2}-\d{2}$/.test(b.paid_on || '') ? b.paid_on : null]);
+  if (dir === 'customer') await q('UPDATE wc_cases SET received=received+$2 WHERE id=$1', [c.id, amt]);
+  await wcLog(c.id, req.user.name, `${dir === 'vendor' ? '💸 Paid vendor' : '💰 Received from customer'} ₹${amt} · ${mode} · ${acc}`);
+  res.json({ ok: true });
+}));
+app.delete('/api/wc/payments/:pid', wrap(async (req, res) => {
+  if (!wcCan(req.user)) return res.status(403).json({ error: 'Not allowed' });
+  const y = (await q('SELECT * FROM wc_payments WHERE id=$1', [+req.params.pid])).rows[0]; if (!y) return res.status(404).json({ error: 'Not found' });
+  req.params.id = y.case_id; const c = await wcLoad(req, res); if (!c) return;
+  await q('DELETE FROM wc_payments WHERE id=$1', [y.id]); if (y.dir === 'customer') await q('UPDATE wc_cases SET received=GREATEST(0,received-$2) WHERE id=$1', [c.id, y.amount]);
+  await wcLog(c.id, req.user.name, `Payment of ₹${Number(y.amount)} removed`); res.json({ ok: true });
+}));
+// finished: make a service visit to give it back / install it, or close / cancel
+app.post('/api/wc/:id/convert', wrap(async (req, res) => {
+  if (!wcCan(req.user) || !can(req.user, 'service_create')) return res.status(403).json({ error: 'Not allowed' });
+  const c = await wcLoad(req, res); if (!c) return;
+  if (!WC_OPEN.includes(c.status)) return res.status(400).json({ error: 'This case is ' + c.status.toLowerCase() });
+  if (!c.customer_id) return res.status(400).json({ error: 'This case has no customer' });
+  const due = Math.max(0, Math.round((c.customer_charge - c.received) * 100) / 100);
+  const det = `Return ${c.item || 'material'}${c.serial_no ? ' (S/N ' + c.serial_no + ')' : ''} after ${(c.kind || 'warranty / service').toLowerCase()} — WS-${c.id}${due ? ` · collect ₹${due}` : ''}`;
+  const tn = 100000 + crypto.randomInt(899999);
+  const sv = (await q(`INSERT INTO services(ticket_no,customer_id,brand_id,service_type,visit_type,request_details,charges_applied,kind,product) VALUES($1,$2,$3,$4,'Onsite',$5,$6,'Service',$7) RETURNING id, ticket_no`,
+    [tn, c.customer_id, c.brand_id, 'Warranty / Service return', det, due, c.item])).rows[0];
+  await q('UPDATE services SET created_by=$2 WHERE id=$1', [sv.id, req.user.id]);
+  await log(sv.id, req.user.name, `Created from WS-${c.id}`);
+  await q(`UPDATE wc_cases SET status='Converted', converted_service_id=$2, closed_at=now(), updated_at=now() WHERE id=$1`, [c.id, sv.id]);
+  await wcLog(c.id, req.user.name, `Converted to service ticket #${sv.ticket_no}`, 'Converted');
+  if (c.service_id) await log(c.service_id, req.user.name, `🛡 WS-${c.id} → new service #${sv.ticket_no}`);
+  res.json({ ok: true, service_id: sv.id, ticket_no: sv.ticket_no });
+}));
+app.post('/api/wc/:id/close', wrap(async (req, res) => {
+  if (!wcCan(req.user)) return res.status(403).json({ error: 'Not allowed' });
+  const c = await wcLoad(req, res); if (!c) return;
+  if (!WC_OPEN.includes(c.status)) return res.status(400).json({ error: 'This case is ' + c.status.toLowerCase() });
+  const b = req.body || {}, cancel = b.cancel === true, reason = String(b.reason || '').trim().slice(0, 500);
+  if (cancel && !reason) return res.status(400).json({ error: 'Why is it cancelled?' });
+  const where = ['Returned to customer', 'Left with vendor', 'Returned to vendor', 'With us'].includes(b.where) ? b.where : null;
+  await q(`UPDATE wc_cases SET status=$2, cancel_reason=$3, cancel_where=$4, closed_at=now(), updated_at=now() WHERE id=$1`, [c.id, cancel ? 'Cancelled' : 'Closed', cancel ? reason : null, where]);
+  await wcLog(c.id, req.user.name, (cancel ? 'Cancelled: ' + reason : 'Closed' + (reason ? ': ' + reason : '')) + (where ? ' · material ' + where.toLowerCase() : ''), cancel ? 'Cancelled' : 'Closed');
+  if (c.service_id) await log(c.service_id, req.user.name, `🛡 WS-${c.id} ${cancel ? 'cancelled' : 'closed'}`);
+  res.json({ ok: true });
+}));
+// W&S vendors (separate from purchase vendors) with their account
+const wcVendorNeed = (req, res, next) => wcCan(req.user) ? next() : res.status(403).json({ error: 'Not allowed' });
+app.get('/api/wc-vendors', wcVendorNeed, wrap(async (req, res) => {
+  const rows = (await q(`SELECT v.*, COALESCE(x.charges,0) charges, COALESCE(x.holding,0)::int holding, COALESCE(x.cases,0)::int cases, COALESCE(y.paid,0) paid
+    FROM wc_vendors v LEFT JOIN (SELECT vendor_id, SUM(vendor_charge) charges, COUNT(*) FILTER (WHERE vendor_status='With vendor' AND status NOT IN ('Cancelled','Closed','Converted')) holding, COUNT(*) cases FROM wc_cases GROUP BY 1) x ON x.vendor_id=v.id
+    LEFT JOIN (SELECT vendor_id, SUM(amount) paid FROM wc_payments WHERE dir='vendor' GROUP BY 1) y ON y.vendor_id=v.id WHERE v.active OR $1 ORDER BY lower(v.name)`, [req.query.all === '1'])).rows;
+  rows.forEach(r => { r.balance = Math.round((Number(r.charges) + Number(r.opening_bal || 0) - Number(r.paid)) * 100) / 100; });
+  res.json(rows);
+}));
+app.post('/api/wc-vendors', wcVendorNeed, wrap(async (req, res) => {
+  const b = req.body || {}, t = (k, n = 300) => String(b[k] || '').trim().slice(0, n) || null;
+  if (!t('name', 120)) return res.status(400).json({ error: 'Enter the vendor name' });
+  const r = (await q(`INSERT INTO wc_vendors(name,company,phone,address,handles,notes,opening_bal) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`, [t('name', 120), t('company', 120), t('phone', 30), t('address', 500), t('handles', 300), t('notes', 1000), money(b.opening_bal)])).rows[0];
+  res.json({ ok: true, id: r.id });
+}));
+app.patch('/api/wc-vendors/:id', wcVendorNeed, wrap(async (req, res) => {
+  const b = req.body || {}, set = {};
+  for (const k of ['name', 'company', 'phone', 'address', 'handles', 'notes']) if (b[k] !== undefined) set[k] = String(b[k] || '').trim().slice(0, 500) || null;
+  if (set.name === null) return res.status(400).json({ error: 'Enter the vendor name' });
+  if (b.opening_bal !== undefined) set.opening_bal = money(b.opening_bal); if (b.active !== undefined) set.active = !!b.active;
+  const ks = Object.keys(set); if (ks.length) await q(`UPDATE wc_vendors SET ${ks.map((k, i) => `${k}=$${i + 2}`).join(',')} WHERE id=$1`, [+req.params.id, ...ks.map(k => set[k])]);
+  res.json({ ok: true });
+}));
+app.get('/api/wc-vendors/:id', wcVendorNeed, wrap(async (req, res) => {
+  const v = (await q('SELECT * FROM wc_vendors WHERE id=$1', [+req.params.id])).rows[0]; if (!v) return res.status(404).json({ error: 'Not found' });
+  const cases = (await q(`${WC_SEL} WHERE c.vendor_id=$1 ORDER BY c.updated_at DESC LIMIT 300`, [v.id])).rows;
+  const pays = (await q(`SELECT p.*, to_char(p.paid_on,'YYYY-MM-DD') paid_on, 'WS-' || p.case_id case_no FROM wc_payments p WHERE p.vendor_id=$1 AND p.dir='vendor' ORDER BY p.paid_on DESC, p.id DESC`, [v.id])).rows;
+  const charges = cases.reduce((t, c) => t + Number(c.vendor_charge || 0), 0), paid = pays.reduce((t, p) => t + Number(p.amount), 0);
+  res.json({ vendor: v, cases, payments: pays, charges, paid, balance: Math.round((charges + Number(v.opening_bal || 0) - paid) * 100) / 100, holding: cases.filter(c => c.vendor_status === 'With vendor' && WC_OPEN.includes(c.status)).length, banks: BANKS });
+}));
+app.post('/api/wc-vendors/:id/payments', wcVendorNeed, wrap(async (req, res) => {   // pay the vendor without picking a case
+  const b = req.body || {}, amt = money(b.amount); if (amt <= 0) return res.status(400).json({ error: 'Enter the amount' });
+  const acc = BANKS.includes(b.account) ? b.account : null; if (!acc) return res.status(400).json({ error: 'Choose the account' });
+  await q(`INSERT INTO wc_payments(vendor_id,dir,amount,mode,account,note,by_name) VALUES($1,'vendor',$2,$3,$4,$5,$6)`, [+req.params.id, amt, b.mode === 'Bank' ? 'Bank' : 'Cash', acc, String(b.note || '').slice(0, 300) || null, req.user.name]);
+  res.json({ ok: true });
+}));
 
 // ===================== BILLING (Swipe-style): quotations, invoices, proforma, challans, credit notes, purchases, stock, expenses =====================
 const ExcelJS = require('exceljs');
@@ -3041,6 +3291,11 @@ async function initBL() {
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS state TEXT;
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS pincode TEXT;
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS ship_address TEXT;
+  ALTER TABLE customers ADD COLUMN IF NOT EXISTS ship_name TEXT;
+  ALTER TABLE customers ADD COLUMN IF NOT EXISTS ship_phone TEXT;
+  ALTER TABLE customers ADD COLUMN IF NOT EXISTS ship_city TEXT;
+  ALTER TABLE customers ADD COLUMN IF NOT EXISTS ship_pincode TEXT;
+  ALTER TABLE customers ADD COLUMN IF NOT EXISTS ship_state TEXT;
   ALTER TABLE customers ADD COLUMN IF NOT EXISTS opening_bal NUMERIC(14,2) DEFAULT 0;
   CREATE TABLE IF NOT EXISTS bl_docs (id SERIAL PRIMARY KEY, type TEXT NOT NULL, brand_id INT, no TEXT, seq INT, doc_date DATE DEFAULT CURRENT_DATE, due_date DATE,
     customer_id INT, vendor_id INT, party JSONB DEFAULT '{}', pos TEXT, inter BOOLEAN DEFAULT false, items JSONB DEFAULT '[]', sub NUMERIC(14,2) DEFAULT 0, line_disc NUMERIC(14,2) DEFAULT 0,
@@ -3174,7 +3429,8 @@ app.post('/api/bl/products/:id/stock', blNeed, wrap(async (req, res) => {    // 
 // ---------- customers (billing fields) & vendors ----------
 const blCustIn = (b) => {
   const o = {}, s = (k, n = 300) => { if (b[k] !== undefined) o[k] = String(b[k] ?? '').trim().slice(0, n) || null; };
-  s('name', 120); s('company', 120); s('phone', 30); s('email', 120); s('address', 500); s('city', 80); s('pincode', 10); s('ship_address', 500);
+  s('name', 120); s('company', 120); s('phone', 30); s('email', 120); s('address', 500); s('city', 80); s('pincode', 10); s('ship_address', 500); s('ship_name', 120); s('ship_phone', 30); s('ship_city', 80); s('ship_pincode', 10);
+  if (b.ship_state !== undefined) o.ship_state = blState(b.ship_state);
   if (b.gstin !== undefined) o.gstin = String(b.gstin || '').trim().toUpperCase().slice(0, 15) || null;
   if (b.state !== undefined) o.state = blState(b.state);
   if (!o.state && o.gstin) o.state = blState(o.gstin.slice(0, 2));
@@ -3204,7 +3460,7 @@ app.patch('/api/bl/customers/:id', need('billing', 'customer_edit'), wrap(async 
 // customers with billing balances (receivable)
 app.get('/api/bl/customers', need('billing'), wrap(async (req, res) => {
   const p = ['%' + String(req.query.q || '').trim() + '%'], sc = custScope(req.user, p);
-  const rows = (await q(`SELECT c.id, c.name, c.company, c.phone, c.email, c.gstin, c.state, c.city, c.address, c.pincode, c.ship_address, COALESCE(c.opening_bal,0) opening_bal, c.brand_id, b.name brand,
+  const rows = (await q(`SELECT c.id, c.name, c.company, c.phone, c.email, c.gstin, c.state, c.city, c.address, c.pincode, c.ship_address, c.ship_name, c.ship_phone, c.ship_city, c.ship_pincode, c.ship_state, COALESCE(c.opening_bal,0) opening_bal, c.brand_id, b.name brand,
     COALESCE((SELECT SUM(d.total-d.paid-d.credited) FROM bl_docs d WHERE d.customer_id=c.id AND d.type='invoice' AND d.status<>'Cancelled'),0) inv_due,
     COALESCE((SELECT SUM(d.total) FROM bl_docs d WHERE d.customer_id=c.id AND d.type='invoice' AND d.status<>'Cancelled'),0) sales,
     COALESCE((SELECT SUM(d.total) FROM bl_docs d WHERE d.customer_id=c.id AND d.type='credit_note' AND d.against_id IS NULL AND d.status<>'Cancelled'),0) free_credit,
@@ -3221,14 +3477,14 @@ app.get('/api/bl/vendors', blBuy, wrap(async (req, res) => {
   res.json(rows);
 }));
 app.post('/api/bl/vendors', blBuy, wrap(async (req, res) => {
-  const o = blCustIn(req.body || {}); delete o.city; delete o.pincode; delete o.ship_address;
+  const o = blCustIn(req.body || {}); delete o.city; delete o.pincode; for (const k of Object.keys(o)) if (k.startsWith('ship_')) delete o[k];
   o.name = o.name || o.company; if (!o.name) return res.status(400).json({ error: 'Enter the vendor name' });
   if (!blGstOk(o.gstin)) return res.status(400).json({ error: 'GSTIN should look like 33ABCDE1234F1Z5' });
   const ks = Object.keys(o), r = (await q(`INSERT INTO bl_vendors(${ks.join(',')}) VALUES(${ks.map((_, i) => '$' + (i + 1)).join(',')}) RETURNING id`, ks.map(k => o[k]))).rows[0];
   res.json({ ok: true, id: r.id });
 }));
 app.patch('/api/bl/vendors/:id', blBuy, wrap(async (req, res) => {
-  const o = blCustIn(req.body || {}); delete o.city; delete o.pincode; delete o.ship_address; if (o.name === null) delete o.name;
+  const o = blCustIn(req.body || {}); delete o.city; delete o.pincode; for (const k of Object.keys(o)) if (k.startsWith('ship_')) delete o[k]; if (o.name === null) delete o.name;
   if (!blGstOk(o.gstin)) return res.status(400).json({ error: 'GSTIN should look like 33ABCDE1234F1Z5' });
   const ks = Object.keys(o); if (ks.length) await q(`UPDATE bl_vendors SET ${ks.map((k, i) => `${k}=$${i + 2}`).join(',')} WHERE id=$1`, [+req.params.id, ...ks.map(k => o[k])]);
   res.json({ ok: true });
@@ -3311,7 +3567,7 @@ const blParty = async (u, type, b) => {      // resolves / creates the customer 
   if (vend) {
     let v = b.vendor_id && (await q('SELECT * FROM bl_vendors WHERE id=$1', [+b.vendor_id])).rows[0];
     if (!v) { const name = String(pin.name || pin.company || '').trim(); if (!name) return { error: 'Choose or enter the vendor' };
-      const o = blCustIn(pin); delete o.city; delete o.pincode; delete o.ship_address; o.name = o.name || o.company;
+      const o = blCustIn(pin); delete o.city; delete o.pincode; for (const k of Object.keys(o)) if (k.startsWith('ship_')) delete o[k]; o.name = o.name || o.company;
       v = (await q(`INSERT INTO bl_vendors(name,company,phone,email,gstin,state,address) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`, [o.name, o.company || null, o.phone || null, o.email || null, o.gstin || null, o.state || null, o.address || null])).rows[0]; }
     return { vendor_id: v.id, party: { name: v.name, company: v.company, phone: v.phone, email: v.email, gstin: v.gstin, state: v.state, address: v.address } };
   }
@@ -3321,14 +3577,15 @@ const blParty = async (u, type, b) => {      // resolves / creates the customer 
   if (!c && o.phone && digits(o.phone).length >= 7) c = (await q(`SELECT * FROM customers WHERE right(regexp_replace(COALESCE(phone,''),'\\D','','g'),10)=$1 ORDER BY id LIMIT 1`, [digits(o.phone).slice(-10)])).rows[0];
   if (!c) {
     const name = o.name || o.company; if (!name && !o.phone) return { error: 'Choose or enter the customer' };
-    c = (await q(`INSERT INTO customers(name,company,phone,email,gstin,state,address,city,pincode,ship_address,brand_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [name || 'Customer ' + digits(o.phone).slice(-4), o.company || null, o.phone || null, o.email || null, o.gstin || null, o.state || null, o.address || null, o.city || null, o.pincode || null, o.ship_address || null, b.brand_id || null])).rows[0];
+    const nc = { name: name || 'Customer ' + digits(o.phone).slice(-4), company: o.company, phone: o.phone, email: o.email, gstin: o.gstin, state: o.state, address: o.address, city: o.city, pincode: o.pincode, ship_address: o.ship_address, ship_name: o.ship_name, ship_phone: o.ship_phone, ship_city: o.ship_city, ship_pincode: o.ship_pincode, ship_state: o.ship_state, brand_id: b.brand_id };
+    const nk = Object.keys(nc); c = (await q(`INSERT INTO customers(${nk.join(',')}) VALUES(${nk.map((_, i) => '$' + (i + 1)).join(',')}) RETURNING *`, nk.map(k => nc[k] ?? null))).rows[0];
   } else {   // fill in billing details we learnt (never overwrite what's there)
-    const fill = {}; for (const k of ['gstin', 'state', 'email', 'address', 'company', 'pincode', 'ship_address']) if (o[k] && !c[k]) fill[k] = o[k];
+    const fill = {}; for (const k of ['gstin', 'state', 'email', 'address', 'company', 'pincode', 'city']) if (o[k] && !c[k]) fill[k] = o[k];
+    for (const k of ['ship_name', 'ship_phone', 'ship_address', 'ship_city', 'ship_pincode', 'ship_state']) if (o[k] !== undefined && (o[k] || null) !== (c[k] || null)) fill[k] = o[k] || null;   // shipping follows the latest bill
     const ks = Object.keys(fill); if (ks.length) { await q(`UPDATE customers SET ${ks.map((k, i) => `${k}=$${i + 2}`).join(',')} WHERE id=$1`, [c.id, ...ks.map(k => fill[k])]); Object.assign(c, fill); }
   }
   const pick = (k) => o[k] !== undefined && o[k] !== null ? o[k] : c[k];
-  return { customer_id: c.id, party: { name: o.name || c.name, company: pick('company'), phone: pick('phone'), email: pick('email'), gstin: pick('gstin'), state: pick('state'), address: pick('address'), city: pick('city'), pincode: pick('pincode'), ship_address: pick('ship_address') } };
+  return { customer_id: c.id, party: { name: o.name || c.name, company: pick('company'), phone: pick('phone'), email: pick('email'), gstin: pick('gstin'), state: pick('state'), address: pick('address'), city: pick('city'), pincode: pick('pincode'), ship_address: pick('ship_address') , ship_name: pick('ship_name'), ship_phone: pick('ship_phone'), ship_city: pick('ship_city'), ship_pincode: pick('ship_pincode'), ship_state: pick('ship_state') } };
 };
 const blSave = async (req, res, old) => {
   const b = req.body || {}, type = old ? old.type : b.type;
@@ -3339,7 +3596,7 @@ const blSave = async (req, res, old) => {
   const brand = await blBrand(brandId); if (!brand) return res.status(400).json({ error: 'Choose the brand' });
   b.brand_id = brandId;
   const pr = await blParty(req.user, type, b); if (pr.error) return res.status(400).json({ error: pr.error });
-  const pos = blState(b.pos) || pr.party.state || brand.state || null;
+  const pos = blState(b.pos) || (pr.party.ship_address && pr.party.ship_state) || pr.party.state || brand.state || null;   // goods: place of supply = where they are delivered
   const inter = !!(brand.state && pos && pos !== brand.state);
   const pids = [...new Set((Array.isArray(b.items) ? b.items : []).map(i => +i.pid).filter(Boolean))];   // fill HSN / unit from the product when missing
   if (pids.length) { const pm = Object.fromEntries((await q('SELECT id, hsn, unit FROM bl_products WHERE id=ANY($1)', [pids])).rows.map(r => [r.id, r]));
@@ -3490,8 +3747,10 @@ const blHTML = (d, b, opts = {}) => {
   const due = br2(d.total - d.paid - d.credited);
   const logo = b.has_logo ? `<img class="logo" src="${opts.base || ''}/bl-logo/${b.id}?v=${b.v || 0}" alt="">` : '';
   const from = `<div class="fromn">${bhe(b.legal_name || b.name)}</div><div>${bhe(b.address || '').replace(/\n/g, '<br>')}</div>${b.state ? `<div>State: ${bhe(b.state)} (${blStateCode(b.state)})</div>` : ''}${b.gstin ? `<div><b>GSTIN:</b> ${bhe(b.gstin)}</div>` : ''}${b.phone ? `<div>📞 ${bhe(b.phone)}</div>` : ''}${b.email ? `<div>✉ ${bhe(b.email)}</div>` : ''}`;
-  const to = `<div class="lbl">${vend ? 'Vendor' : 'Bill to'}</div><div class="fromn">${bhe(P.company || P.name || '')}</div>${P.company && P.name && P.company !== P.name ? `<div>${bhe(P.name)}</div>` : ''}<div>${bhe(P.address || '').replace(/\n/g, '<br>')}${P.city ? ', ' + bhe(P.city) : ''}${P.pincode ? ' - ' + bhe(P.pincode) : ''}</div>${P.phone ? `<div>📞 ${bhe(P.phone)}</div>` : ''}${P.gstin ? `<div><b>GSTIN:</b> ${bhe(P.gstin)}</div>` : ''}${d.pos ? `<div>Place of supply: ${bhe(d.pos)} (${blStateCode(d.pos)})</div>` : ''}`;
-  const ship = P.ship_address ? `<div><div class="lbl">Ship to</div><div>${bhe(P.ship_address).replace(/\n/g, '<br>')}</div></div>` : '';
+  const to = `<div class="lbl">${vend ? 'Vendor' : 'Bill to · billing address'}</div><div class="fromn">${bhe(P.company || P.name || '')}</div>${P.company && P.name && P.company !== P.name ? `<div>${bhe(P.name)}</div>` : ''}<div>${bhe(P.address || '').replace(/\n/g, '<br>')}${P.city ? ', ' + bhe(P.city) : ''}${P.pincode ? ' - ' + bhe(P.pincode) : ''}</div>${P.phone ? `<div>📞 ${bhe(P.phone)}</div>` : ''}${P.state ? `<div>State: ${bhe(P.state)} (${blStateCode(P.state)})</div>` : ''}${P.gstin ? `<div><b>GSTIN:</b> ${bhe(P.gstin)}</div>` : ''}${d.pos ? `<div>Place of supply: ${bhe(d.pos)} (${blStateCode(d.pos)})</div>` : ''}`;
+  const shipOn = !vend && (P.ship_address || P.ship_name || P.ship_city);
+  const ship = vend ? '' : shipOn ? `<div><div class="lbl">Ship to</div><div class="fromn">${bhe(P.ship_name || P.company || P.name || '')}</div><div>${bhe(P.ship_address || '').replace(/\n/g, '<br>')}${P.ship_city ? ', ' + bhe(P.ship_city) : ''}${P.ship_pincode ? ' - ' + bhe(P.ship_pincode) : ''}</div>${P.ship_state ? `<div>State: ${bhe(P.ship_state)} (${blStateCode(P.ship_state)})</div>` : ''}${P.ship_phone ? `<div>📞 ${bhe(P.ship_phone)}</div>` : ''}</div>`
+    : `<div><div class="lbl">Ship to</div><div class="fromn">${bhe(P.company || P.name || '')}</div><div>${bhe(P.address || '').replace(/\n/g, '<br>')}${P.city ? ', ' + bhe(P.city) : ''}${P.pincode ? ' - ' + bhe(P.pincode) : ''}</div>${P.state ? `<div>State: ${bhe(P.state)} (${blStateCode(P.state)})</div>` : ''}<div class="ds">Same as billing address</div></div>`;
   const meta = `<table class="meta"><tr><td>${title} #</td><td><b>${bhe(d.no)}</b></td></tr><tr><td>Date</td><td>${bdIN(d.doc_date)}</td></tr>${d.due_date ? `<tr><td>${d.type === 'quotation' ? 'Valid till' : 'Due date'}</td><td>${bdIN(d.due_date)}</td></tr>` : ''}${d.ref_no ? `<tr><td>${vend ? 'Vendor bill #' : 'Reference'}</td><td>${bhe(d.ref_no)}</td></tr>` : ''}</table>`;
   const tot = `<table class="tot"><tr><td>Taxable amount</td><td class="r">${binr(d.sub)}</td></tr>${taxLines}${Number(d.charges) ? `<tr><td>${bhe(d.charges_label || 'Other charges')}</td><td class="r">${binr(d.charges)}</td></tr>` : ''}${Number(d.extra_disc) ? `<tr><td>Discount</td><td class="r">− ${binr(d.extra_disc)}</td></tr>` : ''}${Number(d.round_off) ? `<tr><td>Round off</td><td class="r">${d.round_off > 0 ? '' : '− '}${binr(Math.abs(d.round_off))}</td></tr>` : ''}<tr class="grand"><td>Total</td><td class="r">₹ ${binr(d.total)}</td></tr>${(d.type === 'invoice' || vend) && (d.paid || d.credited) ? `<tr><td>${vend ? 'Paid' : 'Received'}</td><td class="r">${binr(d.paid)}</td></tr>${d.credited ? `<tr><td>Credit notes</td><td class="r">${binr(d.credited)}</td></tr>` : ''}<tr class="due"><td>Balance due</td><td class="r">₹ ${binr(due)}</td></tr>` : ''}</table>`;
   const gstTab = !thermal && Number(d.tax_total) ? `<table class="gst"><tr><th>Tax rate</th><th class="r">Taxable</th>${d.inter ? '<th class="r">IGST</th>' : '<th class="r">CGST</th><th class="r">SGST</th>'}<th class="r">Total tax</th></tr>${Object.entries(rateRows).filter(([k]) => +k > 0).map(([k, v]) => `<tr><td>${k}%</td><td class="r">${binr(v.taxable)}</td>${d.inter ? `<td class="r">${binr(v.tax)}</td>` : `<td class="r">${binr(v.tax / 2)}</td><td class="r">${binr(v.tax / 2)}</td>`}<td class="r">${binr(v.tax)}</td></tr>`).join('')}</table>` : '';
@@ -3645,7 +3904,8 @@ const BL_FIELDS = {
   customers: { name: ['name', 'customer name', 'party name', 'contact name', 'contact person', 'customer'], company: ['company', 'company name', 'business name', 'firm name', 'organisation', 'organization', 'trade name'],
     phone: ['phone', 'mobile', 'phone number', 'mobile number', 'contact', 'contact number', 'whatsapp', 'mobile no', 'phone no', 'contact no'], email: ['email', 'email id', 'email address', 'mail'],
     gstin: ['gstin', 'gst', 'gst number', 'gstin uin', 'gst no', 'gstin number', 'gst in'], address: ['address', 'billing address', 'address line 1', 'billing address line 1', 'address 1', 'street'], city: ['city', 'billing city', 'town'],
-    state: ['state', 'billing state', 'place of supply', 'state name'], pincode: ['pincode', 'pin', 'zip', 'postal code', 'pin code', 'billing pincode'], ship_address: ['shipping address', 'shipping address line 1', 'delivery address'],
+    state: ['state', 'billing state', 'place of supply', 'state name'], pincode: ['pincode', 'pin', 'zip', 'postal code', 'pin code', 'billing pincode'], ship_address: ['shipping address', 'shipping address line 1', 'delivery address', 'ship to address'], ship_name: ['shipping name', 'ship to name', 'delivery name', 'shipping contact'], ship_phone: ['shipping phone', 'shipping mobile', 'delivery phone', 'shipping contact number'],
+    ship_city: ['shipping city', 'delivery city'], ship_state: ['shipping state', 'delivery state'], ship_pincode: ['shipping pincode', 'shipping pin code', 'shipping zip', 'delivery pincode'],
     opening_bal: ['opening balance', 'balance', 'closing balance', 'outstanding', 'balance due', 'receivable'] },
 };
 BL_FIELDS.vendors = { ...BL_FIELDS.customers, name: ['name', 'vendor name', 'supplier name', 'party name', 'contact name', 'vendor', 'supplier'], opening_bal: ['opening balance', 'balance', 'payable', 'closing balance', 'outstanding'] };
@@ -3730,7 +3990,7 @@ app.post('/api/bl/import/commit', need('billing', 'purchases'), wrap(async (req,
         o.name = o.name || o.company; if (!o.name && !o.phone) { R.skipped++; continue; }
         const ph = digits(o.phone).slice(-10);
         if (job.what === 'vendors') {
-          delete o.city; delete o.pincode; delete o.ship_address;
+          delete o.city; delete o.pincode; for (const k of Object.keys(o)) if (k.startsWith('ship_')) delete o[k];
           const ex = (ph.length >= 7 && (await q(`SELECT id FROM bl_vendors WHERE right(regexp_replace(COALESCE(phone,''),'\\D','','g'),10)=$1`, [ph])).rows[0]) || (o.gstin && (await q('SELECT id FROM bl_vendors WHERE gstin=$1', [o.gstin])).rows[0]) || (await q('SELECT id FROM bl_vendors WHERE lower(name)=lower($1)', [o.name])).rows[0];
           if (ex) { if (!upd) { R.skipped++; continue; } const ks = Object.keys(o); await q(`UPDATE bl_vendors SET ${ks.map((k, j) => `${k}=$${j + 2}`).join(',')} WHERE id=$1`, [ex.id, ...ks.map(k => o[k])]); R.updated++; }
           else { const ks = Object.keys(o); await q(`INSERT INTO bl_vendors(${ks.join(',')}) VALUES(${ks.map((_, j) => '$' + (j + 1)).join(',')})`, ks.map(k => o[k])); R.created++; }
@@ -3748,9 +4008,9 @@ app.post('/api/bl/import/commit', need('billing', 'purchases'), wrap(async (req,
 app.get('/api/bl/import/template/:what', need('billing', 'purchases'), wrap(async (req, res) => {
   const what = req.params.what; if (!BL_FIELDS[what]) return res.status(404).end();
   const heads = { products: ['Item Name', 'Item Code', 'HSN/SAC', 'Unit', 'Selling Price', 'Purchase Price', 'GST %', 'Category', 'Opening Stock', 'Low Stock Alert', 'Description', 'Type (Product/Service)'],
-    customers: ['Name', 'Company Name', 'Phone', 'Email', 'GSTIN', 'Billing Address', 'City', 'State', 'Pincode', 'Shipping Address', 'Opening Balance'],
+    customers: ['Name', 'Company Name', 'Phone', 'Email', 'GSTIN', 'Billing Address', 'City', 'State', 'Pincode', 'Shipping Name', 'Shipping Phone', 'Shipping Address', 'Shipping City', 'Shipping State', 'Shipping Pincode', 'Opening Balance'],
     vendors: ['Name', 'Company Name', 'Phone', 'Email', 'GSTIN', 'Address', 'State', 'Opening Balance'] }[what];
-  const ex = { products: ['CCTV Camera 2MP', 'CAM-2MP', '8525', 'Nos', 2400, 1650, 18, 'CCTV', 10, 2, 'Dome camera with night vision', 'Product'], customers: ['Ravi Kumar', 'Ravi Traders', '9876543210', 'ravi@example.com', '33ABCDE1234F1Z5', '12 Anna Salai', 'Chennai', 'Tamil Nadu', '600002', '', 0], vendors: ['Suresh', 'ABC Distributors', '9876500000', '', '33AAACA1234B1Z2', 'Ambattur, Chennai', 'Tamil Nadu', 0] }[what];
+  const ex = { products: ['CCTV Camera 2MP', 'CAM-2MP', '8525', 'Nos', 2400, 1650, 18, 'CCTV', 10, 2, 'Dome camera with night vision', 'Product'], customers: ['Ravi Kumar', 'Ravi Traders', '9876543210', 'ravi@example.com', '33ABCDE1234F1Z5', '12 Anna Salai', 'Chennai', 'Tamil Nadu', '600002', 'Site supervisor', '9876500011', 'Plot 4, OMR', 'Chennai', 'Tamil Nadu', '600097', 0], vendors: ['Suresh', 'ABC Distributors', '9876500000', '', '33AAACA1234B1Z2', 'Ambattur, Chennai', 'Tamil Nadu', 0] }[what];
   const wb = new ExcelJS.Workbook(), ws = wb.addWorksheet(what); ws.addRow(heads); ws.addRow(ex); ws.getRow(1).font = { bold: true }; ws.columns.forEach(c => c.width = 18);
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); res.setHeader('Content-Disposition', `attachment; filename="rago_${what}_template.xlsx"`);
   await wb.xlsx.write(res); res.end();
@@ -3760,7 +4020,7 @@ app.get('/api/bl/export/:what', need('billing', 'purchases'), wrap(async (req, r
   let cols, rows;
   if (what === 'products') { cols = [['name', 'Item Name'], ['sku', 'Item Code'], ['hsn', 'HSN/SAC'], ['unit', 'Unit'], ['price', 'Selling Price'], ['price_incl', 'Price includes tax'], ['purchase_price', 'Purchase Price'], ['tax', 'GST %'], ['category', 'Category'], ['stock', 'Stock'], ['low_stock', 'Low Stock Alert'], ['kind', 'Type'], ['description', 'Description']];
     rows = (await q('SELECT * FROM bl_products WHERE active ORDER BY lower(name)')).rows.map(r => ({ ...r, price_incl: r.price_incl ? 'Yes' : 'No', price: +r.price, purchase_price: +r.purchase_price, tax: +r.tax, stock: +r.stock, low_stock: +r.low_stock })); }
-  else if (what === 'customers') { const p = ['%'], sc = custScope(req.user, p); cols = [['name', 'Name'], ['company', 'Company Name'], ['phone', 'Phone'], ['email', 'Email'], ['gstin', 'GSTIN'], ['address', 'Billing Address'], ['city', 'City'], ['state', 'State'], ['pincode', 'Pincode'], ['ship_address', 'Shipping Address'], ['opening_bal', 'Opening Balance']];
+  else if (what === 'customers') { const p = ['%'], sc = custScope(req.user, p); cols = [['name', 'Name'], ['company', 'Company Name'], ['phone', 'Phone'], ['email', 'Email'], ['gstin', 'GSTIN'], ['address', 'Billing Address'], ['city', 'City'], ['state', 'State'], ['pincode', 'Pincode'], ['ship_name', 'Shipping Name'], ['ship_phone', 'Shipping Phone'], ['ship_address', 'Shipping Address'], ['ship_city', 'Shipping City'], ['ship_state', 'Shipping State'], ['ship_pincode', 'Shipping Pincode'], ['opening_bal', 'Opening Balance']];
     rows = (await q(`SELECT c.* FROM customers c WHERE c.name ILIKE $1 AND ${sc} ORDER BY lower(c.name)`, p)).rows.map(r => ({ ...r, opening_bal: +r.opening_bal || 0 })); }
   else if (what === 'vendors' && can(req.user, 'purchases')) { cols = [['name', 'Name'], ['company', 'Company Name'], ['phone', 'Phone'], ['email', 'Email'], ['gstin', 'GSTIN'], ['address', 'Address'], ['state', 'State'], ['opening_bal', 'Opening Balance']]; rows = (await q('SELECT * FROM bl_vendors ORDER BY lower(name)')).rows.map(r => ({ ...r, opening_bal: +r.opening_bal || 0 })); }
   else return res.status(404).json({ error: 'Unknown export' });
@@ -3769,5 +4029,5 @@ app.get('/api/bl/export/:what', need('billing', 'purchases'), wrap(async (req, r
   await wb.xlsx.write(res); res.end();
 }));
 
-init().then(initChat).then(initProjects).then(initWA).then(initBL).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
+init().then(initChat).then(initProjects).then(initWA).then(initBL).then(initWC).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
   .catch(e => { console.error('DB init failed', e.message); process.exit(1); });

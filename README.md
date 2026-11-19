@@ -191,3 +191,32 @@ A full GST billing section inside the CRM: **Billing** in the menu. It needs the
   - Ticket billing → *Make GST invoice from these lines*. It is marked paid automatically when the ticket's payment is received.
   - The customer history shows bills and dues.
 - Not included: e-invoice (IRN) and e-way bill generation, which need a GST Suvidha Provider account.
+
+## Version 16–17 — Not assigned tickets, Warranty & Service, photo rotate
+- **Not assigned**: a red tab in Service Flow, plus a dashboard tile. It lists every open ticket that has no engineer yet.
+- **Warranty & Service** (new menu, plus a *Warranty & service* switch per staff member; on for Admin staff by default):
+  1. **Engineer at the site** taps **Pending** and then chooses **⏸ Work pending** (same as before) or **🛡 Warranty / service material received**.
+     - For material received, at least **one photo is required**. A voice message, note, item and serial number are optional.
+     - The engineer's job is finished (it goes to *Awaiting Payment* as free). It is not a pending job.
+  2. **The office is notified** and the case appears under **Warranty & Service** with the engineer's photos, voice message and note.
+  3. **The office decides:**
+     - **Type:** Warranty or Service.
+     - **On site:** pick the service engineer taking care of it (they get notified), and track the work: Not started / Started / Done.
+     - **Off site:** choose a **W&S vendor** (or create one on the spot), docket / RMA number, material *With vendor* → *Returned to us*, and **vendor charges**.
+     - **Customer:** Free or Paid with the charge amount. Record money received (Cash / Bank + account).
+  4. **Finish:**
+     - **Convert to service visit** creates a new ticket for the same customer to return / install the item, with any amount still due.
+     - **Close**, or **Cancel**: give a reason and say where the material is now (returned to customer / returned to vendor / left with vendor / with us).
+  - **W&S vendors** are separate from purchase vendors. Each has an account: items with them now, total charges, payments (Cash / Bank) and balance to pay.
+  - Every step is in the case history and also on the original ticket's timeline.
+- **🏦 Bank & cash accounts** (Profile, Super Admin): edit the accounts shown when money is received or paid.
+- **Photo viewer**: ⟲ / ⟳ Rotate. *Save photo* saves the rotated version.
+
+## Version 18 — Shipping address, scrolling menu, logo fix
+- **Shipping address** for every customer:
+  - Fields: contact name, phone, address, city, pincode, state. It is set in Billing → Customers, or right on a bill, using the **Same as billing address** switch.
+  - Every quotation, invoice, proforma, challan and credit note prints **Bill to** (billing address) and **Ship to** (shipping address) side by side.
+  - When goods ship to another state, the place of supply follows the shipping state and GST changes to IGST automatically.
+  - Swipe / Excel import and export include the shipping columns.
+- **Desktop left menu scrolls** when there are more items than fit on the screen.
+- **Billing → Settings logo** now saves correctly and prints on bills.
