@@ -2711,16 +2711,25 @@ const waText = m => m.type === 'text' ? m.body : m.type === 'image' ? '📷 Phot
 // ---------- webhook (Meta calls this) ----------
 app.get('/webhook/whatsapp', wrap(async (req, res) => {
   const c = await waCfg(true);
-  if (req.query['hub.mode'] === 'subscribe' && c.verify_token && req.query['hub.verify_token'] === c.verify_token) return res.status(200).send(String(req.query['hub.challenge'] || ''));
+  if (req.query['hub.mode'] === 'subscribe' && c.verify_token && req.query['hub.verify_token'] === c.verify_token) { await waHookLog({ ok: true, why: 'Webhook verified by Meta ✓', fields: ['verify'] }); return res.status(200).send(String(req.query['hub.challenge'] || '')); }
+  await waHookLog({ ok: false, why: 'Verify token did not match — copy it again from this setup screen', fields: ['verify'] });
   res.status(403).send('Verify token does not match');
 }));
+// last webhook calls from Meta (kept in settings so the Super Admin can see what arrives)
+const waHookLog = async e => { try { const r = (await q(`SELECT v FROM settings WHERE k='wa_hooks'`)).rows[0]; let a = []; try { a = JSON.parse(r ? r.v : '[]'); } catch (x) {}
+  a.unshift({ at: new Date().toISOString(), ...e }); await q(`INSERT INTO settings(k,v) VALUES('wa_hooks',$1) ON CONFLICT (k) DO UPDATE SET v=excluded.v`, [JSON.stringify(a.slice(0, 15))]); } catch (x) { console.error('wa hook log', x.message); } };
 app.post('/webhook/whatsapp', wrap(async (req, res) => {
   const c = await waCfg();
+  const sum = (() => { const o = { fields: [], phone_ids: [], messages: 0, statuses: 0, from: [] };
+    for (const e of (req.body && req.body.entry) || []) for (const ch of e.changes || []) { o.fields.push(ch.field); const v = ch.value || {}; if (v.metadata && v.metadata.phone_number_id) o.phone_ids.push(String(v.metadata.phone_number_id)); o.messages += (v.messages || []).length; o.statuses += (v.statuses || []).length; (v.messages || []).forEach(m => o.from.push('…' + String(m.from || '').slice(-4))); }
+    o.fields = [...new Set(o.fields)]; o.phone_ids = [...new Set(o.phone_ids)]; return o; })();
   if (c.app_secret) {   // only accept messages signed by Meta
     const sig = String(req.headers['x-hub-signature-256'] || ''), exp = 'sha256=' + crypto.createHmac('sha256', c.app_secret).update(req.rawBody || Buffer.from('')).digest('hex');
-    if (sig.length !== exp.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(exp))) return res.status(401).send('bad signature');
+    if (sig.length !== exp.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(exp))) { await waHookLog({ ok: false, why: 'App secret does not match — copy it again from Meta → App settings → Basic', ...sum }); return res.status(401).send('bad signature'); }
   }
   res.sendStatus(200);   // answer Meta at once, then process
+  const known = sum.phone_ids.filter(id => [c.sales && c.sales.phone_id, c.service && c.service.phone_id].filter(Boolean).map(String).includes(id));
+  await waHookLog({ ok: !!known.length || !sum.phone_ids.length, why: !sum.fields.includes('messages') ? 'Not a message event (' + sum.fields.join(', ') + ')' : !known.length && sum.phone_ids.length ? `Phone number ID ${sum.phone_ids.join(', ')} is not the Sales or Service ID saved in setup` : sum.messages ? 'Message received ✓' : sum.statuses ? 'Delivery / read update ✓' : 'Received', ...sum });
   try { for (const e of (req.body && req.body.entry) || []) for (const ch of e.changes || []) if (ch.field === 'messages') await waIncoming(ch.value || {}); } catch (err) { console.error('wa webhook', err.message); }
 }));
 async function waIncoming(v) {
@@ -2946,6 +2955,7 @@ app.get('/api/wa/settings', superOnly, wrap(async (req, res) => {
   res.json({ token: mask(C.token), app_secret: mask(C.app_secret), verify_token: C.verify_token, waba_id: C.waba_id, sales_phone_id: C.sales.phone_id, service_phone_id: C.service.phone_id,
     sales_number: C.sales.number, service_number: C.service.number, sales_brand_id: C.sales.brand_id, service_brand_id: C.service.brand_id, auto_lead: C.auto_lead, from_env: C.from_env });
 }));
+app.get('/api/wa/hooks', superOnly, wrap(async (req, res) => { let a = []; try { a = JSON.parse(((await q(`SELECT v FROM settings WHERE k='wa_hooks'`)).rows[0] || {}).v || '[]'); } catch (e) {} res.json(a); }));
 app.put('/api/wa/settings', superOnly, wrap(async (req, res) => {
   let db = {}; try { db = JSON.parse(((await q(`SELECT v FROM settings WHERE k='wa_cfg'`)).rows[0] || {}).v || '{}'); } catch (e) { db = {}; }
   const b = req.body || {}, str = (k, max = 600) => { if (b[k] !== undefined && !/^••••/.test(String(b[k]))) db[k] = String(b[k] || '').trim().slice(0, max); };
