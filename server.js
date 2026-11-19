@@ -44,7 +44,8 @@ const PERMS = [
   { k: 'view_charges', l: 'See charges', g: 'Actions' }, { k: 'view_phone', l: 'See customer phone', g: 'Actions' },
   { k: 'types', l: 'Add issue types & job types', g: 'Actions' },
   { k: 'customer_edit', l: 'Edit customer name, company & phone', g: 'Actions' },
-  { k: 'billing', l: 'Billing — quotations, bills & payment received', g: 'Actions' },
+  { k: 'billing', l: 'Billing — quotations, invoices, products, stock & payments', g: 'Actions' },
+  { k: 'purchases', l: 'Purchases, vendors, expenses & profit reports', g: 'Actions' },
   { k: 'lead_lists', l: 'Add lead sources & interests', g: 'Actions' },
   { k: 'att_team', l: 'See team attendance — who came, leave, absent, late', g: 'Attendance & pay' },
   { k: 'leave_approve', l: 'Approve leave / permission / attendance requests & mark attendance', g: 'Attendance & pay' },
@@ -727,7 +728,9 @@ app.get('/api/customers/:id/full', need('customers', 'service_create'), wrap(asy
   let leads = [];
   if (can(req.user, 'leads')) { const lp = [digits(c.phone).slice(-10)], lw = leadScope(req.user, lp); if (lp[0].length >= 7) leads = (await q(`SELECT l.id, l.name, l.company, l.stage, l.value, l.created_at, l.follow_up FROM leads l WHERE right(regexp_replace(COALESCE(l.phone,''),'\D','','g'),10)=$1 AND ${lw} ORDER BY l.created_at DESC`, lp)).rows; }
   const discount = svc.reduce((t, s) => t + Number(s.discount || 0), 0);
-  res.json({ customer: c, services: svc, payments: pays, outstanding: out, leads,
+  const docs = can(req.user, 'billing') ? (await q(`SELECT id, type, no, to_char(doc_date,'YYYY-MM-DD') doc_date, total, paid, credited, status FROM bl_docs WHERE customer_id=$1 AND type<>'purchase' ORDER BY doc_date DESC, id DESC LIMIT 100`, [c.id])).rows : [];
+  const blDue = docs.filter(d => d.type === 'invoice' && ['Unpaid', 'Partial'].includes(d.status)).reduce((t, d) => t + Number(d.total) - Number(d.paid) - Number(d.credited), 0) + Number(c.opening_bal || 0);
+  res.json({ customer: c, services: svc, payments: pays, outstanding: out, leads, docs, bl_due: Math.round(blDue * 100) / 100,
     totals: { tickets: svc.length, open: svc.filter(s => !['Resolved', 'Cancelled'].includes(s.status)).length, paid: Math.round(paid * 100) / 100, discount, due: out.reduce((t, o) => t + o.due + o.quote, 0), with_tech: out.reduce((t, o) => t + o.with_tech, 0) } });
 }));
 app.get('/api/customers', need('customers', 'service_create'), wrap(async (req, res) => {
@@ -1027,6 +1030,7 @@ app.post('/api/services/:id/settle', need('payments'), wrap(async (req, res) => 
     await q(`INSERT INTO payments(service_id,amount,bank,note,approval,received_by,mode,actual,disc) VALUES($1,$2,$3,$4,'Approved',$5,$6,$7,$8)`, [s.id, fin, acc || cashBank, `Bill #${s.bill_no}${disc ? ` · discount ₹${disc}` : ''}`, req.user.name, mode, act, disc]);
     await q(`UPDATE services SET charges_applied=$2, discount=COALESCE(discount,0)+$3, status='Resolved', resolved_on=now(), approval='Approved' WHERE id=$1`, [s.id, act, disc]);
     await log(s.id, req.user.name, `Payment received · ${mode} ₹${fin}${disc ? ` (actual ₹${act} − discount ₹${disc})` : ''} — bill #${s.bill_no} closed`);
+    await blTicketPaid(s.id, fin, mode, acc, req.user.name);
     await notify([s.technician_id, s.helper_id], 'Job closed', `#${s.ticket_no}: customer paid the bill — work completed`, s.id);
     return res.json({ ok: true });
   }
@@ -1064,6 +1068,7 @@ const WIPE = {
   notifications: 'TRUNCATE notifications RESTART IDENTITY',
   notes: 'TRUNCATE notes RESTART IDENTITY',
   whatsapp: 'TRUNCATE wa_threads, wa_messages, wa_reads RESTART IDENTITY',
+  billing: 'TRUNCATE bl_docs, bl_payments, bl_stock, bl_expenses, bl_products, bl_vendors RESTART IDENTITY CASCADE',
   projects: `DELETE FROM chats WHERE project_id IS NOT NULL; TRUNCATE projects, project_tasks RESTART IDENTITY`,
   chat: `DELETE FROM chats WHERE kind NOT IN ('all','project'); TRUNCATE chat_messages RESTART IDENTITY; UPDATE chat_members SET last_read=0`,
   users: 'SELECT 1',   // staff logins: handled below
@@ -2961,5 +2966,798 @@ app.post('/api/wa/test', superOnly, wrap(async (req, res) => {   // check the ke
   res.json(out);
 }));
 
-init().then(initChat).then(initProjects).then(initWA).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
+// ---------- public legal pages (needed by Meta for the WhatsApp app) ----------
+const LEGAL_CO = process.env.COMPANY_NAME || 'Heaven Automation Pvt Ltd', LEGAL_MAIL = process.env.COMPANY_EMAIL || 'heavenautomationindia@gmail.com';
+const legalPage = (title, body) => `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title} · ${LEGAL_CO}</title>
+<style>body{margin:0;background:#f6f5f2;font:16px/1.65 -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#1d1d1f}main{max-width:760px;margin:0 auto;padding:40px 22px 60px}h1{font-size:30px;margin:0 0 4px}h2{font-size:19px;margin:28px 0 6px}.d{color:#777;font-size:14px}a{color:#1f6f5c}nav{display:flex;gap:16px;font-size:14px;margin-bottom:26px}</style></head>
+<body><main><nav><a href="/privacy">Privacy policy</a><a href="/terms">Terms of service</a><a href="/data-deletion">Data deletion</a></nav><h1>${title}</h1><div class="d">${LEGAL_CO} · Last updated 19 November 2026</div>${body}</main></body></html>`;
+app.get('/privacy', (req, res) => res.send(legalPage('Privacy policy', `
+<p>${LEGAL_CO} ("we", "us") uses Rago CRM, an internal business application, to manage customer enquiries, service requests, quotations, invoices and conversations with our customers, including over WhatsApp through the WhatsApp Business Platform provided by Meta.</p>
+<h2>Information we collect</h2><p>When you contact us or buy from us, we may collect your name, company name, phone number, WhatsApp profile name, email address, billing and site address, GSTIN, the messages, photos, documents and voice notes you send us, and details of the products and services you ask about or buy.</p>
+<h2>How we use it</h2><p>We use this information only to reply to your enquiries, provide quotations and invoices, schedule and complete service work, collect payments, send you updates about your order or service, and keep accounting and tax records required by law.</p>
+<h2>WhatsApp messages</h2><p>Messages you send to our business WhatsApp numbers are received through Meta's WhatsApp Business Platform and stored in our CRM so that our staff can reply. We send you business messages (for example quotations, service updates and payment reminders) and, where you have agreed, occasional offers. You can ask us to stop at any time by replying STOP.</p>
+<h2>Sharing</h2><p>We do not sell your personal data. It is accessible only to our authorised staff, and to service providers who host our systems (such as our cloud hosting provider and Meta for WhatsApp messaging) under their own privacy terms. We may disclose information when required by law.</p>
+<h2>Retention and security</h2><p>We keep your information while you are our customer and for as long as tax and accounting laws require. Access to the CRM is protected by individual staff logins.</p>
+<h2>Your rights</h2><p>You can ask us to see, correct or delete your personal information. See <a href="/data-deletion">Data deletion</a> or write to <a href="mailto:${LEGAL_MAIL}">${LEGAL_MAIL}</a>.</p>
+<h2>Contact</h2><p>${LEGAL_CO} · <a href="mailto:${LEGAL_MAIL}">${LEGAL_MAIL}</a></p>`)));
+app.get('/terms', (req, res) => res.send(legalPage('Terms of service', `
+<p>These terms apply when you communicate with ${LEGAL_CO} through our WhatsApp numbers, website links, shared quotations or invoices.</p>
+<h2>Use of our messaging</h2><p>Our WhatsApp numbers are for enquiries, orders, service requests and payments relating to our products and services. Please do not send unlawful, abusive or unrelated content.</p>
+<h2>Quotations and invoices</h2><p>Quotations are valid for the period stated on them. Prices, taxes and terms printed on a quotation or invoice apply to that order. Shared document links are meant for the recipient only.</p>
+<h2>Payments</h2><p>Payment details shown on our invoices (bank account and UPI) belong to ${LEGAL_CO}. Please confirm with us before paying to any other account.</p>
+<h2>Liability</h2><p>We take reasonable care to keep information accurate and our services available, but we are not liable for delays or interruptions caused by third-party services such as internet or messaging providers.</p>
+<h2>Contact</h2><p><a href="mailto:${LEGAL_MAIL}">${LEGAL_MAIL}</a></p>`)));
+app.get('/data-deletion', (req, res) => res.send(legalPage('Data deletion', `
+<p>You can ask ${LEGAL_CO} to delete the personal information we hold about you, including your WhatsApp conversation history with us.</p>
+<h2>How to request deletion</h2><p>Either send the message <b>DELETE MY DATA</b> to the WhatsApp number you contacted us on, or email <a href="mailto:${LEGAL_MAIL}?subject=Data%20deletion%20request">${LEGAL_MAIL}</a> with your name and phone number.</p>
+<h2>What happens next</h2><p>We confirm your identity and delete your messages and contact details within 30 days. Invoices and payment records that we must keep under Indian tax law (GST) are retained only for the legally required period and then deleted.</p>`)));
+
+// ===================== BILLING (Swipe-style): quotations, invoices, proforma, challans, credit notes, purchases, stock, expenses =====================
+const ExcelJS = require('exceljs');
+const BL_STATES = [['01','Jammu and Kashmir'],['02','Himachal Pradesh'],['03','Punjab'],['04','Chandigarh'],['05','Uttarakhand'],['06','Haryana'],['07','Delhi'],['08','Rajasthan'],['09','Uttar Pradesh'],['10','Bihar'],['11','Sikkim'],['12','Arunachal Pradesh'],['13','Nagaland'],['14','Manipur'],['15','Mizoram'],['16','Tripura'],['17','Meghalaya'],['18','Assam'],['19','West Bengal'],['20','Jharkhand'],['21','Odisha'],['22','Chhattisgarh'],['23','Madhya Pradesh'],['24','Gujarat'],['26','Dadra and Nagar Haveli and Daman and Diu'],['27','Maharashtra'],['29','Karnataka'],['30','Goa'],['31','Lakshadweep'],['32','Kerala'],['33','Tamil Nadu'],['34','Puducherry'],['35','Andaman and Nicobar Islands'],['36','Telangana'],['37','Andhra Pradesh'],['38','Ladakh'],['97','Other Territory']];
+const BL_ABBR = { JK: '01', HP: '02', PB: '03', CH: '04', UK: '05', UT: '05', HR: '06', DL: '07', RJ: '08', UP: '09', BR: '10', SK: '11', AR: '12', NL: '13', MN: '14', MZ: '15', TR: '16', ML: '17', AS: '18', WB: '19', JH: '20', OD: '21', OR: '21', CG: '22', CT: '22', MP: '23', GJ: '24', DN: '26', DD: '26', MH: '27', KA: '29', GA: '30', LD: '31', KL: '32', TN: '33', PY: '34', AN: '35', TS: '36', TG: '36', AP: '37', LA: '38' };
+const blState = v => {            // "33-Tamil Nadu", "TN", "tamil nadu", "33" → "Tamil Nadu"
+  const s = String(v || '').trim(); if (!s) return null;
+  const n = s.toLowerCase().replace(/^\d+\s*[-–:]?\s*/, '').replace(/[^a-z ]/g, '').trim();
+  let f = BL_STATES.find(x => x[1].toLowerCase().replace(/[^a-z ]/g, '') === n); if (f) return f[1];
+  const code = (/^(\d{2})/.exec(s) || [])[1] || BL_ABBR[s.toUpperCase()]; f = code && BL_STATES.find(x => x[0] === code); if (f) return f[1];
+  f = n.length > 3 && BL_STATES.find(x => x[1].toLowerCase().startsWith(n)); return f ? f[1] : null;
+};
+const blStateCode = st => (BL_STATES.find(x => x[1] === st) || [''])[0];
+const BL_TYPES = {
+  quotation: { l: 'Quotation', p: 'QT-', party: 'customer' }, invoice: { l: 'Tax Invoice', p: 'INV-', party: 'customer' },
+  proforma: { l: 'Proforma Invoice', p: 'PI-', party: 'customer' }, challan: { l: 'Delivery Challan', p: 'DC-', party: 'customer' },
+  credit_note: { l: 'Credit Note', p: 'CN-', party: 'customer' }, purchase: { l: 'Purchase', p: 'PUR-', party: 'vendor' },
+};
+const BL_MODES = ['Cash', 'UPI', 'Bank', 'Cheque', 'Card'];
+const BL_UNITS = ['Nos', 'Pcs', 'Set', 'Box', 'Mtr', 'Kg', 'Ltr', 'Hrs', 'Days', 'Job', 'Pair', 'Roll', 'Unit'];
+const BL_TAXES = [0, 0.25, 3, 5, 12, 18, 28];
+const BL_EXP_CATS = ['Rent', 'Salary', 'Electricity', 'Internet & phone', 'Travel & fuel', 'Office', 'Repairs', 'Marketing', 'Tools & materials', 'Other'];
+const br2 = v => Math.round((Number(v) || 0) * 100) / 100;
+const blNeed = need('billing'), blBuy = need('purchases');
+const blTypeNeed = t => t === 'purchase' ? 'purchases' : 'billing';
+
+async function initBL() {
+  await q(`
+  CREATE TABLE IF NOT EXISTS bl_brand (brand_id INT PRIMARY KEY, legal_name TEXT, gstin TEXT, state TEXT, address TEXT, phone TEXT, email TEXT, website TEXT,
+    bank_name TEXT, bank_account TEXT, bank_ifsc TEXT, bank_branch TEXT, upi TEXT, terms TEXT, notes TEXT, color TEXT DEFAULT '#1f6f5c', template TEXT DEFAULT 'modern',
+    default_tax NUMERIC(5,2) DEFAULT 18, round_off BOOLEAN DEFAULT true, prefixes JSONB DEFAULT '{}', next_no JSONB DEFAULT '{}', logo BYTEA, logo_mime TEXT, sign_name TEXT, updated_at TIMESTAMPTZ DEFAULT now());
+  CREATE TABLE IF NOT EXISTS bl_products (id SERIAL PRIMARY KEY, name TEXT NOT NULL, sku TEXT, hsn TEXT, unit TEXT DEFAULT 'Nos', kind TEXT DEFAULT 'product', price NUMERIC(14,2) DEFAULT 0,
+    price_incl BOOLEAN DEFAULT false, purchase_price NUMERIC(14,2) DEFAULT 0, tax NUMERIC(5,2) DEFAULT 18, category TEXT, description TEXT, stock NUMERIC(14,3) DEFAULT 0,
+    low_stock NUMERIC(14,3) DEFAULT 0, active BOOLEAN DEFAULT true, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
+  CREATE INDEX IF NOT EXISTS idx_blp_name ON bl_products(lower(name));
+  CREATE TABLE IF NOT EXISTS bl_vendors (id SERIAL PRIMARY KEY, name TEXT NOT NULL, company TEXT, phone TEXT, email TEXT, gstin TEXT, state TEXT, address TEXT, opening_bal NUMERIC(14,2) DEFAULT 0, created_at TIMESTAMPTZ DEFAULT now());
+  ALTER TABLE customers ADD COLUMN IF NOT EXISTS gstin TEXT;
+  ALTER TABLE customers ADD COLUMN IF NOT EXISTS state TEXT;
+  ALTER TABLE customers ADD COLUMN IF NOT EXISTS pincode TEXT;
+  ALTER TABLE customers ADD COLUMN IF NOT EXISTS ship_address TEXT;
+  ALTER TABLE customers ADD COLUMN IF NOT EXISTS opening_bal NUMERIC(14,2) DEFAULT 0;
+  CREATE TABLE IF NOT EXISTS bl_docs (id SERIAL PRIMARY KEY, type TEXT NOT NULL, brand_id INT, no TEXT, seq INT, doc_date DATE DEFAULT CURRENT_DATE, due_date DATE,
+    customer_id INT, vendor_id INT, party JSONB DEFAULT '{}', pos TEXT, inter BOOLEAN DEFAULT false, items JSONB DEFAULT '[]', sub NUMERIC(14,2) DEFAULT 0, line_disc NUMERIC(14,2) DEFAULT 0,
+    tax_total NUMERIC(14,2) DEFAULT 0, cgst NUMERIC(14,2) DEFAULT 0, sgst NUMERIC(14,2) DEFAULT 0, igst NUMERIC(14,2) DEFAULT 0, charges NUMERIC(14,2) DEFAULT 0, charges_label TEXT,
+    extra_disc NUMERIC(14,2) DEFAULT 0, round_off NUMERIC(8,2) DEFAULT 0, total NUMERIC(14,2) DEFAULT 0, paid NUMERIC(14,2) DEFAULT 0, credited NUMERIC(14,2) DEFAULT 0,
+    status TEXT, notes TEXT, terms TEXT, ref_id INT, ref_no TEXT, against_id INT, lead_id INT, service_id INT, share_token TEXT, template TEXT,
+    created_by INT, created_by_name TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
+  CREATE INDEX IF NOT EXISTS idx_bld_type ON bl_docs(type, doc_date DESC);
+  CREATE INDEX IF NOT EXISTS idx_bld_cust ON bl_docs(customer_id);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_bld_share ON bl_docs(share_token);
+  CREATE TABLE IF NOT EXISTS bl_payments (id SERIAL PRIMARY KEY, doc_id INT REFERENCES bl_docs(id) ON DELETE CASCADE, amount NUMERIC(14,2) NOT NULL, mode TEXT, account TEXT,
+    pay_date DATE DEFAULT CURRENT_DATE, note TEXT, by_name TEXT, created_at TIMESTAMPTZ DEFAULT now());
+  CREATE TABLE IF NOT EXISTS bl_stock (id SERIAL PRIMARY KEY, product_id INT REFERENCES bl_products(id) ON DELETE CASCADE, qty NUMERIC(14,3) NOT NULL, kind TEXT, doc_id INT, note TEXT, by_name TEXT, created_at TIMESTAMPTZ DEFAULT now());
+  CREATE INDEX IF NOT EXISTS idx_bls_prod ON bl_stock(product_id, id DESC);
+  CREATE TABLE IF NOT EXISTS bl_expenses (id SERIAL PRIMARY KEY, brand_id INT, category TEXT, amount NUMERIC(14,2) NOT NULL, tax NUMERIC(14,2) DEFAULT 0, exp_date DATE DEFAULT CURRENT_DATE,
+    mode TEXT, paid_to TEXT, note TEXT, by_name TEXT, created_at TIMESTAMPTZ DEFAULT now());`);
+  if (!(await q(`SELECT 1 FROM settings WHERE k='bl_perm_v1'`)).rows.length) {   // whoever had billing also gets purchases once
+    await q(`UPDATE users SET permissions = (SELECT ARRAY(SELECT DISTINCT unnest(permissions || ARRAY['purchases']))) WHERE 'billing'=ANY(permissions)`);
+    await q(`INSERT INTO settings(k,v) VALUES('bl_perm_v1','1') ON CONFLICT (k) DO NOTHING`);
+  }
+}
+
+// ---------- brand billing profile ----------
+const blBrand = async id => {
+  const b = (await q(`SELECT br.id, br.name, p.legal_name, p.gstin, p.state, p.address, p.phone, p.email, p.website, p.bank_name, p.bank_account, p.bank_ifsc, p.bank_branch, p.upi, p.terms, p.notes,
+    COALESCE(p.color,'#1f6f5c') color, COALESCE(p.template,'modern') template, COALESCE(p.default_tax,18) default_tax, COALESCE(p.round_off,true) round_off, COALESCE(p.prefixes,'{}') prefixes, COALESCE(p.next_no,'{}') next_no,
+    p.logo IS NOT NULL has_logo, p.sign_name, extract(epoch from p.updated_at)::bigint v FROM brands br LEFT JOIN bl_brand p ON p.brand_id=br.id WHERE br.id=$1`, [id])).rows[0];
+  if (b) { b.default_tax = Number(b.default_tax); b.prefix = t => (b.prefixes || {})[t] ?? BL_TYPES[t].p; }
+  return b;
+};
+const blUserBrand = (u, want) => u.brand_id && !isSuper(u) ? u.brand_id : (+want || null);
+const blDefBrand = async u => u.brand_id || ((await q('SELECT id FROM brands ORDER BY id LIMIT 1')).rows[0] || {}).id;
+
+app.get('/api/bl/meta', need('billing', 'purchases'), wrap(async (req, res) => {
+  const brands = [];
+  for (const r of (await q(`SELECT id FROM brands ${req.user.brand_id && !isSuper(req.user) ? 'WHERE id=' + (+req.user.brand_id) : ''} ORDER BY id`)).rows) { const b = await blBrand(r.id); delete b.prefix; b.prefixes = Object.fromEntries(Object.keys(BL_TYPES).map(t => [t, (b.prefixes || {})[t] ?? BL_TYPES[t].p])); brands.push(b); }
+  const cats = (await q(`SELECT DISTINCT category FROM bl_products WHERE category IS NOT NULL AND category<>'' ORDER BY 1`)).rows.map(r => r.category);
+  res.json({ states: BL_STATES.map(s => s[1]), types: Object.fromEntries(Object.entries(BL_TYPES).map(([k, v]) => [k, v.l])), modes: BL_MODES, units: BL_UNITS, taxes: BL_TAXES, exp_cats: BL_EXP_CATS, categories: cats, brands, banks: BANKS, my_brand: req.user.brand_id || null });
+}));
+app.put('/api/bl/brand/:id', superOnly, wrap(async (req, res) => {
+  const id = +req.params.id, b = req.body || {};
+  if (!(await q('SELECT 1 FROM brands WHERE id=$1', [id])).rows.length) return res.status(404).json({ error: 'Brand not found' });
+  const gst = String(b.gstin || '').trim().toUpperCase();
+  if (gst && !/^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]$/.test(gst)) return res.status(400).json({ error: 'GSTIN should look like 33ABCDE1234F1Z5 (15 characters)' });
+  const st = blState(b.state) || (gst ? blState(gst.slice(0, 2)) : null);
+  const txt = k => String(b[k] ?? '').trim().slice(0, 2000) || null;
+  const pre = {}, nxt = {};
+  for (const t of Object.keys(BL_TYPES)) { if (b.prefixes && b.prefixes[t] !== undefined) pre[t] = String(b.prefixes[t]).slice(0, 20); if (b.next_no && +b.next_no[t] > 0) nxt[t] = Math.floor(+b.next_no[t]); }
+  await q(`INSERT INTO bl_brand(brand_id) VALUES($1) ON CONFLICT DO NOTHING`, [id]);
+  await q(`UPDATE bl_brand SET legal_name=$2, gstin=$3, state=$4, address=$5, phone=$6, email=$7, website=$8, bank_name=$9, bank_account=$10, bank_ifsc=$11, bank_branch=$12, upi=$13, terms=$14, notes=$15,
+    color=$16, template=$17, default_tax=$18, round_off=$19, prefixes=$20, next_no=$21, sign_name=$22, updated_at=now() WHERE brand_id=$1`,
+  [id, txt('legal_name'), gst || null, st, txt('address'), txt('phone'), txt('email'), txt('website'), txt('bank_name'), txt('bank_account'), (txt('bank_ifsc') || '').toUpperCase() || null, txt('bank_branch'), txt('upi'), txt('terms'), txt('notes'),
+    /^#[0-9a-f]{6}$/i.test(b.color) ? b.color : '#1f6f5c', ['modern', 'classic', 'thermal'].includes(b.template) ? b.template : 'modern', BL_TAXES.includes(+b.default_tax) ? +b.default_tax : 18, b.round_off !== false, pre, nxt, txt('sign_name')]);
+  if (b.logo === null) await q(`UPDATE bl_brand SET logo=NULL, logo_mime=NULL WHERE brand_id=$1`, [id]);
+  else if (typeof b.logo === 'string' && b.logo.startsWith('data:image/')) {
+    const m = /^data:(image\/[\w+.-]+);base64,(.+)$/.exec(b.logo); if (!m) return res.status(400).json({ error: 'Logo must be an image' });
+    const buf = Buffer.from(m[2], 'base64'); if (buf.length > 1.5e6) return res.status(400).json({ error: 'Logo is too big — use a smaller image (under 1.5 MB)' });
+    await q(`UPDATE bl_brand SET logo=$2, logo_mime=$3 WHERE brand_id=$1`, [id, buf, m[1]]);
+  }
+  res.json({ ok: true });
+}));
+const blLogo = async (req, res) => {
+  const r = (await q('SELECT logo, logo_mime FROM bl_brand WHERE brand_id=$1', [+req.params.id])).rows[0];
+  if (!r || !r.logo) return res.status(404).end();
+  res.setHeader('Content-Type', r.logo_mime || 'image/png'); res.setHeader('Cache-Control', 'public, max-age=86400'); res.end(r.logo);
+};
+app.get('/bl-logo/:id', wrap(blLogo));   // public: shown on shared invoices
+
+// ---------- products ----------
+const blProdIn = (b, old = {}) => {
+  const o = {}, s = (k, n = 300) => b[k] !== undefined ? (o[k] = String(b[k] ?? '').trim().slice(0, n) || null) : 0;
+  if (b.name !== undefined) { o.name = String(b.name || '').trim().slice(0, 200); }
+  s('sku', 60); s('hsn', 12); s('category', 60); s('description', 1000);
+  if (b.unit !== undefined) o.unit = String(b.unit || 'Nos').trim().slice(0, 20) || 'Nos';
+  if (b.kind !== undefined) o.kind = b.kind === 'service' ? 'service' : 'product';
+  for (const k of ['price', 'purchase_price']) if (b[k] !== undefined) o[k] = br2(Math.max(0, +b[k] || 0));
+  if (b.low_stock !== undefined) o.low_stock = Math.max(0, +b.low_stock || 0);
+  if (b.tax !== undefined) o.tax = Math.max(0, Math.min(40, +b.tax || 0));
+  if (b.price_incl !== undefined) o.price_incl = !!b.price_incl;
+  if (b.active !== undefined) o.active = !!b.active;
+  return o;
+};
+const blStockMove = async (pid, qty, kind, docId, note, by) => {
+  if (!pid || !qty) return;
+  const p = (await q('SELECT kind FROM bl_products WHERE id=$1', [pid])).rows[0]; if (!p || p.kind === 'service') return;
+  await q('INSERT INTO bl_stock(product_id,qty,kind,doc_id,note,by_name) VALUES($1,$2,$3,$4,$5,$6)', [pid, qty, kind, docId || null, note || null, by || null]);
+  await q('UPDATE bl_products SET stock=stock+$2, updated_at=now() WHERE id=$1', [pid, qty]);
+};
+app.get('/api/bl/products', need('billing', 'purchases'), wrap(async (req, res) => {
+  const p = ['%' + String(req.query.q || '').trim() + '%'], w = ['(p.name ILIKE $1 OR p.sku ILIKE $1 OR p.hsn ILIKE $1 OR p.category ILIKE $1)'];
+  if (req.query.all !== '1') w.push('p.active');
+  if (req.query.low === '1') w.push(`p.kind='product' AND p.stock<=p.low_stock`);
+  if (req.query.category) { p.push(req.query.category); w.push(`p.category=$${p.length}`); }
+  const lim = Math.min(2000, +req.query.limit || 500);
+  const rows = (await q(`SELECT p.*, (SELECT COALESCE(SUM(-s.qty),0) FROM bl_stock s WHERE s.product_id=p.id AND s.kind='Sale' AND s.created_at>now()-interval '30 days') sold30
+    FROM bl_products p WHERE ${w.join(' AND ')} ORDER BY p.active DESC, lower(p.name) LIMIT ${lim}`, p)).rows;
+  const tot = (await q(`SELECT COUNT(*)::int n, COUNT(*) FILTER (WHERE kind='product' AND stock<=low_stock AND active)::int low, COALESCE(SUM(CASE WHEN kind='product' AND stock>0 THEN stock*purchase_price END),0) value FROM bl_products WHERE active`)).rows[0];
+  res.json({ items: rows, totals: tot });
+}));
+app.post('/api/bl/products', blNeed, wrap(async (req, res) => {
+  const o = blProdIn(req.body || {}); if (!o.name) return res.status(400).json({ error: 'Enter the product name' });
+  if (o.sku && (await q('SELECT 1 FROM bl_products WHERE lower(sku)=lower($1)', [o.sku])).rows.length) return res.status(409).json({ error: 'Another product already has code ' + o.sku });
+  const ks = Object.keys(o), r = (await q(`INSERT INTO bl_products(${ks.join(',')}) VALUES(${ks.map((_, i) => '$' + (i + 1)).join(',')}) RETURNING id`, ks.map(k => o[k]))).rows[0];
+  const st = +(req.body || {}).opening_stock || 0; if (st) await blStockMove(r.id, st, 'Opening', null, 'Opening stock', req.user.name);
+  res.json({ ok: true, id: r.id });
+}));
+app.patch('/api/bl/products/:id', blNeed, wrap(async (req, res) => {
+  const o = blProdIn(req.body || {}); if (o.name === '') return res.status(400).json({ error: 'Enter the product name' });
+  if (o.sku && (await q('SELECT 1 FROM bl_products WHERE lower(sku)=lower($1) AND id<>$2', [o.sku, +req.params.id])).rows.length) return res.status(409).json({ error: 'Another product already has code ' + o.sku });
+  const ks = Object.keys(o); if (ks.length) await q(`UPDATE bl_products SET ${ks.map((k, i) => `${k}=$${i + 2}`).join(',')}, updated_at=now() WHERE id=$1`, [+req.params.id, ...ks.map(k => o[k])]);
+  res.json({ ok: true });
+}));
+app.delete('/api/bl/products/:id', blNeed, wrap(async (req, res) => {    // used products are hidden, not deleted
+  const used = (await q(`SELECT 1 FROM bl_docs WHERE items @> $1::jsonb LIMIT 1`, [JSON.stringify([{ pid: +req.params.id }])])).rows.length;
+  if (used) await q('UPDATE bl_products SET active=false WHERE id=$1', [+req.params.id]); else await q('DELETE FROM bl_products WHERE id=$1', [+req.params.id]);
+  res.json({ ok: true, hidden: !!used });
+}));
+app.get('/api/bl/products/:id/stock', need('billing', 'purchases'), wrap(async (req, res) => {
+  res.json((await q(`SELECT s.*, d.no doc_no, d.type doc_type FROM bl_stock s LEFT JOIN bl_docs d ON d.id=s.doc_id WHERE s.product_id=$1 ORDER BY s.id DESC LIMIT 200`, [+req.params.id])).rows);
+}));
+app.post('/api/bl/products/:id/stock', blNeed, wrap(async (req, res) => {    // manual stock in / out / set
+  const b = req.body || {}, p = (await q('SELECT * FROM bl_products WHERE id=$1', [+req.params.id])).rows[0];
+  if (!p) return res.status(404).json({ error: 'Product not found' });
+  if (p.kind === 'service') return res.status(400).json({ error: 'Services don’t have stock' });
+  let qty = +b.qty || 0; if (b.mode === 'set') qty = (+b.qty || 0) - Number(p.stock); else if (b.mode === 'out') qty = -Math.abs(qty); else qty = Math.abs(qty);
+  if (!qty) return res.status(400).json({ error: 'Enter the quantity' });
+  await blStockMove(p.id, qty, b.mode === 'set' ? 'Adjust' : qty > 0 ? 'In' : 'Out', null, String(b.note || '').slice(0, 200), req.user.name);
+  res.json({ ok: true, stock: Number(p.stock) + qty });
+}));
+
+// ---------- customers (billing fields) & vendors ----------
+const blCustIn = (b) => {
+  const o = {}, s = (k, n = 300) => { if (b[k] !== undefined) o[k] = String(b[k] ?? '').trim().slice(0, n) || null; };
+  s('name', 120); s('company', 120); s('phone', 30); s('email', 120); s('address', 500); s('city', 80); s('pincode', 10); s('ship_address', 500);
+  if (b.gstin !== undefined) o.gstin = String(b.gstin || '').trim().toUpperCase().slice(0, 15) || null;
+  if (b.state !== undefined) o.state = blState(b.state);
+  if (!o.state && o.gstin) o.state = blState(o.gstin.slice(0, 2));
+  if (b.opening_bal !== undefined) o.opening_bal = br2(+b.opening_bal || 0);
+  return o;
+};
+const blGstOk = g => !g || /^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]$/.test(g);
+app.post('/api/bl/customers', need('billing', 'service_create', 'customer_edit'), wrap(async (req, res) => {
+  const b = req.body || {}, o = blCustIn(b);
+  o.name = o.name || o.company; if (!o.name && !o.phone) return res.status(400).json({ error: 'Enter a name or phone number' });
+  if (o.phone && digits(o.phone).length < 7) return res.status(400).json({ error: 'Enter a valid phone number' });
+  if (!blGstOk(o.gstin)) return res.status(400).json({ error: 'GSTIN should look like 33ABCDE1234F1Z5' });
+  if (o.phone) { const ex = (await q(`SELECT id, name FROM customers WHERE right(regexp_replace(COALESCE(phone,''),'\\D','','g'),10)=$1 LIMIT 1`, [digits(o.phone).slice(-10)])).rows[0]; if (ex) return res.status(409).json({ error: `${ex.name} already has this phone number`, id: ex.id }); }
+  o.name = o.name || 'Customer ' + digits(o.phone).slice(-4); o.brand_id = blUserBrand(req.user, b.brand_id) || await blDefBrand(req.user);
+  const ks = Object.keys(o), r = (await q(`INSERT INTO customers(${ks.join(',')}) VALUES(${ks.map((_, i) => '$' + (i + 1)).join(',')}) RETURNING id`, ks.map(k => o[k]))).rows[0];
+  res.json({ ok: true, id: r.id });
+}));
+app.patch('/api/bl/customers/:id', need('billing', 'customer_edit'), wrap(async (req, res) => {
+  const p = [+req.params.id], sc = custScope(req.user, p);
+  if (!(await q(`SELECT 1 FROM customers c WHERE c.id=$1 AND ${sc}`, p)).rows.length) return res.status(404).json({ error: 'Customer not found' });
+  const o = blCustIn(req.body || {}); if (o.name === null) delete o.name;
+  if (o.phone !== undefined && o.phone && digits(o.phone).length < 7) return res.status(400).json({ error: 'Enter a valid phone number' });
+  if (!blGstOk(o.gstin)) return res.status(400).json({ error: 'GSTIN should look like 33ABCDE1234F1Z5' });
+  const ks = Object.keys(o); if (ks.length) await q(`UPDATE customers SET ${ks.map((k, i) => `${k}=$${i + 2}`).join(',')} WHERE id=$1`, [+req.params.id, ...ks.map(k => o[k])]);
+  res.json({ ok: true });
+}));
+// customers with billing balances (receivable)
+app.get('/api/bl/customers', need('billing'), wrap(async (req, res) => {
+  const p = ['%' + String(req.query.q || '').trim() + '%'], sc = custScope(req.user, p);
+  const rows = (await q(`SELECT c.id, c.name, c.company, c.phone, c.email, c.gstin, c.state, c.city, c.address, c.pincode, c.ship_address, COALESCE(c.opening_bal,0) opening_bal, c.brand_id, b.name brand,
+    COALESCE((SELECT SUM(d.total-d.paid-d.credited) FROM bl_docs d WHERE d.customer_id=c.id AND d.type='invoice' AND d.status<>'Cancelled'),0) inv_due,
+    COALESCE((SELECT SUM(d.total) FROM bl_docs d WHERE d.customer_id=c.id AND d.type='invoice' AND d.status<>'Cancelled'),0) sales,
+    COALESCE((SELECT SUM(d.total) FROM bl_docs d WHERE d.customer_id=c.id AND d.type='credit_note' AND d.against_id IS NULL AND d.status<>'Cancelled'),0) free_credit,
+    (SELECT MAX(d.doc_date) FROM bl_docs d WHERE d.customer_id=c.id) last_doc
+    FROM customers c LEFT JOIN brands b ON b.id=c.brand_id WHERE (c.name ILIKE $1 OR c.phone ILIKE $1 OR c.company ILIKE $1 OR c.gstin ILIKE $1) AND ${sc}
+    ORDER BY ${req.query.sort === 'due' ? 'inv_due DESC,' : ''} lower(c.name) LIMIT ${Math.min(2000, +req.query.limit || 300)}`, p)).rows;
+  rows.forEach(r => { r.balance = br2(Number(r.inv_due) + Number(r.opening_bal) - Number(r.free_credit)); });
+  res.json(req.query.due === '1' ? rows.filter(r => r.balance > 0.5) : rows);
+}));
+app.get('/api/bl/vendors', blBuy, wrap(async (req, res) => {
+  const rows = (await q(`SELECT v.*, COALESCE((SELECT SUM(d.total-d.paid) FROM bl_docs d WHERE d.vendor_id=v.id AND d.type='purchase' AND d.status<>'Cancelled'),0)+COALESCE(v.opening_bal,0) balance,
+    COALESCE((SELECT SUM(d.total) FROM bl_docs d WHERE d.vendor_id=v.id AND d.type='purchase' AND d.status<>'Cancelled'),0) purchases
+    FROM bl_vendors v WHERE v.name ILIKE $1 OR v.phone ILIKE $1 OR v.company ILIKE $1 OR v.gstin ILIKE $1 ORDER BY lower(v.name) LIMIT 1000`, ['%' + String(req.query.q || '').trim() + '%'])).rows;
+  res.json(rows);
+}));
+app.post('/api/bl/vendors', blBuy, wrap(async (req, res) => {
+  const o = blCustIn(req.body || {}); delete o.city; delete o.pincode; delete o.ship_address;
+  o.name = o.name || o.company; if (!o.name) return res.status(400).json({ error: 'Enter the vendor name' });
+  if (!blGstOk(o.gstin)) return res.status(400).json({ error: 'GSTIN should look like 33ABCDE1234F1Z5' });
+  const ks = Object.keys(o), r = (await q(`INSERT INTO bl_vendors(${ks.join(',')}) VALUES(${ks.map((_, i) => '$' + (i + 1)).join(',')}) RETURNING id`, ks.map(k => o[k]))).rows[0];
+  res.json({ ok: true, id: r.id });
+}));
+app.patch('/api/bl/vendors/:id', blBuy, wrap(async (req, res) => {
+  const o = blCustIn(req.body || {}); delete o.city; delete o.pincode; delete o.ship_address; if (o.name === null) delete o.name;
+  if (!blGstOk(o.gstin)) return res.status(400).json({ error: 'GSTIN should look like 33ABCDE1234F1Z5' });
+  const ks = Object.keys(o); if (ks.length) await q(`UPDATE bl_vendors SET ${ks.map((k, i) => `${k}=$${i + 2}`).join(',')} WHERE id=$1`, [+req.params.id, ...ks.map(k => o[k])]);
+  res.json({ ok: true });
+}));
+app.delete('/api/bl/vendors/:id', blBuy, wrap(async (req, res) => {
+  if ((await q('SELECT 1 FROM bl_docs WHERE vendor_id=$1 LIMIT 1', [+req.params.id])).rows.length) return res.status(400).json({ error: 'This vendor has purchases — it can’t be deleted' });
+  await q('DELETE FROM bl_vendors WHERE id=$1', [+req.params.id]); res.json({ ok: true });
+}));
+// party ledger: opening balance, documents and payments with a running balance
+app.get('/api/bl/ledger/:kind/:id', need('billing', 'purchases'), wrap(async (req, res) => {
+  const vend = req.params.kind === 'vendor', id = +req.params.id;
+  if (vend && !can(req.user, 'purchases')) return res.status(403).json({ error: 'Not allowed' });
+  let party;
+  if (vend) party = (await q('SELECT * FROM bl_vendors WHERE id=$1', [id])).rows[0];
+  else { const p = [id], sc = custScope(req.user, p); party = (await q(`SELECT c.* FROM customers c WHERE c.id=$1 AND ${sc}`, p)).rows[0]; }
+  if (!party) return res.status(404).json({ error: 'Not found' });
+  const docs = (await q(`SELECT id, type, no, to_char(doc_date,'YYYY-MM-DD') d, total, paid, credited, status, against_id FROM bl_docs WHERE ${vend ? 'vendor_id' : 'customer_id'}=$1 AND type=ANY($2) AND status<>'Cancelled' ORDER BY doc_date, id`, [id, vend ? ['purchase'] : ['invoice', 'credit_note']])).rows;
+  const pays = docs.length ? (await q(`SELECT p.*, to_char(p.pay_date,'YYYY-MM-DD') d, d.no FROM bl_payments p JOIN bl_docs d ON d.id=p.doc_id WHERE p.doc_id=ANY($1) ORDER BY p.pay_date, p.id`, [docs.map(d => d.id)])).rows : [];
+  const ev = [];
+  docs.forEach(d => ev.push({ d: d.d, doc_id: d.id, what: (BL_TYPES[d.type] || {}).l + ' ' + d.no, debit: d.type === 'credit_note' ? 0 : Number(d.total), credit: d.type === 'credit_note' ? Number(d.total) : 0 }));
+  pays.forEach(p => ev.push({ d: p.d, doc_id: p.doc_id, what: `${vend ? 'Paid' : 'Received'} · ${p.mode || ''} · ${p.no}${p.note ? ' · ' + p.note : ''}`, debit: 0, credit: Number(p.amount) }));
+  ev.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : 0);
+  let bal = Number(party.opening_bal || 0); const rows = [{ d: null, what: 'Opening balance', debit: bal > 0 ? bal : 0, credit: bal < 0 ? -bal : 0, bal }];
+  ev.forEach(e => { bal = br2(bal + e.debit - e.credit); rows.push({ ...e, bal }); });
+  res.json({ party, rows, balance: bal });
+}));
+
+// ---------- documents ----------
+const blCalc = (items, inter, extraDisc, charges, roundOn) => {
+  const lines = (Array.isArray(items) ? items : []).slice(0, 200).map(i => {
+    const qty = Math.max(0, +i.qty || 0), rate = Math.max(0, +i.rate || 0), dp = Math.max(0, Math.min(100, +i.disc || 0)), tax = Math.max(0, Math.min(40, +i.tax || 0)), incl = !!i.incl;
+    const gross = qty * rate, disc = gross * dp / 100, net = gross - disc, taxable = incl ? net / (1 + tax / 100) : net, tx = taxable * tax / 100;
+    return { pid: +i.pid || null, name: String(i.name || '').trim().slice(0, 300), desc: String(i.desc || '').trim().slice(0, 1000) || undefined, hsn: String(i.hsn || '').trim().slice(0, 12) || undefined,
+      unit: String(i.unit || '').slice(0, 20) || undefined, qty, rate: br2(rate), disc: dp || undefined, tax, incl: incl || undefined, taxable: br2(taxable), tax_amt: br2(tx), amount: br2(taxable + tx), disc_amt: br2(disc) || undefined };
+  }).filter(l => l.name && l.qty > 0);
+  const sub = br2(lines.reduce((t, l) => t + l.taxable, 0)), taxT = br2(lines.reduce((t, l) => t + l.tax_amt, 0)), ld = br2(lines.reduce((t, l) => t + (l.disc_amt || 0), 0));
+  const ed = br2(Math.max(0, +extraDisc || 0)), ch = br2(Math.max(0, +charges || 0)), raw = sub + taxT + ch - ed, tot = roundOn ? Math.round(raw) : br2(raw);
+  const half = br2(taxT / 2);
+  return { lines, sub, line_disc: ld, tax_total: taxT, cgst: inter ? 0 : half, sgst: inter ? 0 : br2(taxT - half), igst: inter ? taxT : 0, charges: ch, extra_disc: ed, round_off: br2(tot - raw), total: br2(Math.max(0, tot)) };
+};
+const blStatus = d => {
+  if (d.status === 'Cancelled') return 'Cancelled';
+  if (d.type === 'invoice' || d.type === 'purchase') { const due = br2(d.total - d.paid - (d.credited || 0)); return d.total > 0 && due <= 0.009 ? 'Paid' : (d.paid > 0 || d.credited > 0) ? 'Partial' : 'Unpaid'; }
+  if (d.type === 'credit_note') return 'Issued';
+  return ['Converted', 'Accepted', 'Declined'].includes(d.status) ? d.status : 'Open';
+};
+const blScopeDocs = (u, p, w) => { if (u.brand_id && !isSuper(u)) { p.push(u.brand_id); w.push(`d.brand_id=$${p.length}`); } };
+const blLoad = async (req, res, id) => {
+  const d = (await q(`SELECT d.*, to_char(d.doc_date,'YYYY-MM-DD') doc_date, to_char(d.due_date,'YYYY-MM-DD') due_date, b.name brand FROM bl_docs d LEFT JOIN brands b ON b.id=d.brand_id WHERE d.id=$1`, [id])).rows[0];
+  if (!d) { res.status(404).json({ error: 'Document not found' }); return null; }
+  if (!can(req.user, blTypeNeed(d.type))) { res.status(403).json({ error: 'Not allowed' }); return null; }
+  if (req.user.brand_id && !isSuper(req.user) && d.brand_id !== req.user.brand_id) { res.status(403).json({ error: 'This belongs to another brand' }); return null; }
+  ['sub', 'line_disc', 'tax_total', 'cgst', 'sgst', 'igst', 'charges', 'extra_disc', 'round_off', 'total', 'paid', 'credited'].forEach(k => d[k] = Number(d[k] || 0));
+  return d;
+};
+const blNextNo = async (brandId, type) => {
+  const b = await blBrand(brandId), pre = b ? b.prefix(type) : BL_TYPES[type].p;
+  const last = (await q(`SELECT COALESCE(MAX(seq),0) n FROM bl_docs WHERE brand_id IS NOT DISTINCT FROM $1 AND type=$2`, [brandId, type])).rows[0].n;
+  const start = +((b && b.next_no || {})[type]) || 1, seq = Math.max(last + 1, start);
+  return { seq, no: pre + seq };
+};
+// stock effect of a document: invoice & challan take stock out (an invoice made from a challan doesn't take it twice), credit note & purchase bring it in
+const blStockSign = async d => {
+  if (d.status === 'Cancelled') return 0;
+  if (d.type === 'invoice') { if (d.ref_id) { const r = (await q('SELECT type FROM bl_docs WHERE id=$1', [d.ref_id])).rows[0]; if (r && r.type === 'challan') return 0; } return -1; }
+  return { challan: -1, credit_note: 1, purchase: 1 }[d.type] || 0;
+};
+const blApplyStock = async (d, by) => {
+  await (async () => { // undo what this document did before
+    const old = (await q('SELECT product_id, SUM(qty) q FROM bl_stock WHERE doc_id=$1 GROUP BY product_id', [d.id])).rows;
+    for (const o of old) if (Number(o.q)) await q('UPDATE bl_products SET stock=stock-$2 WHERE id=$1', [o.product_id, o.q]);
+    await q('DELETE FROM bl_stock WHERE doc_id=$1', [d.id]);
+  })();
+  const sg = await blStockSign(d); if (!sg) return;
+  const kind = { invoice: 'Sale', challan: 'Delivery', credit_note: 'Return', purchase: 'Purchase' }[d.type];
+  for (const l of d.items || []) if (l.pid) await blStockMove(l.pid, sg * l.qty, kind, d.id, null, by);
+};
+const blParty = async (u, type, b) => {      // resolves / creates the customer or vendor for a document
+  const pin = b.party || {}, vend = BL_TYPES[type].party === 'vendor';
+  if (vend) {
+    let v = b.vendor_id && (await q('SELECT * FROM bl_vendors WHERE id=$1', [+b.vendor_id])).rows[0];
+    if (!v) { const name = String(pin.name || pin.company || '').trim(); if (!name) return { error: 'Choose or enter the vendor' };
+      const o = blCustIn(pin); delete o.city; delete o.pincode; delete o.ship_address; o.name = o.name || o.company;
+      v = (await q(`INSERT INTO bl_vendors(name,company,phone,email,gstin,state,address) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`, [o.name, o.company || null, o.phone || null, o.email || null, o.gstin || null, o.state || null, o.address || null])).rows[0]; }
+    return { vendor_id: v.id, party: { name: v.name, company: v.company, phone: v.phone, email: v.email, gstin: v.gstin, state: v.state, address: v.address } };
+  }
+  let c = null;
+  if (b.customer_id) { const p = [+b.customer_id], sc = custScope(u, p); c = (await q(`SELECT c.* FROM customers c WHERE c.id=$1 AND ${sc}`, p)).rows[0]; }
+  const o = blCustIn(pin);
+  if (!c && o.phone && digits(o.phone).length >= 7) c = (await q(`SELECT * FROM customers WHERE right(regexp_replace(COALESCE(phone,''),'\\D','','g'),10)=$1 ORDER BY id LIMIT 1`, [digits(o.phone).slice(-10)])).rows[0];
+  if (!c) {
+    const name = o.name || o.company; if (!name && !o.phone) return { error: 'Choose or enter the customer' };
+    c = (await q(`INSERT INTO customers(name,company,phone,email,gstin,state,address,city,pincode,ship_address,brand_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [name || 'Customer ' + digits(o.phone).slice(-4), o.company || null, o.phone || null, o.email || null, o.gstin || null, o.state || null, o.address || null, o.city || null, o.pincode || null, o.ship_address || null, b.brand_id || null])).rows[0];
+  } else {   // fill in billing details we learnt (never overwrite what's there)
+    const fill = {}; for (const k of ['gstin', 'state', 'email', 'address', 'company', 'pincode', 'ship_address']) if (o[k] && !c[k]) fill[k] = o[k];
+    const ks = Object.keys(fill); if (ks.length) { await q(`UPDATE customers SET ${ks.map((k, i) => `${k}=$${i + 2}`).join(',')} WHERE id=$1`, [c.id, ...ks.map(k => fill[k])]); Object.assign(c, fill); }
+  }
+  const pick = (k) => o[k] !== undefined && o[k] !== null ? o[k] : c[k];
+  return { customer_id: c.id, party: { name: o.name || c.name, company: pick('company'), phone: pick('phone'), email: pick('email'), gstin: pick('gstin'), state: pick('state'), address: pick('address'), city: pick('city'), pincode: pick('pincode'), ship_address: pick('ship_address') } };
+};
+const blSave = async (req, res, old) => {
+  const b = req.body || {}, type = old ? old.type : b.type;
+  if (!BL_TYPES[type]) return res.status(400).json({ error: 'Unknown document type' });
+  if (!can(req.user, blTypeNeed(type))) return res.status(403).json({ error: 'Not allowed' });
+  if (old && old.status === 'Cancelled') return res.status(400).json({ error: 'This document is cancelled' });
+  const brandId = old ? old.brand_id : (blUserBrand(req.user, b.brand_id) || await blDefBrand(req.user));
+  const brand = await blBrand(brandId); if (!brand) return res.status(400).json({ error: 'Choose the brand' });
+  b.brand_id = brandId;
+  const pr = await blParty(req.user, type, b); if (pr.error) return res.status(400).json({ error: pr.error });
+  const pos = blState(b.pos) || pr.party.state || brand.state || null;
+  const inter = !!(brand.state && pos && pos !== brand.state);
+  const pids = [...new Set((Array.isArray(b.items) ? b.items : []).map(i => +i.pid).filter(Boolean))];   // fill HSN / unit from the product when missing
+  if (pids.length) { const pm = Object.fromEntries((await q('SELECT id, hsn, unit FROM bl_products WHERE id=ANY($1)', [pids])).rows.map(r => [r.id, r]));
+    b.items = b.items.map(i => { const p = pm[+i.pid]; return p ? { ...i, hsn: i.hsn || p.hsn, unit: i.unit || p.unit } : i; }); }
+  const c = blCalc(b.items, inter, b.extra_disc, b.charges, b.round_off !== undefined ? !!b.round_off : brand.round_off);
+  if (!c.lines.length) return res.status(400).json({ error: 'Add at least one item with a quantity' });
+  if (old && (type === 'invoice' || type === 'purchase') && c.total + 0.009 < old.paid + old.credited) return res.status(400).json({ error: `₹${old.paid + old.credited} is already received / credited — the total can’t be less than that` });
+  const dd = /^\d{4}-\d{2}-\d{2}$/.test(b.doc_date) ? b.doc_date : null, due = /^\d{4}-\d{2}-\d{2}$/.test(b.due_date) ? b.due_date : null;
+  let against = null;
+  if (type === 'credit_note' && b.against_id) { const a = (await q(`SELECT * FROM bl_docs WHERE id=$1 AND type='invoice' AND status<>'Cancelled'`, [+b.against_id])).rows[0];
+    if (a) { const room = br2(Number(a.total) - Number(a.paid) - Number(a.credited) + (old && old.against_id === a.id ? old.total : 0)); if (c.total > room + 0.009) return res.status(400).json({ error: `This credit note (₹${c.total}) is more than what’s still due on ${a.no} (₹${room}). Record a refund for the rest.` }); against = a.id; } }
+  const vals = { brand_id: brandId, customer_id: pr.customer_id || null, vendor_id: pr.vendor_id || null, party: JSON.stringify(pr.party), pos, inter, items: JSON.stringify(c.lines),
+    sub: c.sub, line_disc: c.line_disc, tax_total: c.tax_total, cgst: c.cgst, sgst: c.sgst, igst: c.igst, charges: c.charges, charges_label: String(b.charges_label || '').slice(0, 60) || null,
+    extra_disc: c.extra_disc, round_off: c.round_off, total: c.total, notes: String(b.notes ?? '').slice(0, 4000) || null, terms: String(b.terms ?? '').slice(0, 4000) || null,
+    ref_no: String(b.ref_no || '').slice(0, 60) || null, template: ['modern', 'classic', 'thermal'].includes(b.template) ? b.template : null, due_date: due };
+  if (dd) vals.doc_date = dd;
+  let id;
+  if (old) {
+    if (old.against_id) await q('UPDATE bl_docs SET credited=GREATEST(0,credited-$2) WHERE id=$1', [old.against_id, old.total]);
+    const ks = Object.keys(vals); await q(`UPDATE bl_docs SET ${ks.map((k, i) => `${k}=$${i + 2}`).join(',')}, against_id=$${ks.length + 2}, updated_at=now() WHERE id=$1`, [old.id, ...ks.map(k => vals[k]), against]);
+    id = old.id;
+  } else {
+    let nn = await blNextNo(brandId, type);
+    if (b.no && String(b.no).trim()) { const want = String(b.no).trim().slice(0, 40); if ((await q('SELECT 1 FROM bl_docs WHERE brand_id IS NOT DISTINCT FROM $1 AND type=$2 AND no=$3', [brandId, type, want])).rows.length) return res.status(409).json({ error: `${want} is already used` }); nn = { no: want, seq: +(/(\d+)\s*$/.exec(want) || [])[1] || nn.seq }; }
+    Object.assign(vals, { type, no: nn.no, seq: nn.seq, against_id: against, ref_id: +b.ref_id || null, lead_id: +b.lead_id || null, service_id: +b.service_id || null, status: type === 'quotation' || type === 'proforma' || type === 'challan' ? 'Open' : null,
+      created_by: req.user.id, created_by_name: req.user.name, share_token: crypto.randomBytes(12).toString('base64url') });
+    const ks = Object.keys(vals); id = (await q(`INSERT INTO bl_docs(${ks.join(',')}) VALUES(${ks.map((_, i) => '$' + (i + 1)).join(',')}) RETURNING id`, ks.map(k => vals[k]))).rows[0].id;
+    if (vals.ref_id) await q(`UPDATE bl_docs SET status='Converted', updated_at=now() WHERE id=$1 AND type IN ('quotation','proforma','challan')`, [vals.ref_id]);
+    if (vals.lead_id) await q('INSERT INTO lead_activity(lead_id,by_name,text) VALUES($1,$2,$3)', [vals.lead_id, req.user.name, `🧾 ${BL_TYPES[type].l} ${nn.no} made · ₹${c.total}`]).catch(() => {});
+    if (vals.service_id) await log(vals.service_id, req.user.name, `🧾 ${BL_TYPES[type].l} ${nn.no} made · ₹${c.total}`);
+  }
+  if (against) await q('UPDATE bl_docs SET credited=credited+$2 WHERE id=$1', [against, c.total]);
+  const d = await blLoad(req, res, id); if (!d) return;
+  await blApplyStock(d, req.user.name);
+  for (const x of [d.id, against, old && old.against_id].filter(Boolean)) { const z = await blLoad(req, res, x); if (z) await q('UPDATE bl_docs SET status=$2 WHERE id=$1', [z.id, blStatus(z)]); }
+  const fin = await blLoad(req, res, id); res.json({ ok: true, id, no: fin.no, total: fin.total, status: fin.status });
+};
+app.post('/api/bl/docs', need('billing', 'purchases'), wrap((req, res) => blSave(req, res, null)));
+app.put('/api/bl/docs/:id', need('billing', 'purchases'), wrap(async (req, res) => { const d = await blLoad(req, res, +req.params.id); if (d) await blSave(req, res, d); }));
+app.get('/api/bl/docs', need('billing', 'purchases'), wrap(async (req, res) => {
+  const p = [], w = [], Q = req.query, add = (sql, v) => { p.push(v); w.push(sql.replace('?', '$' + p.length)); };
+  const types = String(Q.type || '').split(',').filter(t => BL_TYPES[t] && can(req.user, blTypeNeed(t)));
+  if (!types.length) return res.json({ items: [], totals: {} });
+  add('d.type=ANY(?)', types); blScopeDocs(req.user, p, w);
+  if (Q.brand) add('d.brand_id=?', +Q.brand);
+  if (Q.customer_id) add('d.customer_id=?', +Q.customer_id);
+  if (Q.vendor_id) add('d.vendor_id=?', +Q.vendor_id);
+  if (Q.lead_id) add('d.lead_id=?', +Q.lead_id);
+  if (Q.service_id) add('d.service_id=?', +Q.service_id);
+  if (Q.from) add('d.doc_date>=?', Q.from); if (Q.to) add('d.doc_date<=?', Q.to);
+  if (Q.status) { if (Q.status === 'due') w.push(`d.status IN ('Unpaid','Partial')`); else if (Q.status === 'overdue') w.push(`d.status IN ('Unpaid','Partial') AND d.due_date<CURRENT_DATE`); else add('d.status=?', Q.status); }
+  if (Q.q) { p.push('%' + Q.q + '%'); const n = '$' + p.length; w.push(`(d.no ILIKE ${n} OR d.party->>'name' ILIKE ${n} OR d.party->>'company' ILIKE ${n} OR d.party->>'phone' ILIKE ${n} OR d.ref_no ILIKE ${n})`); }
+  const ws = w.join(' AND ');
+  const items = (await q(`SELECT d.id, d.type, d.no, to_char(d.doc_date,'YYYY-MM-DD') doc_date, to_char(d.due_date,'YYYY-MM-DD') due_date, d.party->>'name' party, d.party->>'company' company, d.party->>'phone' phone,
+    d.total, d.paid, d.credited, d.status, d.brand_id, b.name brand, d.customer_id, d.vendor_id, d.lead_id, d.service_id, d.ref_no, d.share_token, d.created_by_name, jsonb_array_length(d.items) lines
+    FROM bl_docs d LEFT JOIN brands b ON b.id=d.brand_id WHERE ${ws} ORDER BY d.doc_date DESC, d.id DESC LIMIT ${Math.min(1000, +Q.limit || 300)}`, p)).rows;
+  const t = (await q(`SELECT COUNT(*)::int n, COALESCE(SUM(total) FILTER (WHERE status<>'Cancelled'),0) total, COALESCE(SUM(paid) FILTER (WHERE status<>'Cancelled'),0) paid,
+    COALESCE(SUM(total-paid-credited) FILTER (WHERE status IN ('Unpaid','Partial')),0) due FROM bl_docs d WHERE ${ws}`, p)).rows[0];
+  res.json({ items, totals: t });
+}));
+app.get('/api/bl/docs/:id', need('billing', 'purchases'), wrap(async (req, res) => {
+  const d = await blLoad(req, res, +req.params.id); if (!d) return;
+  d.payments = (await q(`SELECT id, doc_id, amount, mode, account, to_char(pay_date,'YYYY-MM-DD') pay_date, note, by_name, created_at FROM bl_payments p WHERE doc_id=$1 ORDER BY p.pay_date, p.id`, [d.id])).rows;
+  d.related = (await q(`SELECT id, type, no, total, status FROM bl_docs WHERE (ref_id=$1 OR against_id=$1 OR id=$2 OR id=$3) AND id<>$1 ORDER BY id`, [d.id, d.ref_id || 0, d.against_id || 0])).rows;
+  d.due = br2(d.total - d.paid - d.credited);
+  res.json(d);
+}));
+app.post('/api/bl/docs/:id/convert', need('billing'), wrap(async (req, res) => {   // quotation / proforma / challan → invoice (or quotation → proforma / challan)
+  const d = await blLoad(req, res, +req.params.id); if (!d) return;
+  const to = (req.body || {}).to;
+  const ok = { quotation: ['invoice', 'proforma', 'challan'], proforma: ['invoice'], challan: ['invoice'] }[d.type] || [];
+  if (!ok.includes(to)) return res.status(400).json({ error: 'This can’t be converted to that' });
+  if (d.status === 'Cancelled') return res.status(400).json({ error: 'This document is cancelled' });
+  req.body = { type: to, brand_id: d.brand_id, customer_id: d.customer_id, party: d.party, pos: d.pos, items: d.items, extra_disc: d.extra_disc, charges: d.charges, charges_label: d.charges_label, notes: d.notes, terms: d.terms, ref_id: d.id, lead_id: d.lead_id, service_id: d.service_id, template: d.template };
+  await blSave(req, res, null);
+}));
+app.post('/api/bl/docs/:id/status', need('billing', 'purchases'), wrap(async (req, res) => {   // quotation accepted / declined / reopened, or cancel any document
+  const d = await blLoad(req, res, +req.params.id); if (!d) return;
+  const st = (req.body || {}).status;
+  if (st === 'Cancelled') {
+    if (d.status === 'Cancelled') return res.json({ ok: true });
+    if (d.paid > 0) return res.status(400).json({ error: 'Delete the payments on this first' });
+    if ((await q(`SELECT 1 FROM bl_docs WHERE against_id=$1 AND status<>'Cancelled'`, [d.id])).rows.length) return res.status(400).json({ error: 'Cancel the credit notes made against this first' });
+    await q(`UPDATE bl_docs SET status='Cancelled', updated_at=now() WHERE id=$1`, [d.id]);
+    if (d.against_id) { await q('UPDATE bl_docs SET credited=GREATEST(0,credited-$2) WHERE id=$1', [d.against_id, d.total]); const a = await blLoad(req, res, d.against_id); if (a) await q('UPDATE bl_docs SET status=$2 WHERE id=$1', [a.id, blStatus(a)]); }
+    if (d.ref_id) await q(`UPDATE bl_docs SET status='Open' WHERE id=$1 AND status='Converted' AND NOT EXISTS (SELECT 1 FROM bl_docs x WHERE x.ref_id=$1 AND x.status<>'Cancelled')`, [d.ref_id]);
+    d.status = 'Cancelled'; await blApplyStock(d, req.user.name);
+    return res.json({ ok: true });
+  }
+  if (!['quotation', 'proforma', 'challan'].includes(d.type) || !['Open', 'Accepted', 'Declined'].includes(st)) return res.status(400).json({ error: 'Not possible' });
+  await q('UPDATE bl_docs SET status=$2, updated_at=now() WHERE id=$1', [d.id, st]); res.json({ ok: true });
+}));
+app.post('/api/bl/docs/:id/payments', need('billing', 'purchases'), wrap(async (req, res) => {
+  const d = await blLoad(req, res, +req.params.id); if (!d) return;
+  if (!['invoice', 'purchase'].includes(d.type)) return res.status(400).json({ error: 'Payments are recorded on invoices and purchases' });
+  if (d.status === 'Cancelled') return res.status(400).json({ error: 'This document is cancelled' });
+  const b = req.body || {}, amt = br2(+b.amount || 0), due = br2(d.total - d.paid - d.credited);
+  if (amt <= 0) return res.status(400).json({ error: 'Enter the amount' });
+  if (amt > due + 0.009) return res.status(400).json({ error: `Only ₹${due} is due on this` });
+  const mode = BL_MODES.includes(b.mode) ? b.mode : 'Cash';
+  await q(`INSERT INTO bl_payments(doc_id,amount,mode,account,pay_date,note,by_name) VALUES($1,$2,$3,$4,COALESCE($5::date,CURRENT_DATE),$6,$7)`,
+    [d.id, amt, mode, BANKS.includes(b.account) ? b.account : (String(b.account || '').slice(0, 60) || null), /^\d{4}-\d{2}-\d{2}$/.test(b.pay_date) ? b.pay_date : null, String(b.note || '').slice(0, 300) || null, req.user.name]);
+  await q('UPDATE bl_docs SET paid=paid+$2, updated_at=now() WHERE id=$1', [d.id, amt]);
+  const z = await blLoad(req, res, d.id); await q('UPDATE bl_docs SET status=$2 WHERE id=$1', [d.id, blStatus(z)]);
+  res.json({ ok: true, status: blStatus(z), due: br2(z.total - z.paid - z.credited) });
+}));
+app.delete('/api/bl/payments/:id', need('billing', 'purchases'), wrap(async (req, res) => {
+  const p = (await q('SELECT * FROM bl_payments WHERE id=$1', [+req.params.id])).rows[0]; if (!p) return res.status(404).json({ error: 'Not found' });
+  const d = await blLoad(req, res, p.doc_id); if (!d) return;
+  await q('DELETE FROM bl_payments WHERE id=$1', [p.id]); await q('UPDATE bl_docs SET paid=GREATEST(0,paid-$2) WHERE id=$1', [d.id, p.amount]);
+  const z = await blLoad(req, res, d.id); await q('UPDATE bl_docs SET status=$2 WHERE id=$1', [d.id, blStatus(z)]); res.json({ ok: true });
+}));
+// a ticket's office bill was paid → the GST invoice made for that ticket gets the same payment
+async function blTicketPaid(serviceId, amount, mode, account, by) {
+  try {
+    const d = (await q(`SELECT * FROM bl_docs WHERE service_id=$1 AND type='invoice' AND status IN ('Unpaid','Partial') ORDER BY id DESC LIMIT 1`, [serviceId])).rows[0]; if (!d) return;
+    const amt = br2(Math.min(+amount || 0, Number(d.total) - Number(d.paid) - Number(d.credited))); if (amt <= 0) return;
+    await q(`INSERT INTO bl_payments(doc_id,amount,mode,account,note,by_name) VALUES($1,$2,$3,$4,'From the service ticket',$5)`, [d.id, amt, BL_MODES.includes(mode) ? mode : 'Cash', account || null, by]);
+    const t = br2(Number(d.paid) + amt), st = t + Number(d.credited) >= Number(d.total) - 0.009 ? 'Paid' : 'Partial';
+    await q('UPDATE bl_docs SET paid=$2, status=$3 WHERE id=$1', [d.id, t, st]);
+  } catch (e) { console.error('blTicketPaid', e.message); }
+}
+
+// ---------- print / share (one HTML template for the app and the customer link) ----------
+const blWords = n => {
+  const a = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+  const t = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+  const two = x => x < 20 ? a[x] : t[Math.floor(x / 10)] + (x % 10 ? ' ' + a[x % 10] : '');
+  const three = x => (x >= 100 ? a[Math.floor(x / 100)] + ' Hundred' + (x % 100 ? ' ' : '') : '') + (x % 100 ? two(x % 100) : '');
+  const w = x => { if (!x) return 'Zero'; let s = ''; const cr = Math.floor(x / 1e7), la = Math.floor(x / 1e5) % 100, th = Math.floor(x / 1e3) % 100, re = x % 1000;
+    if (cr) s += w(cr) + ' Crore '; if (la) s += two(la) + ' Lakh '; if (th) s += two(th) + ' Thousand '; if (re) s += three(re); return s.trim(); };
+  const r = Math.floor(n), p = Math.round((n - r) * 100);
+  return 'Rupees ' + w(r) + (p ? ' and ' + two(p) + ' Paise' : '') + ' Only';
+};
+const bhe = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const binr = v => Number(v || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const bdIN = s => s ? new Date(s + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
+const blHTML = (d, b, opts = {}) => {
+  const tpl = opts.template || d.template || b.template || 'modern', col = b.color || '#1f6f5c', P = d.party || {}, vend = d.type === 'purchase';
+  const title = d.type === 'invoice' && !Number(d.tax_total) && !b.gstin ? 'Invoice' : BL_TYPES[d.type].l;
+  const hasDisc = (d.items || []).some(l => l.disc), hasHsn = (d.items || []).some(l => l.hsn);
+  const rateRows = {}; (d.items || []).forEach(l => { const k = l.tax; rateRows[k] = rateRows[k] || { taxable: 0, tax: 0 }; rateRows[k].taxable += l.taxable; rateRows[k].tax += l.tax_amt; });
+  const thermal = tpl === 'thermal';
+  const rows = (d.items || []).map((l, i) => thermal
+    ? `<tr><td colspan="3"><b>${bhe(l.name)}</b></td></tr><tr class="sm"><td>${l.qty} ${bhe(l.unit || '')} × ${binr(l.rate)}${l.disc ? ` −${l.disc}%` : ''}</td><td>${l.tax}%</td><td class="r">${binr(l.amount)}</td></tr>`
+    : `<tr><td class="c">${i + 1}</td><td><b>${bhe(l.name)}</b>${l.desc ? `<div class="ds">${bhe(l.desc).replace(/\n/g, '<br>')}</div>` : ''}</td>${hasHsn ? `<td class="c">${bhe(l.hsn || '')}</td>` : ''}<td class="r">${l.qty} ${bhe(l.unit || '')}</td><td class="r">${binr(l.rate)}${l.incl ? '<div class="ds">incl. tax</div>' : ''}</td>${hasDisc ? `<td class="r">${l.disc ? l.disc + '%' : '—'}</td>` : ''}<td class="r">${binr(l.taxable)}</td><td class="r">${l.tax}%<div class="ds">${binr(l.tax_amt)}</div></td><td class="r"><b>${binr(l.amount)}</b></td></tr>`).join('');
+  const taxLines = d.inter ? (Number(d.igst) ? `<tr><td>IGST</td><td class="r">${binr(d.igst)}</td></tr>` : '') : (Number(d.cgst) ? `<tr><td>CGST</td><td class="r">${binr(d.cgst)}</td></tr><tr><td>SGST</td><td class="r">${binr(d.sgst)}</td></tr>` : '');
+  const due = br2(d.total - d.paid - d.credited);
+  const logo = b.has_logo ? `<img class="logo" src="${opts.base || ''}/bl-logo/${b.id}?v=${b.v || 0}" alt="">` : '';
+  const from = `<div class="fromn">${bhe(b.legal_name || b.name)}</div><div>${bhe(b.address || '').replace(/\n/g, '<br>')}</div>${b.state ? `<div>State: ${bhe(b.state)} (${blStateCode(b.state)})</div>` : ''}${b.gstin ? `<div><b>GSTIN:</b> ${bhe(b.gstin)}</div>` : ''}${b.phone ? `<div>📞 ${bhe(b.phone)}</div>` : ''}${b.email ? `<div>✉ ${bhe(b.email)}</div>` : ''}`;
+  const to = `<div class="lbl">${vend ? 'Vendor' : 'Bill to'}</div><div class="fromn">${bhe(P.company || P.name || '')}</div>${P.company && P.name && P.company !== P.name ? `<div>${bhe(P.name)}</div>` : ''}<div>${bhe(P.address || '').replace(/\n/g, '<br>')}${P.city ? ', ' + bhe(P.city) : ''}${P.pincode ? ' - ' + bhe(P.pincode) : ''}</div>${P.phone ? `<div>📞 ${bhe(P.phone)}</div>` : ''}${P.gstin ? `<div><b>GSTIN:</b> ${bhe(P.gstin)}</div>` : ''}${d.pos ? `<div>Place of supply: ${bhe(d.pos)} (${blStateCode(d.pos)})</div>` : ''}`;
+  const ship = P.ship_address ? `<div><div class="lbl">Ship to</div><div>${bhe(P.ship_address).replace(/\n/g, '<br>')}</div></div>` : '';
+  const meta = `<table class="meta"><tr><td>${title} #</td><td><b>${bhe(d.no)}</b></td></tr><tr><td>Date</td><td>${bdIN(d.doc_date)}</td></tr>${d.due_date ? `<tr><td>${d.type === 'quotation' ? 'Valid till' : 'Due date'}</td><td>${bdIN(d.due_date)}</td></tr>` : ''}${d.ref_no ? `<tr><td>${vend ? 'Vendor bill #' : 'Reference'}</td><td>${bhe(d.ref_no)}</td></tr>` : ''}</table>`;
+  const tot = `<table class="tot"><tr><td>Taxable amount</td><td class="r">${binr(d.sub)}</td></tr>${taxLines}${Number(d.charges) ? `<tr><td>${bhe(d.charges_label || 'Other charges')}</td><td class="r">${binr(d.charges)}</td></tr>` : ''}${Number(d.extra_disc) ? `<tr><td>Discount</td><td class="r">− ${binr(d.extra_disc)}</td></tr>` : ''}${Number(d.round_off) ? `<tr><td>Round off</td><td class="r">${d.round_off > 0 ? '' : '− '}${binr(Math.abs(d.round_off))}</td></tr>` : ''}<tr class="grand"><td>Total</td><td class="r">₹ ${binr(d.total)}</td></tr>${(d.type === 'invoice' || vend) && (d.paid || d.credited) ? `<tr><td>${vend ? 'Paid' : 'Received'}</td><td class="r">${binr(d.paid)}</td></tr>${d.credited ? `<tr><td>Credit notes</td><td class="r">${binr(d.credited)}</td></tr>` : ''}<tr class="due"><td>Balance due</td><td class="r">₹ ${binr(due)}</td></tr>` : ''}</table>`;
+  const gstTab = !thermal && Number(d.tax_total) ? `<table class="gst"><tr><th>Tax rate</th><th class="r">Taxable</th>${d.inter ? '<th class="r">IGST</th>' : '<th class="r">CGST</th><th class="r">SGST</th>'}<th class="r">Total tax</th></tr>${Object.entries(rateRows).filter(([k]) => +k > 0).map(([k, v]) => `<tr><td>${k}%</td><td class="r">${binr(v.taxable)}</td>${d.inter ? `<td class="r">${binr(v.tax)}</td>` : `<td class="r">${binr(v.tax / 2)}</td><td class="r">${binr(v.tax / 2)}</td>`}<td class="r">${binr(v.tax)}</td></tr>`).join('')}</table>` : '';
+  const bank = !vend && (b.bank_account || b.upi) ? `<div class="bank"><div class="lbl">Payment details</div>${b.bank_name ? `<div>Bank: <b>${bhe(b.bank_name)}</b></div>` : ''}${b.bank_account ? `<div>A/c no: <b>${bhe(b.bank_account)}</b></div>` : ''}${b.bank_ifsc ? `<div>IFSC: <b>${bhe(b.bank_ifsc)}</b>${b.bank_branch ? ' · ' + bhe(b.bank_branch) : ''}</div>` : ''}${b.upi ? `<div>UPI: <b>${bhe(b.upi)}</b></div>` : ''}${opts.pay && b.upi && due > 0 && d.type === 'invoice' ? `<a class="paybtn noprint" href="upi://pay?pa=${encodeURIComponent(b.upi)}&pn=${encodeURIComponent(b.legal_name || b.name)}&am=${due.toFixed(2)}&cu=INR&tn=${encodeURIComponent(d.no)}">Pay ₹${binr(due)} by UPI</a>` : ''}</div>` : '';
+  const notes = [d.notes && `<div class="lbl">Notes</div><div>${bhe(d.notes).replace(/\n/g, '<br>')}</div>`, (d.terms || (!vend && b.terms)) && `<div class="lbl">Terms & conditions</div><div>${bhe(d.terms || b.terms).replace(/\n/g, '<br>')}</div>`].filter(Boolean).join('');
+  const css = `*{box-sizing:border-box}body{margin:0;background:#f2f2f2;font:13px/1.45 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1d1d1f}.pg{max-width:820px;margin:16px auto;background:#fff;padding:34px 36px;box-shadow:0 2px 14px rgba(0,0,0,.08)}
+  .hd{display:flex;gap:18px;align-items:flex-start;justify-content:space-between}.logo{max-height:64px;max-width:180px;object-fit:contain;margin-bottom:6px}.fromn{font-weight:700;font-size:15px}.ttl{font-size:22px;font-weight:800;letter-spacing:.5px;color:${col};text-transform:uppercase;text-align:right}
+  .lbl{font-size:10.5px;text-transform:uppercase;letter-spacing:1px;color:#888;font-weight:700;margin-top:6px}.meta td{padding:1px 0 1px 12px;text-align:right}.meta td:first-child{color:#777}.parties{display:flex;gap:24px;margin:20px 0 14px;padding:14px 0;border-top:2px solid ${col};border-bottom:1px solid #e5e5e5}.parties>div{flex:1}
+  table{border-collapse:collapse;width:100%}.it th{background:${tpl === 'classic' ? '#fff' : col};color:${tpl === 'classic' ? '#111' : '#fff'};font-size:11px;text-transform:uppercase;letter-spacing:.4px;padding:8px 6px;text-align:left;${tpl === 'classic' ? 'border:1px solid #333;' : ''}}.it td{padding:8px 6px;border-bottom:1px solid #eee;vertical-align:top;${tpl === 'classic' ? 'border:1px solid #333;' : ''}}
+  .r{text-align:right}.c{text-align:center}.ds{color:#777;font-size:11.5px;white-space:normal}.foot{display:flex;gap:24px;margin-top:16px}.foot>div{flex:1}.tot td{padding:4px 0}.tot .grand td{font-size:16px;font-weight:800;border-top:2px solid #222;padding-top:8px}.tot .due td{font-weight:700;color:#c0392b}
+  .words{margin-top:8px;font-style:italic;color:#444}.gst{margin-top:14px;font-size:11.5px}.gst th,.gst td{border:1px solid #ddd;padding:4px 6px;text-align:left}.bank{margin-top:12px}.sig{text-align:right;margin-top:40px}.sig div{display:inline-block;border-top:1px solid #333;padding-top:4px;min-width:180px;text-align:center}
+  .paybtn{display:inline-block;margin-top:8px;background:${col};color:#fff;border-radius:999px;padding:9px 16px;text-decoration:none;font-weight:700}.bar{max-width:820px;margin:12px auto 0;display:flex;gap:8px;justify-content:flex-end;padding:0 12px}.bar button,.bar a{background:#111;color:#fff;border:0;border-radius:999px;padding:9px 16px;font:600 13px inherit;text-decoration:none;cursor:pointer}
+  .stamp{display:inline-block;border:2px solid #c0392b;color:#c0392b;font-weight:800;padding:2px 10px;border-radius:6px;transform:rotate(-6deg);margin-top:6px}.stamp.ok{border-color:#1f9255;color:#1f9255}
+  ${thermal ? `.pg{max-width:320px;padding:14px;font-size:12px}.hd{display:block;text-align:center}.ttl{text-align:center;font-size:15px}.parties{display:block;margin:8px 0;padding:8px 0}.foot{display:block}.it td{padding:3px 2px;border:0}.it .sm td{border-bottom:1px dashed #bbb;padding-bottom:5px}.meta td{text-align:left;padding-left:0}` : ''}
+  @media (max-width:640px){.pg{margin:0;padding:18px 14px;box-shadow:none}.parties,.foot{flex-direction:column;gap:10px}.it{font-size:11.5px}.hd{flex-direction:column}.ttl{text-align:left}}
+  @media print{body{background:#fff}.pg{box-shadow:none;margin:0;max-width:none;padding:10mm}.noprint,.bar{display:none!important}@page{size:${thermal ? '80mm auto' : 'A4'};margin:${thermal ? '2mm' : '8mm'}}}`;
+  const stamp = d.status === 'Cancelled' ? '<div class="stamp">CANCELLED</div>' : (d.type === 'invoice' && d.status === 'Paid') ? '<div class="stamp ok">PAID</div>' : '';
+  const head = thermal
+    ? `<div class="hd">${logo}<div>${from}</div><div class="ttl" style="margin-top:8px">${title}</div>${meta}${stamp}</div>`
+    : `<div class="hd"><div>${logo}${from}</div><div><div class="ttl">${title}</div>${meta}${stamp}</div></div>`;
+  const itHead = thermal ? '<tr><th colspan="2">Item</th><th class="r">Amount</th></tr>' : `<tr><th class="c">#</th><th>Item</th>${hasHsn ? '<th class="c">HSN/SAC</th>' : ''}<th class="r">Qty</th><th class="r">Rate</th>${hasDisc ? '<th class="r">Disc</th>' : ''}<th class="r">Taxable</th><th class="r">GST</th><th class="r">Amount</th></tr>`;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${bhe(title + ' ' + d.no)}</title><style>${css}</style></head><body>
+  ${opts.bar ? `<div class="bar noprint"><button onclick="print()">🖨 Print / Save PDF</button></div>` : ''}
+  <div class="pg">${head}<div class="parties"><div>${to}</div>${ship}</div>
+  <table class="it">${itHead}${rows}</table>
+  <div class="foot"><div>${gstTab}<div class="words">${blWords(Number(d.total))}</div>${bank}${notes ? `<div style="margin-top:10px">${notes}</div>` : ''}</div><div style="max-width:${thermal ? 'none' : '300px'}">${tot}<div class="sig"><div>For ${bhe(b.legal_name || b.name)}${b.sign_name ? `<br><small>${bhe(b.sign_name)}</small>` : ''}<br><small>Authorised signatory</small></div></div></div></div>
+  </div>${opts.auto ? '<script>setTimeout(()=>print(),400)</script>' : ''}</body></html>`;
+};
+app.get('/api/bl/docs/:id/print', need('billing', 'purchases'), wrap(async (req, res) => {
+  const d = await blLoad(req, res, +req.params.id); if (!d) return;
+  const b = await blBrand(d.brand_id) || { name: '', id: 0 };
+  res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.end(blHTML(d, b, { template: req.query.t, bar: true, auto: req.query.auto === '1' }));
+}));
+app.get('/d/:token', wrap(async (req, res) => {     // the link sent to the customer (no login)
+  const d = (await q(`SELECT d.*, to_char(d.doc_date,'YYYY-MM-DD') doc_date, to_char(d.due_date,'YYYY-MM-DD') due_date FROM bl_docs d WHERE share_token=$1 AND type<>'purchase'`, [String(req.params.token)])).rows[0];
+  if (!d) return res.status(404).send('<h3 style="font-family:sans-serif;padding:30px">This link is not valid any more.</h3>');
+  ['sub', 'line_disc', 'tax_total', 'cgst', 'sgst', 'igst', 'charges', 'extra_disc', 'round_off', 'total', 'paid', 'credited'].forEach(k => d[k] = Number(d[k] || 0));
+  const b = await blBrand(d.brand_id) || { name: '', id: 0 };
+  res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.setHeader('X-Robots-Tag', 'noindex'); res.end(blHTML(d, b, { bar: true, pay: true }));
+}));
+
+// ---------- expenses ----------
+app.get('/api/bl/expenses', blBuy, wrap(async (req, res) => {
+  const p = [], w = ['true'], add = (s, v) => { p.push(v); w.push(s.replace('?', '$' + p.length)); };
+  if (req.user.brand_id && !isSuper(req.user)) add('e.brand_id=?', req.user.brand_id);
+  if (req.query.from) add('e.exp_date>=?', req.query.from); if (req.query.to) add('e.exp_date<=?', req.query.to);
+  if (req.query.category) add('e.category=?', req.query.category);
+  const items = (await q(`SELECT e.*, to_char(e.exp_date,'YYYY-MM-DD') exp_date, b.name brand FROM bl_expenses e LEFT JOIN brands b ON b.id=e.brand_id WHERE ${w.join(' AND ')} ORDER BY e.exp_date DESC, e.id DESC LIMIT 500`, p)).rows;
+  res.json({ items, total: br2(items.reduce((t, e) => t + Number(e.amount), 0)) });
+}));
+app.post('/api/bl/expenses', blBuy, wrap(async (req, res) => {
+  const b = req.body || {}, amt = br2(+b.amount || 0); if (amt <= 0) return res.status(400).json({ error: 'Enter the amount' });
+  const r = (await q(`INSERT INTO bl_expenses(brand_id,category,amount,tax,exp_date,mode,paid_to,note,by_name) VALUES($1,$2,$3,$4,COALESCE($5::date,CURRENT_DATE),$6,$7,$8,$9) RETURNING id`,
+    [blUserBrand(req.user, b.brand_id) || await blDefBrand(req.user), String(b.category || 'Other').slice(0, 60), amt, br2(+b.tax || 0), /^\d{4}-\d{2}-\d{2}$/.test(b.exp_date) ? b.exp_date : null, BL_MODES.includes(b.mode) ? b.mode : 'Cash', String(b.paid_to || '').slice(0, 120) || null, String(b.note || '').slice(0, 500) || null, req.user.name])).rows[0];
+  res.json({ ok: true, id: r.id });
+}));
+app.delete('/api/bl/expenses/:id', blBuy, wrap(async (req, res) => { await q('DELETE FROM bl_expenses WHERE id=$1', [+req.params.id]); res.json({ ok: true }); }));
+
+// ---------- dashboard & reports ----------
+const blRange = Q => { const t = new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10); return { from: /^\d{4}-\d{2}-\d{2}$/.test(Q.from) ? Q.from : t.slice(0, 8) + '01', to: /^\d{4}-\d{2}-\d{2}$/.test(Q.to) ? Q.to : t }; };
+const blBrandW = (u, Q, p, alias = 'd') => { const b = u.brand_id && !isSuper(u) ? u.brand_id : +Q.brand || 0; if (!b) return 'true'; p.push(b); return `${alias}.brand_id=$${p.length}`; };
+app.get('/api/bl/summary', need('billing', 'purchases'), wrap(async (req, res) => {
+  const { from, to } = blRange(req.query), p = [from, to], bw = blBrandW(req.user, req.query, p);
+  const s = (await q(`SELECT
+    COALESCE(SUM(total) FILTER (WHERE type='invoice'),0) sales, COUNT(*) FILTER (WHERE type='invoice')::int invoices,
+    COALESCE(SUM(total) FILTER (WHERE type='credit_note'),0) returns, COALESCE(SUM(total) FILTER (WHERE type='purchase'),0) purchases,
+    COALESCE(SUM(total) FILTER (WHERE type='quotation'),0) quoted, COUNT(*) FILTER (WHERE type='quotation')::int quotes, COUNT(*) FILTER (WHERE type='quotation' AND status IN ('Converted','Accepted'))::int quotes_won
+    FROM bl_docs d WHERE status<>'Cancelled' AND doc_date BETWEEN $1 AND $2 AND ${bw}`, p)).rows[0];
+  const p2 = [from, to], bw2 = blBrandW(req.user, req.query, p2);
+  const rc = (await q(`SELECT COALESCE(SUM(pm.amount) FILTER (WHERE d.type='invoice'),0) received, COALESCE(SUM(pm.amount) FILTER (WHERE d.type='purchase'),0) paid_out FROM bl_payments pm JOIN bl_docs d ON d.id=pm.doc_id WHERE pm.pay_date BETWEEN $1 AND $2 AND ${bw2}`, p2)).rows[0];
+  const p3 = [], bw3 = blBrandW(req.user, req.query, p3);
+  const due = (await q(`SELECT COALESCE(SUM(total-paid-credited) FILTER (WHERE type='invoice'),0) receivable, COALESCE(SUM(total-paid) FILTER (WHERE type='purchase'),0) payable,
+    COALESCE(SUM(total-paid-credited) FILTER (WHERE type='invoice' AND due_date<CURRENT_DATE),0) overdue FROM bl_docs d WHERE status IN ('Unpaid','Partial') AND ${bw3}`, p3)).rows[0];
+  const p4 = [from, to], bw4 = blBrandW(req.user, req.query, p4, 'e');
+  const ex = (await q(`SELECT COALESCE(SUM(amount),0) expenses FROM bl_expenses e WHERE exp_date BETWEEN $1 AND $2 AND ${bw4}`, p4)).rows[0];
+  const p5 = [], bw5 = blBrandW(req.user, req.query, p5);
+  const trend = (await q(`SELECT to_char(date_trunc('month',doc_date),'YYYY-MM') m, COALESCE(SUM(total) FILTER (WHERE type='invoice'),0) sales, COALESCE(SUM(total) FILTER (WHERE type='purchase'),0) purchases
+    FROM bl_docs d WHERE status<>'Cancelled' AND doc_date>=date_trunc('month',CURRENT_DATE)-interval '5 months' AND ${bw5} GROUP BY 1 ORDER BY 1`, p5)).rows;
+  const low = (await q(`SELECT id, name, stock, low_stock, unit FROM bl_products WHERE active AND kind='product' AND stock<=low_stock ORDER BY stock LIMIT 8`)).rows;
+  const p6 = [], bw6 = blBrandW(req.user, req.query, p6);
+  const top = (await q(`SELECT d.customer_id id, MAX(d.party->>'name') name, MAX(d.party->>'phone') phone, SUM(d.total-d.paid-d.credited) due, MIN(d.due_date) oldest FROM bl_docs d WHERE d.type='invoice' AND d.status IN ('Unpaid','Partial') AND ${bw6} GROUP BY d.customer_id ORDER BY due DESC LIMIT 6`, p6)).rows;
+  const n = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, typeof v === 'string' && !['phone', 'name', 'm', 'oldest'].includes(k) && /^-?\d+(\.\d+)?$/.test(v) ? Number(v) : v]));
+  res.json({ from, to, ...n(s), ...n(rc), ...n(due), ...n(ex), trend: trend.map(n), low, top: top.map(n) });
+}));
+app.get('/api/bl/reports/:kind', need('billing', 'purchases'), wrap(async (req, res) => {
+  const { from, to } = blRange(req.query), k = req.params.kind, p = [from, to], bw = blBrandW(req.user, req.query, p);
+  const buyK = ['purchases', 'expenses', 'pnl', 'gst_purchase', 'vendors'];
+  if (buyK.includes(k) && !can(req.user, 'purchases')) return res.status(403).json({ error: 'Not allowed' });
+  let cols, rows;
+  if (k === 'sales' || k === 'purchases') {
+    cols = [['doc_date', 'Date'], ['no', 'No'], ['party', k === 'sales' ? 'Customer' : 'Vendor'], ['gstin', 'GSTIN'], ['sub', 'Taxable', 'n'], ['cgst', 'CGST', 'n'], ['sgst', 'SGST', 'n'], ['igst', 'IGST', 'n'], ['total', 'Total', 'n'], ['paid', 'Paid', 'n'], ['due', 'Due', 'n'], ['status', 'Status']];
+    rows = (await q(`SELECT to_char(doc_date,'YYYY-MM-DD') doc_date, no, COALESCE(party->>'company',party->>'name') party, party->>'gstin' gstin, sub, cgst, sgst, igst, total, paid, total-paid-credited due, status, id FROM bl_docs d WHERE type=$${p.length + 1} AND status<>'Cancelled' AND doc_date BETWEEN $1 AND $2 AND ${bw} ORDER BY doc_date, id`, [...p, k === 'sales' ? 'invoice' : 'purchase'])).rows;
+  } else if (k === 'gst_sales' || k === 'gst_purchase') {   // GST summary by tax rate (GSTR-1 / 3B helper)
+    cols = [['rate', 'GST rate'], ['taxable', 'Taxable', 'n'], ['cgst', 'CGST', 'n'], ['sgst', 'SGST', 'n'], ['igst', 'IGST', 'n'], ['tax', 'Total tax', 'n'], ['b2b', 'B2B invoices'], ['b2c', 'B2C invoices']];
+    const docs = (await q(`SELECT d.inter, d.items, d.type, d.party->>'gstin' gstin FROM bl_docs d WHERE type=ANY($${p.length + 1}) AND status<>'Cancelled' AND doc_date BETWEEN $1 AND $2 AND ${bw}`, [...p, k === 'gst_sales' ? ['invoice', 'credit_note'] : ['purchase']])).rows;
+    const m = {}; docs.forEach(d => { const sg = d.type === 'credit_note' ? -1 : 1, b2b = !!d.gstin; (d.items || []).forEach(l => { const x = m[l.tax] = m[l.tax] || { rate: l.tax + '%', taxable: 0, cgst: 0, sgst: 0, igst: 0, tax: 0, b2b: 0, b2c: 0, _r: +l.tax };
+      x.taxable += sg * l.taxable; x.tax += sg * l.tax_amt; if (d.inter) x.igst += sg * l.tax_amt; else { x.cgst += sg * l.tax_amt / 2; x.sgst += sg * l.tax_amt / 2; } }); const rs = new Set((d.items || []).map(l => l.tax)); rs.forEach(r => { m[r][b2b ? 'b2b' : 'b2c']++; }); });
+    rows = Object.values(m).sort((a, b) => a._r - b._r).map(x => { ['taxable', 'cgst', 'sgst', 'igst', 'tax'].forEach(kk => x[kk] = br2(x[kk])); delete x._r; return x; });
+  } else if (k === 'hsn') {
+    cols = [['hsn', 'HSN/SAC'], ['name', 'Description'], ['qty', 'Qty', 'n'], ['taxable', 'Taxable', 'n'], ['tax', 'Tax', 'n'], ['amount', 'Total', 'n']];
+    const docs = (await q(`SELECT d.items, d.type FROM bl_docs d WHERE type IN ('invoice','credit_note') AND status<>'Cancelled' AND doc_date BETWEEN $1 AND $2 AND ${bw}`, p)).rows, m = {};
+    docs.forEach(d => (d.items || []).forEach(l => { const sg = d.type === 'credit_note' ? -1 : 1, key = (l.hsn || '—') + '|' + l.tax, x = m[key] = m[key] || { hsn: (l.hsn || '—') + ` @${l.tax}%`, name: l.name, qty: 0, taxable: 0, tax: 0, amount: 0 }; x.qty += sg * l.qty; x.taxable += sg * l.taxable; x.tax += sg * l.tax_amt; x.amount += sg * l.amount; }));
+    rows = Object.values(m).map(x => ({ ...x, qty: br2(x.qty), taxable: br2(x.taxable), tax: br2(x.tax), amount: br2(x.amount) }));
+  } else if (k === 'items') {   // item-wise sales with profit (selling taxable − purchase price)
+    cols = [['name', 'Item'], ['qty', 'Qty sold', 'n'], ['taxable', 'Sales (taxable)', 'n'], ['cost', 'Cost', 'n'], ['profit', 'Profit', 'n']];
+    const docs = (await q(`SELECT d.items, d.type FROM bl_docs d WHERE type IN ('invoice','credit_note') AND status<>'Cancelled' AND doc_date BETWEEN $1 AND $2 AND ${bw}`, p)).rows, m = {};
+    const pp = Object.fromEntries((await q('SELECT id, purchase_price FROM bl_products')).rows.map(r => [r.id, Number(r.purchase_price)]));
+    docs.forEach(d => (d.items || []).forEach(l => { const sg = d.type === 'credit_note' ? -1 : 1, key = l.pid || l.name, x = m[key] = m[key] || { name: l.name, qty: 0, taxable: 0, cost: 0 }; x.qty += sg * l.qty; x.taxable += sg * l.taxable; x.cost += sg * l.qty * (pp[l.pid] || 0); }));
+    rows = Object.values(m).map(x => ({ name: x.name, qty: br2(x.qty), taxable: br2(x.taxable), cost: br2(x.cost), profit: br2(x.taxable - x.cost) })).sort((a, b) => b.taxable - a.taxable);
+  } else if (k === 'parties') {
+    cols = [['name', 'Customer'], ['phone', 'Phone'], ['invoices', 'Invoices', 'n'], ['total', 'Billed', 'n'], ['paid', 'Received', 'n'], ['due', 'Due', 'n']];
+    rows = (await q(`SELECT COALESCE(MAX(party->>'company'),MAX(party->>'name')) name, MAX(party->>'phone') phone, COUNT(*)::int invoices, SUM(total) total, SUM(paid) paid, SUM(total-paid-credited) due, customer_id id FROM bl_docs d WHERE type='invoice' AND status<>'Cancelled' AND doc_date BETWEEN $1 AND $2 AND ${bw} GROUP BY customer_id ORDER BY total DESC`, p)).rows;
+  } else if (k === 'payments') {
+    cols = [['pay_date', 'Date'], ['no', 'Document'], ['party', 'Party'], ['kind', 'Type'], ['mode', 'Mode'], ['account', 'Account'], ['amount', 'Amount', 'n'], ['by_name', 'By']];
+    rows = (await q(`SELECT to_char(pm.pay_date,'YYYY-MM-DD') pay_date, d.no, COALESCE(d.party->>'company',d.party->>'name') party, CASE WHEN d.type='purchase' THEN 'Paid out' ELSE 'Received' END kind, pm.mode, pm.account, pm.amount, pm.by_name, d.id FROM bl_payments pm JOIN bl_docs d ON d.id=pm.doc_id WHERE pm.pay_date BETWEEN $1 AND $2 AND ${bw} ${can(req.user, 'purchases') ? '' : "AND d.type<>'purchase'"} ORDER BY pm.pay_date, pm.id`, p)).rows;
+  } else if (k === 'stock') {
+    cols = [['name', 'Item'], ['sku', 'Code'], ['category', 'Category'], ['stock', 'In stock', 'n'], ['unit', 'Unit'], ['purchase_price', 'Cost price', 'n'], ['value', 'Stock value', 'n'], ['low', 'Low stock']];
+    rows = (await q(`SELECT name, sku, category, stock, unit, purchase_price, stock*purchase_price value, CASE WHEN stock<=low_stock THEN 'Low' ELSE '' END low, id FROM bl_products WHERE active AND kind='product' ORDER BY lower(name)`)).rows;
+  } else if (k === 'expenses') {
+    cols = [['category', 'Category'], ['count', 'Entries', 'n'], ['amount', 'Amount', 'n']];
+    const pe = [from, to], bwe = blBrandW(req.user, req.query, pe, 'e');
+    rows = (await q(`SELECT category, COUNT(*)::int count, SUM(amount) amount FROM bl_expenses e WHERE exp_date BETWEEN $1 AND $2 AND ${bwe} GROUP BY category ORDER BY amount DESC`, pe)).rows;
+  } else if (k === 'pnl') {
+    cols = [['line', 'Item'], ['amount', 'Amount', 'n']];
+    const s = (await q(`SELECT COALESCE(SUM(sub) FILTER (WHERE type='invoice'),0) sales, COALESCE(SUM(sub) FILTER (WHERE type='credit_note'),0) ret, COALESCE(SUM(sub) FILTER (WHERE type='purchase'),0) pur FROM bl_docs d WHERE status<>'Cancelled' AND doc_date BETWEEN $1 AND $2 AND ${bw}`, p)).rows[0];
+    const pe = [from, to], bwe = blBrandW(req.user, req.query, pe, 'e');
+    const ex = Number((await q(`SELECT COALESCE(SUM(amount-tax),0) e FROM bl_expenses e WHERE exp_date BETWEEN $1 AND $2 AND ${bwe}`, pe)).rows[0].e);
+    const net = br2(+s.sales - +s.ret), gp = br2(net - +s.pur);
+    rows = [{ line: 'Sales (before tax)', amount: br2(s.sales) }, { line: '− Sales returns (credit notes)', amount: br2(s.ret) }, { line: 'Net sales', amount: net, b: 1 }, { line: '− Purchases (before tax)', amount: br2(s.pur) }, { line: 'Gross profit', amount: gp, b: 1 }, { line: '− Expenses', amount: br2(ex) }, { line: 'Net profit', amount: br2(gp - ex), b: 1 }];
+  } else return res.status(404).json({ error: 'Unknown report' });
+  rows.forEach(r => cols.forEach(c => { if (c[2] === 'n') r[c[0]] = Number(r[c[0]] || 0); }));
+  const sums = Object.fromEntries(cols.filter(c => c[2] === 'n' && !['purchase_price', 'stock', 'rate'].includes(c[0]) && k !== 'pnl').map(c => [c[0], br2(rows.reduce((t, r) => t + r[c[0]], 0))]));
+  if (req.query.format === 'xlsx') {
+    const wb = new ExcelJS.Workbook(), ws = wb.addWorksheet(k);
+    ws.columns = cols.map(c => ({ header: c[1], key: c[0], width: c[2] === 'n' ? 14 : 24 }));
+    rows.forEach(r => ws.addRow(r)); if (Object.keys(sums).length) ws.addRow({ [cols[0][0]]: 'TOTAL', ...sums });
+    ws.getRow(1).font = { bold: true };
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); res.setHeader('Content-Disposition', `attachment; filename="${k}_${from}_${to}.xlsx"`);
+    return wb.xlsx.write(res).then(() => res.end());
+  }
+  res.json({ from, to, cols, rows, sums });
+}));
+
+// ---------- import (Swipe / any Excel or CSV) & export ----------
+const BL_FIELDS = {
+  products: { name: ['item name', 'product name', 'name', 'item', 'product', 'item description', 'particulars'], sku: ['item code', 'product code', 'sku', 'code', 'barcode', 'item id'], hsn: ['hsn', 'hsn sac', 'hsn code', 'sac', 'hsn sac code', 'hsnsac'],
+    unit: ['unit', 'units', 'uqc', 'unit of measurement', 'measuring unit', 'uom'], price: ['selling price', 'sale price', 'sales price', 'price', 'unit price', 'rate', 'mrp', 'selling rate', 'price per unit'], purchase_price: ['purchase price', 'cost price', 'buying price', 'purchase rate', 'cost'],
+    tax: ['tax', 'gst', 'tax rate', 'gst rate', 'tax percent', 'gst percent', 'tax percentage', 'gst percentage', 'igst', 'igst rate'], category: ['category', 'group', 'item category', 'product category'], description: ['description', 'product description', 'details', 'notes'],
+    stock: ['opening stock', 'stock', 'quantity', 'qty', 'opening quantity', 'current stock', 'available stock', 'stock quantity', 'closing stock'], low_stock: ['low stock', 'alert quantity', 'low stock alert', 'reorder level', 'min stock', 'minimum stock'],
+    kind: ['type', 'item type', 'product type', 'product or service'], price_incl: ['price includes tax', 'tax inclusive', 'inclusive of tax', 'with tax', 'price with tax', 'tax included'] },
+  customers: { name: ['name', 'customer name', 'party name', 'contact name', 'contact person', 'customer'], company: ['company', 'company name', 'business name', 'firm name', 'organisation', 'organization', 'trade name'],
+    phone: ['phone', 'mobile', 'phone number', 'mobile number', 'contact', 'contact number', 'whatsapp', 'mobile no', 'phone no', 'contact no'], email: ['email', 'email id', 'email address', 'mail'],
+    gstin: ['gstin', 'gst', 'gst number', 'gstin uin', 'gst no', 'gstin number', 'gst in'], address: ['address', 'billing address', 'address line 1', 'billing address line 1', 'address 1', 'street'], city: ['city', 'billing city', 'town'],
+    state: ['state', 'billing state', 'place of supply', 'state name'], pincode: ['pincode', 'pin', 'zip', 'postal code', 'pin code', 'billing pincode'], ship_address: ['shipping address', 'shipping address line 1', 'delivery address'],
+    opening_bal: ['opening balance', 'balance', 'closing balance', 'outstanding', 'balance due', 'receivable'] },
+};
+BL_FIELDS.vendors = { ...BL_FIELDS.customers, name: ['name', 'vendor name', 'supplier name', 'party name', 'contact name', 'vendor', 'supplier'], opening_bal: ['opening balance', 'balance', 'payable', 'closing balance', 'outstanding'] };
+const blNorm = s => String(s || '').toLowerCase().replace(/[%()\/_.\-:#]/g, ' ').replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+const blAutoMap = (what, headers) => {
+  const F = BL_FIELDS[what], H = headers.map(blNorm), map = {}, used = new Set();
+  for (const pass of [0, 1]) for (const [f, syn] of Object.entries(F)) {
+    if (map[f] !== undefined) continue;
+    const i = H.findIndex((h, j) => !used.has(j) && (pass === 0 ? syn.includes(h) : syn.some(s => s.length > 3 && (h.startsWith(s + ' ') || h.endsWith(' ' + s) || h.includes(' ' + s + ' ')))));
+    if (i >= 0) { map[f] = i; used.add(i); }
+  }
+  return map;
+};
+const blCsv = txt => {     // RFC-4180-ish CSV / TSV
+  const sep = (txt.split('\n')[0].match(/\t/g) || []).length > (txt.split('\n')[0].match(/,/g) || []).length ? '\t' : ',';
+  const rows = []; let row = [], cur = '', qd = false;
+  for (let i = 0; i < txt.length; i++) { const c = txt[i];
+    if (qd) { if (c === '"') { if (txt[i + 1] === '"') { cur += '"'; i++; } else qd = false; } else cur += c; }
+    else if (c === '"') qd = true; else if (c === sep) { row.push(cur); cur = ''; } else if (c === '\n') { row.push(cur); rows.push(row); row = []; cur = ''; } else if (c !== '\r') cur += c; }
+  if (cur || row.length) { row.push(cur); rows.push(row); }
+  return rows;
+};
+const blCell = v => { if (v == null) return ''; if (typeof v === 'object') { if (v.richText) return v.richText.map(t => t.text).join(''); if (v.text) return String(v.text); if (v.result !== undefined) return String(v.result); if (v instanceof Date) return v.toISOString().slice(0, 10); return ''; } return String(v); };
+const blReadSheet = async (dataUrl, fname) => {
+  const m = /^data:([^;]*);base64,(.+)$/.exec(String(dataUrl || '')); if (!m) throw new Error('Choose an Excel (.xlsx) or CSV file');
+  const buf = Buffer.from(m[2], 'base64'), ext = String(fname || '').toLowerCase().split('.').pop();
+  if (buf.length > 15e6) throw new Error('File is too big (max 15 MB)');
+  let rows;
+  if (ext === 'csv' || ext === 'txt' || ext === 'tsv' || /csv|text\/plain/.test(m[1])) rows = blCsv(buf.toString('utf8').replace(/^﻿/, ''));
+  else if (ext === 'xls') throw new Error('Old .xls files aren’t supported — open it in Excel / Google Sheets and save as .xlsx or CSV');
+  else { const wb = new ExcelJS.Workbook(); await wb.xlsx.load(buf); const ws = wb.worksheets.find(w => w.actualRowCount > 1) || wb.worksheets[0]; if (!ws) throw new Error('The file has no sheets');
+    rows = []; ws.eachRow({ includeEmpty: false }, r => { const a = []; for (let i = 1; i <= r.cellCount; i++) a.push(blCell(r.getCell(i).value).trim()); rows.push(a); }); }
+  rows = rows.filter(r => r.some(c => String(c).trim()));
+  // header row = the first row (within the first 10) that matches the most known column names
+  let best = 0, bi = 0; rows.slice(0, 10).forEach((r, i) => { const n = r.filter(c => Object.values(BL_FIELDS).some(F => Object.values(F).some(s => s.includes(blNorm(c))))).length; if (n > best) { best = n; bi = i; } });
+  return { headers: (rows[bi] || []).map(String), rows: rows.slice(bi + 1) };
+};
+const BL_IMP = new Map();
+app.post('/api/bl/import/preview', need('billing', 'purchases'), wrap(async (req, res) => {
+  const b = req.body || {}, what = b.what; if (!BL_FIELDS[what]) return res.status(400).json({ error: 'Choose what to import' });
+  if (what === 'vendors' && !can(req.user, 'purchases')) return res.status(403).json({ error: 'Not allowed' });
+  let s; try { s = await blReadSheet(b.file, b.fname); } catch (e) { return res.status(400).json({ error: e.message || 'Could not read the file' }); }
+  if (!s.rows.length) return res.status(400).json({ error: 'No rows found in the file' });
+  const token = crypto.randomBytes(9).toString('hex'); BL_IMP.set(token, { what, ...s, at: Date.now(), uid: req.user.id });
+  for (const [k, v] of BL_IMP) if (Date.now() - v.at > 1800e3) BL_IMP.delete(k);
+  res.json({ token, headers: s.headers, sample: s.rows.slice(0, 5), count: s.rows.length, map: blAutoMap(what, s.headers), fields: Object.keys(BL_FIELDS[what]) });
+}));
+const blNum = v => { const n = parseFloat(String(v ?? '').replace(/[₹,\s%]/g, '').replace(/^rs\.?/i, '')); return isFinite(n) ? n : 0; };
+const blYes = v => /^(y|yes|true|1|inclusive|incl|with tax)/i.test(String(v || '').trim());
+app.post('/api/bl/import/commit', need('billing', 'purchases'), wrap(async (req, res) => {
+  const b = req.body || {}, job = BL_IMP.get(b.token);
+  if (!job || job.uid !== req.user.id) return res.status(400).json({ error: 'Please choose the file again' });
+  const map = b.map || {}, upd = b.mode !== 'skip', R = { created: 0, updated: 0, skipped: 0, errors: [] };
+  const get = (row, f) => map[f] === undefined || map[f] === null || map[f] === '' ? undefined : String(row[+map[f]] ?? '').trim();
+  if (map.name === undefined && job.what === 'products') return res.status(400).json({ error: 'Choose which column has the product name' });
+  const brandId = blUserBrand(req.user, b.brand_id) || await blDefBrand(req.user);
+  for (let i = 0; i < job.rows.length; i++) {
+    const row = job.rows[i], ln = i + 2;
+    try {
+      if (job.what === 'products') {
+        const name = get(row, 'name'); if (!name) { R.skipped++; continue; }
+        const o = blProdIn({ name, sku: get(row, 'sku'), hsn: get(row, 'hsn'), unit: get(row, 'unit'), category: get(row, 'category'), description: get(row, 'description') });
+        Object.keys(o).forEach(k => o[k] === undefined && delete o[k]); if (get(row, 'unit') === undefined || !o.unit) delete o.unit;
+        for (const k of ['price', 'purchase_price', 'low_stock']) { const v = get(row, k); if (v !== undefined && v !== '') o[k] = Math.max(0, blNum(v)); }
+        const tx = get(row, 'tax'); if (tx !== undefined && tx !== '') { let t = blNum(tx); if (t > 0 && t < 1) t = t * 100; o.tax = Math.min(40, t); }
+        const kd = get(row, 'kind'); if (kd) o.kind = /serv/i.test(kd) ? 'service' : 'product';
+        const inc = get(row, 'price_incl'); if (inc !== undefined) o.price_incl = blYes(inc);
+        else if (map.price !== undefined && /incl|with tax/i.test(job.headers[+map.price] || '')) o.price_incl = true;
+        const ex = (o.sku && (await q('SELECT * FROM bl_products WHERE lower(sku)=lower($1)', [o.sku])).rows[0]) || (await q('SELECT * FROM bl_products WHERE lower(name)=lower($1) ORDER BY active DESC, id LIMIT 1', [o.name])).rows[0];
+        const stv = get(row, 'stock'), st = stv !== undefined && stv !== '' ? blNum(stv) : null;
+        if (ex) { if (!upd) { R.skipped++; continue; }
+          o.active = true; const ks = Object.keys(o); await q(`UPDATE bl_products SET ${ks.map((k, j) => `${k}=$${j + 2}`).join(',')}, updated_at=now() WHERE id=$1`, [ex.id, ...ks.map(k => o[k])]);
+          if (st !== null && st !== Number(ex.stock) && (o.kind || ex.kind) !== 'service') await blStockMove(ex.id, st - Number(ex.stock), 'Adjust', null, 'Import', req.user.name);
+          R.updated++;
+        } else { const ks = Object.keys(o); const r = (await q(`INSERT INTO bl_products(${ks.join(',')}) VALUES(${ks.map((_, j) => '$' + (j + 1)).join(',')}) RETURNING id`, ks.map(k => o[k]))).rows[0];
+          if (st) await blStockMove(r.id, st, 'Opening', null, 'Import', req.user.name); R.created++; }
+      } else {
+        const raw = {}; for (const f of Object.keys(BL_FIELDS[job.what])) { const v = get(row, f); if (v !== undefined) raw[f] = v; }
+        if (raw.opening_bal !== undefined) raw.opening_bal = blNum(raw.opening_bal);
+        const o = blCustIn(raw); Object.keys(o).forEach(k => (o[k] === undefined || o[k] === null) && delete o[k]);
+        if (o.gstin && !blGstOk(o.gstin)) { R.errors.push(`Row ${ln}: GSTIN ${o.gstin} looks wrong — saved without it`); delete o.gstin; }
+        o.name = o.name || o.company; if (!o.name && !o.phone) { R.skipped++; continue; }
+        const ph = digits(o.phone).slice(-10);
+        if (job.what === 'vendors') {
+          delete o.city; delete o.pincode; delete o.ship_address;
+          const ex = (ph.length >= 7 && (await q(`SELECT id FROM bl_vendors WHERE right(regexp_replace(COALESCE(phone,''),'\\D','','g'),10)=$1`, [ph])).rows[0]) || (o.gstin && (await q('SELECT id FROM bl_vendors WHERE gstin=$1', [o.gstin])).rows[0]) || (await q('SELECT id FROM bl_vendors WHERE lower(name)=lower($1)', [o.name])).rows[0];
+          if (ex) { if (!upd) { R.skipped++; continue; } const ks = Object.keys(o); await q(`UPDATE bl_vendors SET ${ks.map((k, j) => `${k}=$${j + 2}`).join(',')} WHERE id=$1`, [ex.id, ...ks.map(k => o[k])]); R.updated++; }
+          else { const ks = Object.keys(o); await q(`INSERT INTO bl_vendors(${ks.join(',')}) VALUES(${ks.map((_, j) => '$' + (j + 1)).join(',')})`, ks.map(k => o[k])); R.created++; }
+        } else {
+          o.name = o.name || 'Customer ' + ph.slice(-4);
+          const ex = (ph.length >= 7 && (await q(`SELECT id FROM customers WHERE right(regexp_replace(COALESCE(phone,''),'\\D','','g'),10)=$1 ORDER BY id LIMIT 1`, [ph])).rows[0]) || (o.gstin && (await q('SELECT id FROM customers WHERE gstin=$1 ORDER BY id LIMIT 1', [o.gstin])).rows[0]) || (!ph && (await q('SELECT id FROM customers WHERE lower(name)=lower($1) AND phone IS NULL ORDER BY id LIMIT 1', [o.name])).rows[0]);
+          if (ex) { if (!upd) { R.skipped++; continue; } const ks = Object.keys(o); await q(`UPDATE customers SET ${ks.map((k, j) => `${k}=$${j + 2}`).join(',')} WHERE id=$1`, [ex.id, ...ks.map(k => o[k])]); R.updated++; }
+          else { o.brand_id = brandId; const ks = Object.keys(o); await q(`INSERT INTO customers(${ks.join(',')}) VALUES(${ks.map((_, j) => '$' + (j + 1)).join(',')})`, ks.map(k => o[k])); R.created++; }
+        }
+      }
+    } catch (e) { R.errors.push(`Row ${ln}: ${e.message}`); }
+  }
+  BL_IMP.delete(b.token); R.errors = R.errors.slice(0, 50); res.json({ ok: true, ...R });
+}));
+app.get('/api/bl/import/template/:what', need('billing', 'purchases'), wrap(async (req, res) => {
+  const what = req.params.what; if (!BL_FIELDS[what]) return res.status(404).end();
+  const heads = { products: ['Item Name', 'Item Code', 'HSN/SAC', 'Unit', 'Selling Price', 'Purchase Price', 'GST %', 'Category', 'Opening Stock', 'Low Stock Alert', 'Description', 'Type (Product/Service)'],
+    customers: ['Name', 'Company Name', 'Phone', 'Email', 'GSTIN', 'Billing Address', 'City', 'State', 'Pincode', 'Shipping Address', 'Opening Balance'],
+    vendors: ['Name', 'Company Name', 'Phone', 'Email', 'GSTIN', 'Address', 'State', 'Opening Balance'] }[what];
+  const ex = { products: ['CCTV Camera 2MP', 'CAM-2MP', '8525', 'Nos', 2400, 1650, 18, 'CCTV', 10, 2, 'Dome camera with night vision', 'Product'], customers: ['Ravi Kumar', 'Ravi Traders', '9876543210', 'ravi@example.com', '33ABCDE1234F1Z5', '12 Anna Salai', 'Chennai', 'Tamil Nadu', '600002', '', 0], vendors: ['Suresh', 'ABC Distributors', '9876500000', '', '33AAACA1234B1Z2', 'Ambattur, Chennai', 'Tamil Nadu', 0] }[what];
+  const wb = new ExcelJS.Workbook(), ws = wb.addWorksheet(what); ws.addRow(heads); ws.addRow(ex); ws.getRow(1).font = { bold: true }; ws.columns.forEach(c => c.width = 18);
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); res.setHeader('Content-Disposition', `attachment; filename="rago_${what}_template.xlsx"`);
+  await wb.xlsx.write(res); res.end();
+}));
+app.get('/api/bl/export/:what', need('billing', 'purchases'), wrap(async (req, res) => {
+  const what = req.params.what, wb = new ExcelJS.Workbook(), ws = wb.addWorksheet(what);
+  let cols, rows;
+  if (what === 'products') { cols = [['name', 'Item Name'], ['sku', 'Item Code'], ['hsn', 'HSN/SAC'], ['unit', 'Unit'], ['price', 'Selling Price'], ['price_incl', 'Price includes tax'], ['purchase_price', 'Purchase Price'], ['tax', 'GST %'], ['category', 'Category'], ['stock', 'Stock'], ['low_stock', 'Low Stock Alert'], ['kind', 'Type'], ['description', 'Description']];
+    rows = (await q('SELECT * FROM bl_products WHERE active ORDER BY lower(name)')).rows.map(r => ({ ...r, price_incl: r.price_incl ? 'Yes' : 'No', price: +r.price, purchase_price: +r.purchase_price, tax: +r.tax, stock: +r.stock, low_stock: +r.low_stock })); }
+  else if (what === 'customers') { const p = ['%'], sc = custScope(req.user, p); cols = [['name', 'Name'], ['company', 'Company Name'], ['phone', 'Phone'], ['email', 'Email'], ['gstin', 'GSTIN'], ['address', 'Billing Address'], ['city', 'City'], ['state', 'State'], ['pincode', 'Pincode'], ['ship_address', 'Shipping Address'], ['opening_bal', 'Opening Balance']];
+    rows = (await q(`SELECT c.* FROM customers c WHERE c.name ILIKE $1 AND ${sc} ORDER BY lower(c.name)`, p)).rows.map(r => ({ ...r, opening_bal: +r.opening_bal || 0 })); }
+  else if (what === 'vendors' && can(req.user, 'purchases')) { cols = [['name', 'Name'], ['company', 'Company Name'], ['phone', 'Phone'], ['email', 'Email'], ['gstin', 'GSTIN'], ['address', 'Address'], ['state', 'State'], ['opening_bal', 'Opening Balance']]; rows = (await q('SELECT * FROM bl_vendors ORDER BY lower(name)')).rows.map(r => ({ ...r, opening_bal: +r.opening_bal || 0 })); }
+  else return res.status(404).json({ error: 'Unknown export' });
+  ws.columns = cols.map(c => ({ header: c[1], key: c[0], width: 20 })); rows.forEach(r => ws.addRow(r)); ws.getRow(1).font = { bold: true };
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); res.setHeader('Content-Disposition', `attachment; filename="rago_${what}.xlsx"`);
+  await wb.xlsx.write(res); res.end();
+}));
+
+init().then(initChat).then(initProjects).then(initWA).then(initBL).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
   .catch(e => { console.error('DB init failed', e.message); process.exit(1); });

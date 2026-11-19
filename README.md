@@ -149,3 +149,45 @@ A shared WhatsApp inbox inside the CRM, using Meta's official WhatsApp Cloud API
 8. In WhatsApp Manager, add a payment method and create message templates.
 
 Instead of step 6 you can put the keys in Render → Environment: `WA_TOKEN`, `WA_APP_SECRET`, `WA_VERIFY_TOKEN`, `WA_WABA_ID`, `WA_SALES_PHONE_ID`, `WA_SERVICE_PHONE_ID`. Environment values override what is set in the app.
+
+## Version 15 — Billing (Swipe-style)
+A full GST billing section inside the CRM: **Billing** in the menu. It needs the *Billing* switch; purchases, vendors, expenses and profit need the *Purchases* switch.
+- **Documents**: Quotation, Tax Invoice, Proforma invoice, Delivery challan, Credit note and Purchase.
+  - A quotation can become an invoice, proforma or challan. Proforma and challan can become an invoice.
+  - Duplicate, edit or cancel any document. Cancelling gives the stock back and undoes balances.
+- **GST is worked out automatically**:
+  - Same state as the brand: CGST + SGST. Other state: IGST.
+  - Per-line discount, rates with or without GST, other charges, discount on the total, and round off.
+  - HSN/SAC on every line, a tax-rate table and the amount in words on the print.
+- **Each brand has its own GST profile** (Billing → Settings, Super Admin only):
+  - legal name, GSTIN, state, address, logo, colour, bank, IFSC and UPI
+  - default GST, default terms and print design (Modern, Classic or Thermal 3-inch)
+  - numbering prefix and next number, so you can **continue from Swipe's numbers**
+- **Payments**:
+  - Received or partial payments (Cash, UPI, Bank, Cheque or Card) with Unpaid / Partial / Paid / Overdue status.
+  - A credit note made against an invoice lowers what is due on it.
+- **Share & print**:
+  - Print / Save as PDF.
+  - Share a link with the customer (no login needed). It shows the bill and a **Pay by UPI** button for the amount due.
+  - Send the link by WhatsApp app, CRM WhatsApp or email.
+- **Products & stock**:
+  - Products and services with code, HSN, unit, selling and purchase price, GST, category, and opening stock with a low-stock alert.
+  - Invoices and challans take stock out; purchases and credit notes put it back. Stock in, stock out and set stock, with a history for each product.
+- **Customers & vendors**:
+  - GSTIN (the state is filled in from it), billing and shipping address, and opening balance.
+  - Each has a ledger with a running balance, and dues can be sent as WhatsApp reminders.
+- **Expenses** by category.
+- **Reports** (any date range, download to Excel or print):
+  - sales register, GST summary (sales and purchases, B2B/B2C), HSN summary
+  - item-wise sales with profit, customer-wise sales, payments, stock value
+  - purchase register, expenses, Profit & Loss
+- **Import from Swipe / Excel / CSV**:
+  - In Swipe, export Products, Customers or Vendors to Excel and upload the file in Billing.
+  - Columns are matched automatically and you can change any match before importing.
+  - Existing items are updated, not duplicated (matched by code or name, and by phone or GSTIN for parties).
+  - Import templates and Excel exports are included.
+- **Linked to the CRM**:
+  - Lead pop-up → *New quotation*.
+  - Ticket billing → *Make GST invoice from these lines*. It is marked paid automatically when the ticket's payment is received.
+  - The customer history shows bills and dues.
+- Not included: e-invoice (IRN) and e-way bill generation, which need a GST Suvidha Provider account.
