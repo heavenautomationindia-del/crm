@@ -5114,7 +5114,8 @@ app.post('/api/wc/:id/transport', wrap(async (req, res) => {
 
 // ---------- call leads (Rago Calls Android app) ----------
 const callCfg = async () => Object.assign({ min_sec: 300, incoming: true, outgoing: true }, (await q(`SELECT v FROM settings WHERE k='call_cfg'`)).rows.map(r => { try { return JSON.parse(r.v); } catch (e) { return {}; } })[0] || {});
-const callSee = (u, p) => { if (isSuper(u)) return 'true'; if (can(u, 'leads_all')) { if (!u.brand_id) return 'true'; p.push(u.brand_id); return `c.brand_id=$${p.length}`; } p.push(u.id); return `c.user_id=$${p.length}`; };
+const callAdmin = u => isSuper(u) || u.role === 'Admin';
+const callSee = (u, p) => { if (isSuper(u)) return 'true'; if (callAdmin(u) || can(u, 'leads_all')) { if (!u.brand_id) return 'true'; p.push(u.brand_id); return `c.brand_id=$${p.length}`; } p.push(u.id); return `c.user_id=$${p.length}`; };
 app.post('/api/calls/device-login', wrap(async (req, res) => {    // the phone app signs in once with the CRM username + password
   const ip = req.ip, t = tries[ip] || { n: 0, at: Date.now() }; if (Date.now() - t.at > 600000) { t.n = 0; t.at = Date.now(); }
   if (t.n >= 8) return res.status(429).json({ error: 'Too many attempts. Try again in 10 minutes.' });
@@ -5140,7 +5141,8 @@ app.post('/api/calls/device-token', wrap(async (req, res) => {    // the Rago CR
 app.get('/api/calls/device/cfg', wrap(async (req, res) => {
   await q('UPDATE call_devices SET last_seen=now() WHERE id=$1', [req.user.device_id]);
   const d = (await q('SELECT sim_label, sim_slot FROM call_devices WHERE id=$1', [req.user.device_id])).rows[0] || {};
-  res.json({ name: req.user.name, cfg: await callCfg(), sim_label: d.sim_label, sim_slot: d.sim_slot });
+  const us = (await q('SELECT call_sim FROM users WHERE id=$1', [req.user.id])).rows[0] || {};
+  res.json({ name: req.user.name, cfg: await callCfg(), sim_label: d.sim_label, sim_slot: d.sim_slot, sim: us.call_sim || 'all', managed: true });
 }));
 app.post('/api/calls/device/sim', wrap(async (req, res) => {
   const b = req.body || {}; await q('UPDATE call_devices SET sim_label=$2, sim_slot=$3, last_seen=now() WHERE id=$1', [req.user.device_id, String(b.sim_label || '').slice(0, 60) || null, Number.isInteger(+b.sim_slot) ? +b.sim_slot : null]);
@@ -5165,11 +5167,15 @@ app.post('/api/calls/device/sync', wrap(async (req, res) => {    // calls from t
   res.json({ ok: true, added, on_lead: onLead, skipped, min_sec: cfg.min_sec });
 }));
 app.get('/api/calls', need('calls'), wrap(async (req, res) => {
-  const p = [], sc = callSee(req.user, p), st = ['pending', 'accepted', 'ignored', 'existing'].includes(req.query.status) ? req.query.status : 'pending'; p.push(st);
+  const p = [], st = ['pending', 'accepted', 'ignored', 'existing'].includes(req.query.status) ? req.query.status : 'pending';
+  let sc = callSee(req.user, p); if (+req.query.user) { p.push(+req.query.user); sc += ` AND c.user_id=$${p.length}`; }
+  const p2 = p.slice(), sc2 = sc; p.push(st);
   const items = (await q(`SELECT c.*, l.name lead_name FROM calls c LEFT JOIN leads l ON l.id=c.lead_id WHERE ${sc} AND c.status=$${p.length} ORDER BY c.started_at DESC LIMIT 300`, p)).rows;
-  const p2 = [], sc2 = callSee(req.user, p2), cnt = (await q(`SELECT status, COUNT(*)::int n FROM calls c WHERE ${sc2} GROUP BY status`, p2)).rows.reduce((o, r) => (o[r.status] = r.n, o), {});
+  const cnt = (await q(`SELECT status, COUNT(*)::int n FROM calls c WHERE ${sc2} GROUP BY status`, p2)).rows.reduce((o, r) => (o[r.status] = r.n, o), {});
+  const p4 = [], sc4 = callSee(req.user, p4);
+  const staff = sc4 === `c.user_id=$1` ? [] : (await q(`SELECT DISTINCT c.user_id id, c.user_name name FROM calls c WHERE ${sc4} ORDER BY 2`, p4)).rows;
   const p3 = [req.user.id], devs = (await q(`SELECT id, name, sim_label, sim_slot, last_seen, created_at FROM call_devices WHERE user_id=$1 AND active ORDER BY id DESC`, p3)).rows;
-  res.json({ items, counts: cnt, cfg: await callCfg(), devices: devs, apk: fs.existsSync(path.join(__dirname, 'public', 'app', 'rago-calls.apk')) });
+  res.json({ items, counts: cnt, cfg: await callCfg(), devices: devs, staff, admin: callAdmin(req.user), apk: fs.existsSync(path.join(__dirname, 'public', 'app', 'rago-calls.apk')) });
 }));
 const callGet = async (req, res) => { const p = [+req.params.id], sc = callSee(req.user, p); const c = (await q(`SELECT c.* FROM calls c WHERE c.id=$1 AND ${sc}`, p)).rows[0]; if (!c) res.status(404).json({ error: 'Call not found' }); return c; };
 app.post('/api/calls/:id/accept', need('calls'), wrap(async (req, res) => {
@@ -5193,7 +5199,8 @@ app.post('/api/calls/settings', wrap(async (req, res) => {
   await q(`INSERT INTO settings(k,v) VALUES('call_cfg',$1) ON CONFLICT (k) DO UPDATE SET v=excluded.v`, [JSON.stringify(v)]); res.json({ ok: true, cfg: v });
 }));
 app.delete('/api/calls/devices/:id', wrap(async (req, res) => {
-  await q(`UPDATE call_devices SET active=false WHERE id=$1 AND (user_id=$2 OR $3)`, [+req.params.id, req.user.id, isSuper(req.user)]); res.json({ ok: true });
+  if (!callAdmin(req.user)) return res.status(403).json({ error: 'Only the Admin or Super Admin can remove a phone' });
+  await q(`UPDATE call_devices SET active=false WHERE id=$1`, [+req.params.id]); res.json({ ok: true });
 }));
 app.get(['/rago-calls.apk', '/rago-crm.apk'], (req, res) => { const f = path.join(__dirname, 'public', 'app', 'rago-calls.apk'); if (!fs.existsSync(f)) return res.status(404).send('The Android app file is not uploaded yet.'); res.download(f, 'rago-crm.apk'); });
 
@@ -5215,8 +5222,9 @@ const imapOf = (c, user, pass) => new (require('imapflow').ImapFlow)({ host: c.i
 const mailAcc = async uid => { const m = (await q('SELECT * FROM user_mail WHERE user_id=$1', [uid])).rows[0]; if (!m) return null; m.pass = await mailDec(m.pass_enc); return m; };
 const mailErr = e => /auth|login|credential|535|invalid/i.test(String(e && (e.message || e.response) || '')) ? 'Email or password is wrong' : /ENOTFOUND|ECONNREFUSED|ETIMEDOUT|timeout/i.test(String(e && e.message)) ? 'Could not reach the mail server' : 'Mail server error: ' + String(e && e.message || e).slice(0, 120);
 app.get('/api/mail/me', wrap(async (req, res) => {
-  const m = (await q('SELECT email, from_name, signature, smtp_host, smtp_port, imap_host, imap_port, ok_at FROM user_mail WHERE user_id=$1', [req.user.id])).rows[0];
-  res.json(m ? { connected: true, ...m } : { connected: false, email: req.user.email || '' });
+  const m = (await q('SELECT email, from_name, signature, smtp_host, smtp_port, imap_host, imap_port, ok_at, smtp_ok FROM user_mail WHERE user_id=$1', [req.user.id])).rows[0];
+  const relay = !!(await mailRelay());
+  res.json(m ? { connected: true, ...m, relay, can_send: relay || m.smtp_ok !== false, blocked_note: relay || m.smtp_ok !== false ? null : MAIL_BLOCKED } : { connected: false, email: req.user.email || '', relay });
 }));
 app.post('/api/mail/connect', wrap(async (req, res) => {
   const b = req.body || {}, email = String(b.email || '').trim().toLowerCase(), old = (await q('SELECT * FROM user_mail WHERE user_id=$1', [req.user.id])).rows[0] || {};
@@ -5224,14 +5232,17 @@ app.post('/api/mail/connect', wrap(async (req, res) => {
   let pass = String(b.password || ''); if (!pass && old.pass_enc && old.email === email) pass = await mailDec(old.pass_enc);
   if (!pass) return res.status(400).json({ error: 'Enter your email password' });
   const c = mailCfgOf(b, old);
-  try { await smtpOf(c, email, pass).verify(); } catch (e) { return res.status(400).json({ error: 'Sending check failed — ' + mailErr(e) }); }
+  const st = await smtpTry(c, email, pass);   // tries 465 and 587
+  if (st.err && !st.net) return res.status(400).json({ error: 'Sending check failed — ' + mailErr(st.err) });
+  const relay = await mailRelay(); let smtpOk = !st.err;
+  if (st.port) c.smtp_port = st.port;
   let sent = old.sent_folder || null;
   try { const im = imapOf(c, email, pass); await im.connect(); const L = await im.list(); const f = L.find(x => x.specialUse === '\\Sent') || L.find(x => /^(INBOX\.)?Sent$/i.test(x.path)); sent = f ? f.path : null; await im.logout(); }
-  catch (e) { return res.status(400).json({ error: 'Inbox check failed — ' + mailErr(e) }); }
-  await q(`INSERT INTO user_mail(user_id,email,from_name,signature,smtp_host,smtp_port,imap_host,imap_port,pass_enc,sent_folder,ok_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
-    ON CONFLICT (user_id) DO UPDATE SET email=$2, from_name=$3, signature=$4, smtp_host=$5, smtp_port=$6, imap_host=$7, imap_port=$8, pass_enc=$9, sent_folder=$10, ok_at=now()`,
-    [req.user.id, email, String(b.from_name || req.user.name || '').slice(0, 80), String(b.signature || '').slice(0, 1000) || null, c.smtp_host, c.smtp_port, c.imap_host, c.imap_port, await mailEnc(pass), sent]);
-  res.json({ ok: true, email });
+  catch (e) { return res.status(400).json({ error: (st.err ? 'Could not reach the mail server for sending or for the inbox — check the server names. ' : 'Inbox check failed — ') + mailErr(e) }); }
+  await q(`INSERT INTO user_mail(user_id,email,from_name,signature,smtp_host,smtp_port,imap_host,imap_port,pass_enc,sent_folder,ok_at,smtp_ok) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),$11)
+    ON CONFLICT (user_id) DO UPDATE SET email=$2, from_name=$3, signature=$4, smtp_host=$5, smtp_port=$6, imap_host=$7, imap_port=$8, pass_enc=$9, sent_folder=$10, ok_at=now(), smtp_ok=$11`,
+    [req.user.id, email, String(b.from_name || req.user.name || '').slice(0, 80), String(b.signature || '').slice(0, 1000) || null, c.smtp_host, c.smtp_port, c.imap_host, c.imap_port, await mailEnc(pass), sent, smtpOk]);
+  res.json({ ok: true, email, smtp_ok: smtpOk, relay: !!relay, warn: smtpOk || relay ? null : MAIL_BLOCKED });
 }));
 app.patch('/api/mail/me', wrap(async (req, res) => {
   const b = req.body || {}; await q('UPDATE user_mail SET from_name=COALESCE($2,from_name), signature=$3 WHERE user_id=$1', [req.user.id, b.from_name ? String(b.from_name).slice(0, 80) : null, String(b.signature || '').slice(0, 1000) || null]); res.json({ ok: true });
@@ -5253,7 +5264,9 @@ app.post('/api/mail/send', wrap(async (req, res) => {
   const sig = m.signature ? '\n\n' + m.signature : '';
   const html = `<div style="font:14px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#222">${mailEsc(text).replace(/\n/g, '<br>')}${link ? `<p><a href="${link}" style="display:inline-block;background:#e0a92b;color:#111;padding:10px 18px;border-radius:999px;text-decoration:none;font-weight:700">View ${mailEsc(BL_TYPES[doc.type].l)} ${mailEsc(doc.no)}</a></p>` : ''}${sig ? `<p style="color:#555">${mailEsc(m.signature).replace(/\n/g, '<br>')}</p>` : ''}</div>`;
   const msg = { from: { name: m.from_name || req.user.name, address: m.email }, to, cc: cc.length ? cc : undefined, subject, text: text + (link ? '\n\n' + link : '') + sig, html };
-  try { await smtpOf(m, m.email, m.pass).sendMail(msg); } catch (e) { return res.status(400).json({ error: 'Not sent — ' + mailErr(e) }); }
+  const relay = await mailRelay();
+  try { if (relay) await relaySend(relay, msg); else await smtpOf(m, m.email, m.pass).sendMail(msg); }
+  catch (e) { const net = /ENOTFOUND|ECONNREFUSED|ETIMEDOUT|ECONNRESET|timeout|Greeting/i.test(String(e && e.message)); return res.status(400).json({ error: relay ? 'Not sent — Brevo: ' + String(e.message || e).slice(0, 160) : net ? MAIL_BLOCKED : 'Not sent — ' + mailErr(e), blocked: !relay && net }); }
   if (m.sent_folder) (async () => {   // keep a copy in the mailbox's Sent folder
     try { const raw = await new Promise((ok, no) => new (require('nodemailer/lib/mail-composer'))(msg).compile().build((e, r) => e ? no(e) : ok(r))); const im = imapOf(m, m.email, m.pass); await im.connect(); await im.append(m.sent_folder, raw, ['\\Seen']); await im.logout(); } catch (e) { console.error('mail sent copy', e.message); }
   })();
@@ -5266,11 +5279,11 @@ app.post('/api/mail/send', wrap(async (req, res) => {
 }));
 app.get('/api/mail/log', wrap(async (req, res) => {
   const p = [], w = []; for (const k of ['lead_id', 'customer_id', 'doc_id', 'service_id']) if (+req.query[k]) { p.push(+req.query[k]); w.push(`${k}=$${p.length}`); }
-  if (!w.length) { p.push(req.user.id); w.push(`user_id=$${p.length}`); } else if (!isSuper(req.user)) { p.push(req.user.id); w.push(`(user_id=$${p.length} OR ${can(req.user, 'leads_all') || can(req.user, 'billing') ? 'true' : 'false'})`); }
+  if (!w.length) { if (isSuper(req.user) && req.query.all === '1') w.push('true'); else if (isSuper(req.user) && +req.query.user) { p.push(+req.query.user); w.push(`user_id=$${p.length}`); } else { p.push(req.user.id); w.push(`user_id=$${p.length}`); } } else if (!isSuper(req.user)) { p.push(req.user.id); w.push(`(user_id=$${p.length} OR ${can(req.user, 'leads_all') || can(req.user, 'billing') ? 'true' : 'false'})`); }
   res.json((await q(`SELECT id, user_name, from_email, to_email, cc, subject, body, lead_id, customer_id, doc_id, service_id, created_at FROM mail_log WHERE ${w.join(' AND ')} ORDER BY id DESC LIMIT 100`, p)).rows);
 }));
 app.get('/api/mail/inbox', wrap(async (req, res) => {
-  const m = await mailAcc(req.user.id); if (!m) return res.status(400).json({ error: 'Connect your email first', need_connect: true });
+  const A = await mailFor(req); if (A.err) return res.status(A.need ? 400 : 403).json({ error: A.err, need_connect: !!A.need }); const m = A.m;
   const folder = req.query.folder === 'sent' ? (m.sent_folder || 'INBOX.Sent') : 'INBOX', lim = Math.min(50, +req.query.limit || 30), before = +req.query.before || 0;
   const im = imapOf(m, m.email, m.pass), out = [];
   try {
@@ -5285,11 +5298,11 @@ app.get('/api/mail/inbox', wrap(async (req, res) => {
   } catch (e) { try { im.close(); } catch (x) {} if (!res.headersSent) res.status(400).json({ error: mailErr(e) }); }
 }));
 app.get('/api/mail/msg/:uid', wrap(async (req, res) => {
-  const m = await mailAcc(req.user.id); if (!m) return res.status(400).json({ error: 'Connect your email first', need_connect: true });
+  const A = await mailFor(req); if (A.err) return res.status(A.need ? 400 : 403).json({ error: A.err, need_connect: !!A.need }); const m = A.m, other = !!A.other;
   const folder = req.query.folder === 'sent' ? (m.sent_folder || 'INBOX.Sent') : 'INBOX', im = imapOf(m, m.email, m.pass);
   try {
     await im.connect(); const lock = await im.getMailboxLock(folder); let src;
-    try { const x = await im.fetchOne(String(+req.params.uid), { source: true }, { uid: true }); src = x && x.source; if (src) await im.messageFlagsAdd(String(+req.params.uid), ['\\Seen'], { uid: true }); } finally { lock.release(); }
+    try { const x = await im.fetchOne(String(+req.params.uid), { source: true }, { uid: true }); src = x && x.source; if (src && !other) await im.messageFlagsAdd(String(+req.params.uid), ['\\Seen'], { uid: true }); } finally { lock.release(); }
     await im.logout(); if (!src) return res.status(404).json({ error: 'Message not found' });
     const P = await require('mailparser').simpleParser(src), from = (P.from && P.from.value[0]) || {};
     const addr = String(from.address || '').toLowerCase(), pl = [addr];
@@ -5358,5 +5371,62 @@ app.post('/api/bl/credit-approvals/:id/decide', superOnly, wrap(async (req, res)
   res.json({ ok: true });
 }));
 
-init().then(initGST).then(initChat).then(initProjects).then(initWA).then(initBL).then(initWC).then(initRoles).then(initFV).then(initV29).then(initV30).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
+// ---------- V32: call leads set up by Admin / Super Admin (SIM per staff), Super Admin can read every connected mailbox ----------
+async function initV32() { await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS call_sim TEXT`); }
+app.get('/api/calls/staff', wrap(async (req, res) => {
+  if (!callAdmin(req.user)) return res.status(403).json({ error: 'Not allowed' });
+  const p = []; let w = `u.active AND (u.role=$1 OR 'calls'=ANY(u.permissions))`; p.push(SUPER);
+  if (!isSuper(req.user) && req.user.brand_id) { p.push(req.user.brand_id); w += ` AND u.brand_id=$${p.length}`; }
+  const rows = (await q(`SELECT u.id, u.name, u.role, COALESCE(u.call_sim,'all') sim, b.name brand,
+    (SELECT json_agg(json_build_object('id',d.id,'name',d.name,'sim_label',d.sim_label,'last_seen',d.last_seen) ORDER BY d.id DESC) FROM call_devices d WHERE d.user_id=u.id AND d.active) devices
+    FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE ${w} AND u.role<>$1 ORDER BY lower(u.name)`, p)).rows;
+  res.json(rows);
+}));
+app.post('/api/calls/staff/:id', wrap(async (req, res) => {
+  if (!callAdmin(req.user)) return res.status(403).json({ error: 'Only the Admin or Super Admin can change this' });
+  const sim = ['all', '1', '2'].includes(String((req.body || {}).sim)) ? String(req.body.sim) : 'all';
+  const p = [+req.params.id]; let w = 'id=$1'; if (!isSuper(req.user) && req.user.brand_id) { p.push(req.user.brand_id); w += ` AND brand_id=$${p.length}`; }
+  const r = await q(`UPDATE users SET call_sim=$${p.length + 1} WHERE ${w}`, [...p, sim]); if (!r.rowCount) return res.status(404).json({ error: 'Staff not found' });
+  res.json({ ok: true, sim });
+}));
+// Super Admin: read the mailbox of any staff who connected their email (read-only)
+const mailFor = async (req) => { if (+req.query.user && +req.query.user !== req.user.id) { if (!isSuper(req.user)) return { err: 'Not allowed' }; const m = await mailAcc(+req.query.user); return m ? { m, other: true } : { err: 'This staff has not connected their email' }; } const m = await mailAcc(req.user.id); return m ? { m } : { err: 'Connect your email first', need: true }; };
+app.get('/api/mail/accounts', superOnly, wrap(async (req, res) => {
+  res.json((await q(`SELECT m.user_id id, u.name, u.role, m.email, m.ok_at FROM user_mail m JOIN users u ON u.id=m.user_id ORDER BY lower(u.name)`)).rows);
+}));
+
+// ---------- email sending when the host blocks mail ports (Render free plan blocks 465 / 587): try both ports, or send through Brevo over HTTPS ----------
+const MAIL_BLOCKED = 'Your server (Render) is blocking the email sending ports, so the CRM cannot reach Hostinger to send. Your inbox still works. To send: the Super Admin adds a Brevo key in Mail → Settings → Sending route, or moves the Render service to a paid plan.';
+const smtpTry = async (c, email, pass) => {
+  const ports = [c.smtp_port, c.smtp_port === 465 ? 587 : 465].filter((v, i, a) => a.indexOf(v) === i); let last = null;
+  for (const port of ports) {
+    try { await smtpOf({ ...c, smtp_port: port }, email, pass).verify(); return { port }; }
+    catch (e) { last = e; const net = /ENOTFOUND|ECONNREFUSED|ETIMEDOUT|ECONNRESET|timeout|Greeting/i.test(String(e && e.message)); if (!net) return { err: e, net: false }; }
+  }
+  return { err: last, net: true };
+};
+async function initV32b() { await q(`ALTER TABLE user_mail ADD COLUMN IF NOT EXISTS smtp_ok BOOLEAN DEFAULT true`); }
+const BREVO = () => (process.env.BREVO_URL || 'https://api.brevo.com').replace(/\/$/, '');
+const mailRelay = async () => { const r = (await q(`SELECT v FROM settings WHERE k='mail_relay'`)).rows[0]; if (!r) return null; try { const v = JSON.parse(r.v); return v && v.key_enc ? { provider: 'brevo', key: await mailDec(v.key_enc), tail: v.tail } : null; } catch (e) { return null; } };
+const relaySend = async (relay, msg) => {
+  const addr = x => (typeof x === 'string' ? { email: x } : { email: x.address, name: x.name });
+  const body = { sender: addr(msg.from), to: msg.to.map(e => ({ email: e })), subject: msg.subject || '(no subject)', htmlContent: msg.html, textContent: msg.text, replyTo: addr(msg.from) };
+  if (msg.cc) body.cc = msg.cc.map(e => ({ email: e }));
+  const r = await fetch(BREVO() + '/v3/smtp/email', { method: 'POST', headers: { 'api-key': relay.key, 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) { let t = ''; try { t = (await r.json()).message || ''; } catch (e) {} throw new Error(t || 'error ' + r.status); }
+};
+app.get('/api/mail/relay', superOnly, wrap(async (req, res) => { const r = await mailRelay(); res.json(r ? { on: true, provider: 'brevo', tail: r.tail } : { on: false }); }));
+app.post('/api/mail/relay', superOnly, wrap(async (req, res) => {
+  const b = req.body || {};
+  if (b.off) { await q(`DELETE FROM settings WHERE k='mail_relay'`); return res.json({ ok: true, on: false }); }
+  const key = String(b.key || '').trim(); if (key.length < 20) return res.status(400).json({ error: 'Paste the Brevo API key (it starts with xkeysib-)' });
+  let r; try { r = await fetch(BREVO() + '/v3/account', { headers: { 'api-key': key, accept: 'application/json' } }); } catch (e) { return res.status(400).json({ error: 'Could not reach Brevo' }); }
+  if (r.status === 401) return res.status(400).json({ error: 'Brevo says this key is not valid' });
+  if (!r.ok) return res.status(400).json({ error: 'Brevo error ' + r.status });
+  const tail = '••••' + key.slice(-4);
+  await q(`INSERT INTO settings(k,v) VALUES('mail_relay',$1) ON CONFLICT (k) DO UPDATE SET v=excluded.v`, [JSON.stringify({ provider: 'brevo', key_enc: await mailEnc(key), tail })]);
+  res.json({ ok: true, on: true, tail });
+}));
+
+init().then(initGST).then(initChat).then(initProjects).then(initWA).then(initBL).then(initWC).then(initRoles).then(initFV).then(initV29).then(initV30).then(initV32).then(initV32b).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
   .catch(e => { console.error('DB init failed', e.message); process.exit(1); });

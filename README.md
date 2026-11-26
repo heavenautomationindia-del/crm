@@ -505,3 +505,26 @@ Any web app has to send its screen code to the browser to run it, so a determine
 4. Battery: Settings → Apps → Rago CRM → Battery → **No restrictions**.
 
 iPhone: keep using Safari → Share → Add to Home Screen. Call leads are not possible on iPhone.
+
+## Version 32 — Call leads managed by Admin, staff filter, Super Admin reads mailboxes, email when Render blocks mail ports
+
+**Call leads**
+- **Staff filter** (Admin / Super Admin): choose a person to see only their calls and counts.
+- **Only Admin / Super Admin set it up:**
+  - Call leads → **👥 Staff phones**: choose the SIM for each person (All SIMs / SIM 1 / SIM 2). Their phone follows it at the next sync.
+  - Only Admin / Super Admin can remove a phone or change the call length.
+  - In the app, staff only see the SIM (read only) and cannot switch call leads off.
+- Rago CRM app **v3** (included as `public/app/rago-calls.apk`) is needed for the SIM-from-CRM part. It installs over v2.
+
+**Mail**
+- **Super Admin can open any staff mailbox** (Mail → mailbox picker). This is read only: no reply, and messages are not marked read for the staff. Staff see "The Super Admin can read this mailbox" when they connect.
+- Super Admin's "Sent from CRM" shows everyone's emails.
+- **"Could not reach the mail server" when connecting:** Render's free plan blocks the email sending ports (465 / 587). Now:
+  1. The CRM tries both ports.
+  2. If sending is blocked, the email still connects. The inbox works and a clear "Sending is blocked" note shows.
+  3. Super Admin can turn on **Mail → Settings → Sending route → Brevo**. Emails then go through Brevo over normal web traffic, still **from each person's own address**, with a copy in their Hostinger Sent folder.
+- Brevo setup:
+  - Make a Brevo account.
+  - Senders, Domains & IPs → Domains → add your domain, and copy its DNS records into Hostinger → Domains → DNS until it shows verified.
+  - SMTP & API → API keys → Generate → paste it in the CRM.
+- Other fix: move the Render service to a paid plan (mail ports open). Then no Brevo is needed.
