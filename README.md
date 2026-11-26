@@ -387,3 +387,97 @@ A full GST billing section inside the CRM: **Billing** in the menu. It needs the
   - The visit result goes into the **lead history**, the planned visit becomes **Visited**, and **the person who assigned it gets a "✅ Field visit done" notification**.
   - The assigner can **cancel** a planned visit (✕ in the lead), and the field person is told.
 - **Fix:** the map on Field Visits no longer covers the bottom menu bar and the top bar while scrolling on phones.
+
+## Version 27 — Field Sales Dashboard for Super Admin / Admin / Sales admin
+- **Super Admin no longer gets Start day / Check in / GPS tracking.** Field Visits opens the **📊 Field Sales Dashboard** instead. Admin and Sales admin (anyone with "See everyone's field visits") get the same dashboard; if they also do field visits themselves they keep **My day**.
+- **Tabs:** Dashboard · Person (any field person's day: map, photos, notes, km) · Team today · Month report.
+- **Period:** Today · This week · This month · Last month.
+- **Tiles:**
+  - Field staff out today (e.g. 7/17) and **on site now**
+  - Visits, **Km travelled**, **Travel allowance ₹**
+  - New customers, **Orders confirmed**, **Planned visits** (with how many are late)
+- **🟢 Live today:** a map with each person's last position. The badge colour shows On site, Travelling or Day ended. Each person shows their status ("At Murugan Traders since 10:20", "Travelling", "Day ended", "Not started") and today's visits and km. Tap a person to see their day.
+- **How visits went:** results of all visits (Order confirmed, Quotation needed, Interested…) with bars and %.
+- **👥 By person:** visits, km, allowance, rate, new customers, orders, planned and late visits per person. Tap a person to see their month.
+- **🗓 Planned visits** (assigned from leads) with late ones in red, and **🕘 Latest visits** with photo, customer, person and result.
+- Admin / Sales admin of a brand see only that brand's field staff.
+
+## Version 28 — Field visit questions at check-out, stronger protection
+
+**Field Visits — questions only at check-out**
+- Check in is now one tap: only the time and GPS location are saved.
+- Everything else is asked when the person taps **Check out**: customer (search old or add new), purpose, photos, description, how it went, next follow-up, and "add as lead".
+- Check-out will not finish until a customer is chosen or typed.
+- Visits planned from Leads still know the customer at check-in, so check-out skips the customer step for them.
+
+**Protection**
+- Security headers on every page (stops other sites from framing the CRM, blocks unknown scripts, hides the server type).
+- The app page sent to browsers is compacted: comments removed, inner names shortened. The readable code stays only on GitHub and the server.
+- Server files (server.js, package.json, .env, node_modules) can never be downloaded. Search engines are told not to index the CRM.
+- Database and internal errors are no longer shown to users. They only show "Something went wrong" (details go to the Render log).
+- An account locks for 15 minutes after 10 wrong passwords, even when the attempts come from different networks. This adds to the existing limit per network.
+- Every API checks login and permissions on the server, so a user gets only the data and features their role allows, even if they try to call the API directly.
+
+**What protection cannot do (honest note)**
+Any web app has to send its screen code to the browser to run it, so a determined person can still read the compacted code. The real protection is what stays on the server: passwords, API keys, the database and the permission checks. To keep it safe:
+1. Keep the GitHub repo **private**.
+2. Never share the Render dashboard or the environment keys.
+3. Give each user only the features they need (Settings → Roles / user form).
+4. Turn off a user as soon as they leave.
+
+## Version 29 — Call leads, email from your own mailbox, delivery details, bill filters, branch-wise products
+
+**Billing**
+- Every list (invoices, quotations, challans…) can be sorted by tapping **Amount, Status, Bill #, Customer or Date**. Tap again to reverse the order.
+- **⚲ Filter**: amount from/to, status, bill number, customer, date from/to, and delivery (not delivered yet / transport / collected).
+- **Create Quotation / Invoice**: the category chips are gone. Product search shows only the chosen branch's products (plus products shared by all branches).
+- The customer box now also shows the **open leads of that branch**. Picking a lead links the bill to the lead, and it becomes a customer when you save.
+- **Products & Inventory are branch-wise.** Each product has a Branch (or "All branches"). Use **🏷 Set branch** on the Products tab to move many products at once, e.g. "all products not given a branch yet → Heaven".
+
+**Delivery (invoices and delivery challans)**
+- Choose **🤝 Collected by customer** (who collected it, date) or **🚚 By transport** (transport name, tracking / LR number, vehicle number, date, details, photo).
+- Set it while creating the bill or later with the 🚚 Delivery button. It is printed on the bill.
+
+**Call leads (Android phones)**
+- New menu **Call leads**. Calls of the set length (default **5 min**) from the chosen SIM come in with number, contact name, duration and SIM.
+- Tap **＋ Add to leads** (source "Call") or Ignore. Calls with a number that is already a lead are added to that lead's history automatically.
+- Super Admin / Admin set the minimum call length and choose incoming/outgoing (⚙ Call length).
+- Turn on **"Call leads"** on the user (Team → user → features). It is on by default for new Sales and Sales Admin users.
+- This needs the small **Rago Calls** Android app (sign in once, choose SIM, allow call logs). iPhone does not allow any app to read calls.
+
+**Rago Calls Android app**
+- The app file is inside the CRM: `public/app/rago-calls.apk`. Staff download it from **Call leads → Download app** (Android only).
+- Install: allow "Install unknown apps" for the browser when Android asks. Open the app, check the CRM address (`https://rago-crm.onrender.com`), and sign in with the CRM username/password.
+- Choose the SIM, then tap **Allow permissions** (Call logs + Phone).
+- Android 13+: if Call logs is greyed out, go to App info → ⋮ → **Allow restricted settings** first.
+- Set battery to **No restrictions** for Rago Calls. It syncs after every call and every 15 minutes, plus "Sync now".
+- Only calls of the set length or longer are sent. Short calls never leave the phone.
+
+**Warranty & Service — transport**
+- On each case, add the transport details for every trip: **Received from customer, Sent to vendor, Back from vendor, Sent to customer**.
+- Each trip is "by transport" (courier / transport name, tracking or LR number, vehicle, date, details, photo) or "by hand" (person name). Every trip is added to the case history.
+
+**Mail**
+- New menu **Mail**. Each user connects **their own Hostinger email** once (email + password). The CRM checks sending and inbox before saving. The password is stored encrypted and never shown again.
+- Read your inbox and sent mail, open and reply.
+- **✉ Email** buttons on quotations/invoices (adds a "View bill" button with the link) and on leads. Emails sent from the CRM are saved in the mailbox's Sent folder and in the lead's history.
+
+**Render setup (one time)**
+- Render → your service → Environment → add `MAIL_KEY` = any long random text (e.g. 40 letters and numbers). Do this before staff connect their email. Don't change it later, or everyone has to reconnect their email.
+
+## Version 30 — Credit period per customer, overdue block with MD approval
+
+**Credit period**
+- Each customer can have their own **Credit period (days)** (Billing → Customers → edit).
+- When you make an invoice for that customer, the due date is filled automatically (bill date + credit days).
+- Customers without their own period use the **default credit period** from Billing → Settings → Credit control.
+
+**Stop new bills while a bill is overdue (switch in Billing → Settings → Credit control, MD only)**
+- When it is on, a new **invoice or quotation** for a customer with an overdue invoice cannot be saved. This also covers converting a quotation into an invoice.
+- Overdue means the due date (plus any "extra grace days") has passed and money is still due.
+- In the bill editor, a red box under the customer shows the overdue bills and the amount as soon as the customer is chosen.
+- Staff can still **save as draft**. Other bill types (proforma, challan, credit note) and other customers are not affected.
+- The block is lifted when:
+  1. the overdue payment is received, or
+  2. the **MD (Super Admin) approves**. Staff tap **🔒 Ask MD approval** (with a note), and the MD gets a notification and sees **🔒 Approvals** in Billing. An approval is valid **till tonight** for that customer.
+- The MD can also approve directly while saving ("Approve as MD & save"). Every approval is recorded.

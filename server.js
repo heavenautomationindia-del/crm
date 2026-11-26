@@ -15,8 +15,50 @@ const SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('he
 const app = express();
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '24mb', verify: (req, res, buf) => { if (req.originalUrl.startsWith('/webhook/')) req.rawBody = buf; } }));
-app.use(express.static(path.join(__dirname, 'public')));
-const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(e => { console.error(e); res.status(500).json({ error: e.message }); });
+// ---------- protection: security headers, compact app code, no internal details in errors ----------
+const fs = require('fs');
+app.disable('x-powered-by');
+const CSP = ["default-src 'self'", "script-src 'self' 'unsafe-inline'", "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com", "font-src 'self' data: https://fonts.gstatic.com",
+  "img-src 'self' data: blob: https://*.tile.openstreetmap.org", "media-src 'self' data: blob:", "connect-src 'self'", "frame-src 'self' https://maps.google.com https://www.google.com",
+  "worker-src 'self'", "manifest-src 'self'", "object-src 'none'", "base-uri 'self'", "form-action 'self'", "frame-ancestors 'self'"].join('; ');
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('X-Frame-Options', 'SAMEORIGIN'); res.setHeader('Referrer-Policy', 'same-origin');
+  res.setHeader('Permissions-Policy', 'geolocation=(self), camera=(self), microphone=(self), payment=(), usb=()');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin'); res.setHeader('Content-Security-Policy', CSP);
+  if (req.secure) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store');
+  next();
+});
+// the app page is sent to browsers compacted: comments removed, inner names shortened (readable source stays only in your GitHub / server)
+let APP_HTML = null, APP_ETAG = null;
+const appFile = path.join(__dirname, 'public', 'index.html');
+(async () => {
+  try {
+    const { minify } = require('terser'); let src = fs.readFileSync(appFile, 'utf8');
+    const parts = src.split(/(<script(?![^>]*\bsrc=)[^>]*>[\s\S]*?<\/script>|<style[^>]*>[\s\S]*?<\/style>)/i);
+    for (let i = 0; i < parts.length; i++) {
+      const x = parts[i];
+      if (/^<script/i.test(x)) { const open = x.match(/^<script[^>]*>/i)[0], body = x.slice(open.length, -9);
+        const r = await minify(body, { compress: { passes: 2 }, mangle: { toplevel: false }, format: { comments: false } }); parts[i] = open + r.code + '</script>'; }
+      else if (/^<style/i.test(x)) parts[i] = x.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\n\s*/g, '').replace(/\s*([{};,])\s*/g, '$1');
+      else parts[i] = x.replace(/<!--[\s\S]*?-->/g, '').replace(/>\s*\n\s*</g, '><');
+    }
+    APP_HTML = parts.join(''); APP_ETAG = '"' + crypto.createHash('sha1').update(APP_HTML).digest('base64url') + '"';
+    console.log(`App page compacted ${Math.round(src.length / 1024)} KB → ${Math.round(APP_HTML.length / 1024)} KB`);
+  } catch (e) { console.error('compact app page failed — serving the normal page', e.message); }
+})();
+app.get(['/', '/index.html'], (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache'); res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  if (!APP_HTML) return res.sendFile(appFile);
+  res.setHeader('ETag', APP_ETAG); if (req.headers['if-none-match'] === APP_ETAG) return res.status(304).end();
+  res.type('html').send(APP_HTML);
+});
+app.get('/robots.txt', (req, res) => res.type('text/plain').send('User-agent: *\nDisallow: /\n'));
+app.use(express.static(path.join(__dirname, 'public'), { index: false, dotfiles: 'deny' }));
+// database / internal errors never reach the browser (they are written to the server log instead)
+const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(e => { console.error(e);
+  const internal = e && (e.code && /^[0-9A-Z]{5}$/.test(e.code) || e.severity || e.routine || /ECONN|ETIMEDOUT|ENOTFOUND|syntax|relation|column|violates/i.test(e.message || ''));
+  res.status(500).json({ error: internal ? 'Something went wrong. Please try again.' : e.message }); });
 
 // ---------- master data ----------
 const REPORT_PHOTO_REQUIRED = true;   // technician must attach a report-book photo before 'Work done'
@@ -57,13 +99,14 @@ const PERMS = [
   { k: 'whatsapp', l: 'WhatsApp — see and reply on the Sales & Service numbers', g: 'Features' },
   { k: 'field', l: 'Field visits — check in / out at customer sites with GPS, photos & km travelled', g: 'Features' },
   { k: 'field_team', l: 'See everyone’s field visits, routes & kilometres', g: 'Attendance & pay' },
+  { k: 'calls', l: 'Call leads — phone calls longer than the set time come in as leads (Rago Calls Android app)', g: 'Features' },
 ];
 const TECH_KEYS = ['view_phone', 'view_charges', 'chat', 'projects', 'voice_assign', 'whatsapp', 'field'], STAFF_KEYS = ['chat', 'field'];
 const ALL_KEYS = PERMS.map(p => p.k);
 const DEFAULTS = {
   Admin: ALL_KEYS.filter(k => !['team', 'payroll'].includes(k)),
-  'Sales Admin': ['dashboard', 'customers', 'leads', 'leads_all', 'lead_lists', 'service_create', 'view_charges', 'view_phone', 'customer_edit', 'billing', 'chat', 'projects', 'voice_assign', 'whatsapp', 'field', 'field_team', 'att_team'],
-  Sales: ['dashboard', 'services', 'customers', 'leads', 'service_create', 'view_charges', 'view_phone', 'chat', 'projects', 'voice_assign', 'whatsapp', 'field'],
+  'Sales Admin': ['dashboard', 'customers', 'leads', 'leads_all', 'lead_lists', 'service_create', 'view_charges', 'view_phone', 'customer_edit', 'billing', 'chat', 'projects', 'voice_assign', 'whatsapp', 'field', 'field_team', 'att_team', 'calls'],
+  Sales: ['dashboard', 'services', 'customers', 'leads', 'service_create', 'view_charges', 'view_phone', 'chat', 'projects', 'voice_assign', 'whatsapp', 'field', 'calls'],
   Technician: ['view_phone', 'chat', 'projects'],
   Staff: ['chat'],
 };
@@ -101,6 +144,12 @@ const payNeed = (req, res, next) => can(req.user, 'payroll') ? next() : res.stat
 const superOnly = (req, res, next) => isSuper(req.user) ? next() : res.status(403).json({ error: 'Only the Super Admin can delete' });
 const techOnly = (req, res, next) => (isTech(req.user) || isSuper(req.user)) ? next() : res.status(403).json({ error: 'Not allowed' });
 const auth = wrap(async (req, res, next) => {
+  if (req.path.startsWith('/calls/device/') && /^Bearer rgd_[A-Za-z0-9_-]{30,}$/.test(req.headers.authorization || '')) {   // Rago Calls phone app
+    const th = crypto.createHash('sha256').update(req.headers.authorization.slice(7)).digest('hex');
+    const u = (await q(`SELECT u.id,u.name,u.email,u.phone,u.role,u.job_role,u.username,u.permissions,u.active,u.brand_id, b.name brand_name, dv.id device_id FROM call_devices dv JOIN users u ON u.id=dv.user_id LEFT JOIN brands b ON b.id=u.brand_id WHERE dv.token_hash=$1 AND u.active AND dv.active`, [th])).rows[0];
+    if (!u) return res.status(401).json({ error: 'This phone is signed out. Sign in again in the Rago Calls app.' });
+    req.user = u; return next();
+  }
   const d = unsign(cookies(req.headers.cookie).gz);
   const u = d && (await q('SELECT u.id,u.name,u.email,u.phone,u.role,u.job_role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at, b.name brand_name FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.id=$1 AND u.active', [d.id])).rows[0];
   if (!u) return res.status(401).json({ error: 'Login required' });
@@ -115,10 +164,13 @@ app.post('/api/login', wrap(async (req, res) => {
   if (Date.now() - t.at > 600000) { t.n = 0; t.at = Date.now(); }
   if (t.n >= 8) return res.status(429).json({ error: 'Too many attempts. Try again in 10 minutes.' });
   const { username, password } = req.body || {};
+  const uk = 'u:' + String(username || '').trim().toLowerCase(), tu = tries[uk] || { n: 0, at: Date.now() };
+  if (Date.now() - tu.at > 900000) { tu.n = 0; tu.at = Date.now(); }
+  if (tu.n >= 10) return res.status(429).json({ error: 'This account is locked for 15 minutes after many wrong passwords.' });
   const u = (await q('SELECT * FROM users WHERE lower(username)=lower($1)', [String(username || '').trim()])).rows[0];
-  if (!u || !verify(String(password || ''), u.password_hash)) { tries[ip] = { n: t.n + 1, at: t.at }; return res.status(401).json({ error: 'Wrong username or password' }); }
+  if (!u || !verify(String(password || ''), u.password_hash)) { tries[ip] = { n: t.n + 1, at: t.at }; if (u) tries[uk] = { n: tu.n + 1, at: tu.at }; return res.status(401).json({ error: 'Wrong username or password' }); }
   if (!u.active) return res.status(403).json({ error: 'Your account has been disabled. Please contact the Super Admin.' });
-  delete tries[ip];
+  delete tries[ip]; delete tries[uk];
   if (u.brand_id) u.brand_name = ((await q('SELECT name FROM brands WHERE id=$1', [u.brand_id])).rows[0] || {}).name;
   const secure = req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
   res.setHeader('Set-Cookie', `gz=${sign({ id: u.id, exp: Date.now() + 30 * 864e5 })}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 86400}${secure}`);
@@ -132,7 +184,7 @@ app.use('/api', (req, res, next) => {
     res.on('finish', () => { if (res.statusCode < 400) VER = Math.max(VER + 1, Date.now()); });
   next();
 });
-app.use('/api', (req, res, next) => (req.path === '/login' || req.path === '/logout') ? next() : auth(req, res, next));
+app.use('/api', (req, res, next) => (req.path === '/login' || req.path === '/logout' || req.path === '/calls/device-login') ? next() : auth(req, res, next));
 app.get('/api/pulse', wrap(async (req, res) => {
   const r = (await q('SELECT COALESCE(MAX(id),0)::int last, COUNT(*) FILTER (WHERE NOT read)::int unread FROM notifications WHERE user_id=$1', [req.user.id])).rows[0];
   res.set('Cache-Control', 'no-store').json({ v: VER, last: r.last, unread: r.unread, chat: can(req.user, 'chat') ? await chatUnread(req.user.id).catch(() => 0) : 0, wa: can(req.user, 'whatsapp') ? await waUnread(req.user).catch(() => 0) : 0, wa_last: can(req.user, 'whatsapp') ? ((await q('SELECT COALESCE(MAX(id),0)::int n FROM wa_messages').catch(() => ({ rows: [{ n: 0 }] }))).rows[0].n) : 0, chat_last: (await q('SELECT COALESCE(MAX(id),0)::int n FROM chat_messages')).rows[0].n });
@@ -3545,6 +3597,7 @@ async function initFV() {
   CREATE TABLE IF NOT EXISTS fv_days (user_id INT NOT NULL, day DATE NOT NULL, started_at TIMESTAMPTZ, start_lat DOUBLE PRECISION, start_lng DOUBLE PRECISION, ended_at TIMESTAMPTZ, end_lat DOUBLE PRECISION, end_lng DOUBLE PRECISION, PRIMARY KEY(user_id, day));`);
   await q(`ALTER TABLE fv_days ADD COLUMN IF NOT EXISTS rate NUMERIC(8,2)`);
   await q(`ALTER TABLE fv_visits ADD COLUMN IF NOT EXISTS plan_id INT`);
+  await q(`ALTER TABLE fv_visits ADD COLUMN IF NOT EXISTS cust_pending BOOLEAN DEFAULT false`);
   if (!(await q(`SELECT 1 FROM settings WHERE k='fv_perm_v1'`)).rows.length) {   // sales people get field visits once
     await q(`UPDATE users SET permissions = (SELECT ARRAY(SELECT DISTINCT unnest(permissions || ARRAY['field']))) WHERE role='Sales'`);
     await q(`INSERT INTO settings(k,v) VALUES('fv_perm_v1','1') ON CONFLICT (k) DO NOTHING`);
@@ -3697,6 +3750,39 @@ app.patch('/api/fv/plans/:id', need('leads', 'field', 'field_team'), wrap(async 
   else if (/^\d{4}-\d{2}-\d{2}$/.test(b.date || '')) await q(`UPDATE fv_plans SET plan_date=$2 WHERE id=$1`, [pl.id, b.date]);
   res.json({ ok: true });
 }));
+// ---- Field Sales dashboard (Super Admin / Admin / Sales admin) ----
+app.get('/api/fv/dashboard', need('field_team'), wrap(async (req, res) => {
+  const today = await todayIST(), ok = x => /^\d{4}-\d{2}-\d{2}$/.test(x || '');
+  const to = ok(req.query.to) ? req.query.to : today, from = ok(req.query.from) ? req.query.from : today.slice(0, 8) + '01';
+  const bp = [], bw = req.user.brand_id && !isSuper(req.user) ? (bp.push(req.user.brand_id), `AND (u.brand_id IS NULL OR u.brand_id=$${bp.length})`) : '';
+  const staff = (await q(`SELECT u.id, u.name, u.photo_v, u.job_role, u.role FROM users u WHERE u.active AND 'field'=ANY(u.permissions) AND u.role<>'${SUPER}' ${bw} ORDER BY u.name`, bp)).rows;
+  const ids = staff.map(u => u.id), cfg = await fvCfg();
+  const days = ids.length ? (await q(`SELECT DISTINCT user_id, to_char(day,'YYYY-MM-DD') AS d FROM (SELECT user_id, day FROM fv_visits WHERE day BETWEEN $1 AND $2 UNION SELECT user_id, day FROM fv_days WHERE day BETWEEN $1 AND $2 AND started_at IS NOT NULL) t WHERE user_id=ANY($3) ORDER BY 2`, [from, to, ids])).rows : [];
+  const per = Object.fromEntries(staff.map(u => [u.id, { id: u.id, name: u.name, photo_v: u.photo_v, role: u.job_role || u.role, rate: fvRate(cfg, u.id), days: 0, visits: 0, km: 0, amount: 0, new_customers: 0, orders: 0, on_site_min: 0, planned: 0, overdue: 0, now: 'Not started', last: null }]));
+  const outcomes = {}, todayLive = {};
+  for (const r of days) { const d = await fvDay(r.user_id, r.d), x = per[r.user_id]; if (!x) continue;
+    x.days++; x.visits += d.visits.length; x.km += d.km; x.amount += d.amount; x.on_site_min += d.on_site_min; x.new_customers += d.visits.filter(v => v.is_new).length; x.orders += d.visits.filter(v => v.outcome === 'Order confirmed').length;
+    d.visits.forEach(v => { if (v.outcome) outcomes[v.outcome] = (outcomes[v.outcome] || 0) + 1; });
+    if (r.d === today) todayLive[r.user_id] = d; }
+  // live status today + last known position
+  const lastPts = ids.length ? (await q(`SELECT DISTINCT ON (user_id) user_id, lat, lng, at, kind FROM fv_track WHERE day=$1 AND user_id=ANY($2) ORDER BY user_id, at DESC`, [today, ids])).rows : [];
+  for (const p of lastPts) if (per[p.user_id]) per[p.user_id].last = { lat: p.lat, lng: p.lng, at: p.at };
+  for (const u of staff) { const d = todayLive[u.id] || (ok(today) && !days.some(r => r.user_id === u.id && r.d === today) ? null : null), x = per[u.id];
+    if (!d) { x.now = 'Not started'; continue; }
+    x.today = { visits: d.visits.length, km: d.km };
+    x.now = d.open ? 'At ' + (d.open.cust_company || d.open.cust_name || 'a site') : d.started && d.started.ended_at ? 'Day ended' : 'Travelling'; x.now_since = d.open ? d.open.in_at : null; }
+  const pl = ids.length ? (await q(`${FVP_SEL} WHERE fp.user_id=ANY($1) AND fp.status='planned' ORDER BY fp.plan_date, fp.id LIMIT 200`, [ids])).rows : [];
+  pl.forEach(p => { const x = per[p.user_id]; if (x) { x.planned++; if (p.plan_date < today) x.overdue++; } });
+  const doneP = ids.length ? +(await q(`SELECT COUNT(*) n FROM fv_plans WHERE user_id=ANY($1) AND status='done' AND done_at::date BETWEEN $2 AND $3`, [ids, from, to])).rows[0].n : 0;
+  const recent = ids.length ? (await q(`SELECT v.id, v.user_id, v.user_name, to_char(v.day,'YYYY-MM-DD') AS day, v.in_at, v.out_at, v.cust_name, v.cust_company, v.is_new, v.purpose, v.outcome, v.notes, v.lead_id,
+      (SELECT MIN(m.id) FROM fv_media m WHERE m.visit_id=v.id) photo, (SELECT COUNT(*)::int FROM fv_media m WHERE m.visit_id=v.id) photos
+    FROM fv_visits v WHERE v.user_id=ANY($1) AND v.day BETWEEN $2 AND $3 ORDER BY v.in_at DESC LIMIT 20`, [ids, from, to])).rows : [];
+  const people = Object.values(per).map(x => ({ ...x, km: Math.round(x.km * 100) / 100, amount: Math.round(x.amount * 100) / 100 }));
+  const sum = k => Math.round(people.reduce((t, x) => t + (x[k] || 0), 0) * 100) / 100;
+  res.json({ from, to, today, google: !!cfg.key, rate: cfg.rate,
+    totals: { staff: staff.length, active_today: people.filter(x => x.now !== 'Not started').length, on_site_now: people.filter(x => /^At /.test(x.now)).length, visits: sum('visits'), km: sum('km'), amount: sum('amount'), new_customers: sum('new_customers'), orders: sum('orders'), planned: pl.length, overdue: pl.filter(p => p.plan_date < today).length, plans_done: doneP },
+    people: people.sort((a, b) => b.visits - a.visits || b.km - a.km), outcomes: Object.entries(outcomes).sort((a, b) => b[1] - a[1]), planned: pl.slice(0, 50), recent });
+}));
 app.get('/api/fv/meta', need('field', 'field_team'), wrap(async (req, res) => {
   const staff = can(req.user, 'field_team') || isSuper(req.user) ? (await q(`SELECT id, name, role, brand_id FROM users WHERE active AND (role=$1 OR 'field'=ANY(permissions)) ORDER BY name`, [SUPER])).rows.filter(u => u.role !== SUPER || u.id === req.user.id) : [];
   res.json({ purposes: FV_PURPOSE, outcomes: FV_OUTCOME, staff, today: (await todayIST()), me: req.user.id, team: can(req.user, 'field_team') || isSuper(req.user) });
@@ -3765,21 +3851,21 @@ app.post('/api/fv/checkin', need('field'), wrap(async (req, res) => {
     if (!b.customer_id && !b.cust) b.cust = { name: plan.lead_name, company: plan.lead_company, phone: plan.lead_phone, address: plan.lead_address }; }
   if (+b.customer_id) { const pp = [+b.customer_id], sc = +b.plan_id ? 'true' : custScope(req.user, pp); c = (await q(`SELECT c.* FROM customers c WHERE c.id=$1 AND ${sc}`, pp)).rows[0]; if (!c) return res.status(404).json({ error: 'Customer not found' }); }
   const n = b.cust || {}, t = (k, l = 200) => String(n[k] || '').trim().slice(0, l) || null;
-  if (!c && !t('name') && !t('company')) return res.status(400).json({ error: 'Choose the customer or type the new customer’s name' });
+  const pending = !c && !t('name') && !t('company');   // nothing asked at check-in: customer, purpose, photos and notes come at check-out
   if (!c && t('phone') && digits(t('phone')).length >= 7) {   // typed a phone that is already a customer → use that customer
     const ex = (await q(`SELECT * FROM customers WHERE right(regexp_replace(COALESCE(phone,''),'\\D','','g'),10)=$1 LIMIT 1`, [digits(t('phone')).slice(-10)])).rows[0]; if (ex) c = ex; }
   const day = (await todayIST());
   await q(`INSERT INTO fv_days(user_id,day,started_at,start_lat,start_lng) VALUES($1,$2,NULL,NULL,NULL) ON CONFLICT DO NOTHING`, [req.user.id, day]);
   await q(`UPDATE fv_days SET ended_at=NULL WHERE user_id=$1 AND day=$2`, [req.user.id, day]);
-  const r = (await q(`INSERT INTO fv_visits(user_id,user_name,brand_id,day,customer_id,is_new,cust_name,cust_company,cust_phone,cust_address,purpose,notes,in_lat,in_lng,in_acc)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
-  [req.user.id, req.user.name, req.user.brand_id || (c && c.brand_id) || null, day, c ? c.id : null, !c, c ? c.name : t('name') || t('company'), c ? c.company : t('company'), c ? c.phone : t('phone', 30), c ? c.address : t('address', 500),
-    FV_PURPOSE.includes(b.purpose) ? b.purpose : 'Sales visit', String(b.notes || '').slice(0, 4000) || null, pt.lat, pt.lng, pt.acc])).rows[0];
+  const r = (await q(`INSERT INTO fv_visits(user_id,user_name,brand_id,day,customer_id,is_new,cust_name,cust_company,cust_phone,cust_address,purpose,notes,in_lat,in_lng,in_acc,cust_pending)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
+  [req.user.id, req.user.name, req.user.brand_id || (c && c.brand_id) || null, day, c ? c.id : null, !c && !pending, c ? c.name : t('name') || t('company'), c ? c.company : t('company'), c ? c.phone : t('phone', 30), c ? c.address : t('address', 500),
+    FV_PURPOSE.includes(b.purpose) ? b.purpose : (pending ? null : 'Sales visit'), String(b.notes || '').slice(0, 4000) || null, pt.lat, pt.lng, pt.acc, pending])).rows[0];
   await q(`INSERT INTO fv_track(user_id,day,at,lat,lng,acc,kind) VALUES($1,$2,now(),$3,$4,$5,'in')`, [req.user.id, day, pt.lat, pt.lng, pt.acc]);
   if (plan) { await q(`UPDATE fv_visits SET plan_id=$2, lead_id=$3 WHERE id=$1`, [r.id, plan.id, plan.lead_id]); await q(`UPDATE fv_plans SET visit_id=$2 WHERE id=$1`, [plan.id, r.id]);
     if (plan.lead_id) await leadLog(plan.lead_id, req.user.name, `📍 Reached the site (field visit) at ${new Date().toLocaleTimeString('en-IN', { timeZone: TZ, hour: 'numeric', minute: '2-digit' })}`); }
   if (b.photo) { const e = await fvPhoto(r.id, b); if (e) return res.status(400).json({ error: e }); }
-  res.json({ ok: true, id: r.id, old_customer: !!c, customer_id: c ? c.id : null });
+  res.json({ ok: true, id: r.id, old_customer: !!c, customer_id: c ? c.id : null, pending });
 }));
 const fvOwn = async (req, res) => {
   const v = (await q(`SELECT * FROM fv_visits WHERE id=$1`, [+req.params.id])).rows[0];
@@ -3812,6 +3898,16 @@ app.post('/api/fv/:id/checkout', need('field'), wrap(async (req, res) => {
   const notes = String(b.notes ?? v.notes ?? '').trim(); if (!notes) return res.status(400).json({ error: 'Write what happened at this visit (description)' });
   const outcome = FV_OUTCOME.includes(b.outcome) ? b.outcome : null; if (!outcome) return res.status(400).json({ error: 'Choose how the visit went' });
   const fu = /^\d{4}-\d{2}-\d{2}$/.test(b.follow_up) ? b.follow_up : null;
+  if (v.cust_pending) {   // the customer is chosen at check-out
+    let c = null; const n = b.cust || {}, t = (k, l = 200) => String(n[k] || '').trim().slice(0, l) || null;
+    if (+b.customer_id) { const pp = [+b.customer_id], sc = custScope(req.user, pp); c = (await q(`SELECT c.* FROM customers c WHERE c.id=$1 AND ${sc}`, pp)).rows[0]; if (!c) return res.status(404).json({ error: 'Customer not found' }); }
+    else if (!t('name') && !t('company')) return res.status(400).json({ error: 'Choose the old customer or type the new customer’s name' });
+    if (!c && t('phone') && digits(t('phone')).length >= 7) { const ex = (await q(`SELECT * FROM customers WHERE right(regexp_replace(COALESCE(phone,''),'\\D','','g'),10)=$1 LIMIT 1`, [digits(t('phone')).slice(-10)])).rows[0]; if (ex) c = ex; }
+    await q(`UPDATE fv_visits SET cust_pending=false, customer_id=$2, is_new=$3, cust_name=$4, cust_company=$5, cust_phone=$6, cust_address=$7, brand_id=COALESCE(brand_id,$8) WHERE id=$1`,
+      [v.id, c ? c.id : null, !c, c ? c.name : t('name') || t('company'), c ? c.company : t('company'), c ? c.phone : t('phone', 30), c ? c.address : t('address', 500), c ? c.brand_id : null]);
+    Object.assign(v, (await q(`SELECT * FROM fv_visits WHERE id=$1`, [v.id])).rows[0]);
+  }
+  if (FV_PURPOSE.includes(b.purpose) || !v.purpose) { v.purpose = FV_PURPOSE.includes(b.purpose) ? b.purpose : 'Sales visit'; await q(`UPDATE fv_visits SET purpose=$2 WHERE id=$1`, [v.id, v.purpose]); }
   let custId = v.customer_id, leadId = null;
   if (v.is_new && !custId) {   // save the new customer (and a lead, if asked)
     const n = { name: String(b.name ?? v.cust_name ?? '').trim() || v.cust_company || 'Customer', company: String(b.company ?? v.cust_company ?? '').trim() || null, phone: String(b.phone ?? v.cust_phone ?? '').trim() || null, address: String(b.address ?? v.cust_address ?? '').trim() || null };
@@ -4029,6 +4125,7 @@ const blProdIn = (b, old = {}) => {
   const o = {}, s = (k, n = 300) => b[k] !== undefined ? (o[k] = String(b[k] ?? '').trim().slice(0, n) || null) : 0;
   if (b.name !== undefined) { o.name = String(b.name || '').trim().slice(0, 200); }
   s('sku', 60); s('hsn', 12); s('category', 60); s('description', 1000);
+  if (b.brand_id !== undefined) o.brand_id = +b.brand_id || null;   // empty = shared by all branches
   if (b.unit !== undefined) o.unit = String(b.unit || 'Nos').trim().slice(0, 20) || 'Nos';
   if (b.kind !== undefined) o.kind = b.kind === 'service' ? 'service' : 'product';
   for (const k of ['price', 'purchase_price']) if (b[k] !== undefined) o[k] = br2(Math.max(0, +b[k] || 0));
@@ -4050,10 +4147,12 @@ app.get('/api/bl/products', need('billing', 'purchases'), wrap(async (req, res) 
   if (req.query.all !== '1') w.push('p.active');
   if (req.query.low === '1') w.push(`p.kind='product' AND p.stock<=p.low_stock`);
   if (req.query.category) { p.push(req.query.category); w.push(`p.category=$${p.length}`); }
+  blProdBrand(req.user, req.query, p, w);
+  const pb = [], wb = ['true']; blProdBrand(req.user, req.query, pb, wb);
   const lim = Math.min(2000, +req.query.limit || 500);
   const rows = (await q(`SELECT p.*, (SELECT COALESCE(SUM(-s.qty),0) FROM bl_stock s WHERE s.product_id=p.id AND s.kind='Sale' AND s.created_at>now()-interval '30 days') sold30
     FROM bl_products p WHERE ${w.join(' AND ')} ORDER BY p.active DESC, lower(p.name) LIMIT ${lim}`, p)).rows;
-  const tot = (await q(`SELECT COUNT(*)::int n, COUNT(*) FILTER (WHERE kind='product' AND stock<=low_stock AND active)::int low, COALESCE(SUM(CASE WHEN kind='product' AND stock>0 THEN stock*(CASE WHEN purchase_incl THEN purchase_price/(1+tax/100) ELSE purchase_price END) END),0) value FROM bl_products WHERE active`)).rows[0];
+  const tot = (await q(`SELECT COUNT(*)::int n, COUNT(*) FILTER (WHERE kind='product' AND stock<=low_stock AND active)::int low, COALESCE(SUM(CASE WHEN kind='product' AND stock>0 THEN stock*(CASE WHEN purchase_incl THEN purchase_price/(1+tax/100) ELSE purchase_price END) END),0) value FROM bl_products p WHERE active AND ${wb.join(' AND ')}`, pb)).rows[0];
   res.json({ items: rows, totals: tot });
 }));
 app.post('/api/bl/products', blNeed, wrap(async (req, res) => {
@@ -4091,6 +4190,7 @@ app.post('/api/bl/products/:id/stock', blNeed, wrap(async (req, res) => {    // 
 app.get('/api/bl/inventory', need('billing', 'purchases'), wrap(async (req, res) => {
   const Q = req.query, p = ['%' + String(Q.q || '').trim() + '%'], w = [`p.active`, `p.kind='product'`, `(p.name ILIKE $1 OR p.sku ILIKE $1 OR p.hsn ILIKE $1)`];
   if (Q.category) { p.push(Q.category); w.push(`p.category=$${p.length}`); }
+  blProdBrand(req.user, Q, p, w);
   const ws0 = w.join(' AND '), p0 = p.slice();
   if (Q.status === 'low') w.push(`p.stock<=p.low_stock`); else if (Q.status === 'in') w.push(`p.stock>p.low_stock`); else if (Q.status === 'out') w.push(`p.stock<=0`);
   const lim = Math.min(500, +Q.limit || 50), off = Math.max(0, +Q.offset || 0);
@@ -4131,6 +4231,7 @@ const blCustIn = (b) => {
   if (b.state !== undefined) o.state = blState(b.state);
   if (!o.state && o.gstin) o.state = blState(o.gstin.slice(0, 2));
   if (b.opening_bal !== undefined) o.opening_bal = br2(+b.opening_bal || 0);
+  if (b.credit_days !== undefined) o.credit_days = b.credit_days === '' || b.credit_days === null ? null : Math.max(0, Math.min(365, Math.round(+b.credit_days || 0)));
   return o;
 };
 const blGstOk = g => !g || /^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]$/.test(g);
@@ -4157,7 +4258,7 @@ app.patch('/api/bl/customers/:id', need('billing', 'customer_edit'), wrap(async 
 app.get('/api/bl/customers', need('billing'), wrap(async (req, res) => {
   const p = ['%' + String(req.query.q || '').trim() + '%'];
   let sc = custScope(req.user, p); if (+req.query.brand) { p.push(+req.query.brand); sc += ` AND c.brand_id=$${p.length}`; }
-  const rows = (await q(`SELECT c.id, c.name, c.company, c.phone, c.email, c.gstin, c.state, c.city, c.address, c.pincode, c.ship_address, c.ship_name, c.ship_phone, c.ship_city, c.ship_pincode, c.ship_state, COALESCE(c.opening_bal,0) opening_bal, c.brand_id, b.name brand,
+  const rows = (await q(`SELECT c.id, c.name, c.company, c.phone, c.email, c.gstin, c.state, c.city, c.address, c.pincode, c.ship_address, c.ship_name, c.ship_phone, c.ship_city, c.ship_pincode, c.ship_state, COALESCE(c.opening_bal,0) opening_bal, c.brand_id, b.name brand, c.credit_days,
     COALESCE((SELECT SUM(d.total-d.paid-d.credited) FROM bl_docs d WHERE d.customer_id=c.id AND d.type='invoice' AND d.status NOT IN ('Cancelled','Draft')),0) inv_due,
     COALESCE((SELECT SUM(d.total) FROM bl_docs d WHERE d.customer_id=c.id AND d.type='invoice' AND d.status NOT IN ('Cancelled','Draft')),0) sales,
     COALESCE((SELECT SUM(d.total) FROM bl_docs d WHERE d.customer_id=c.id AND d.type='credit_note' AND d.against_id IS NULL AND d.status NOT IN ('Cancelled','Draft')),0) free_credit,
@@ -4309,6 +4410,12 @@ const blSave = async (req, res, old) => {
   b.brand_id = brandId;
   const draft = BL_DRAFTABLE.includes(type) && !!b.draft && (!old || old.status === 'Draft');
   let pr = await blParty(req.user, type, b); if (pr.error) { if (!draft) return res.status(400).json({ error: pr.error }); pr = { party: {} }; }   // a draft may be saved before the customer is chosen
+  if (!draft && BL_CREDIT_TYPES.includes(type) && (!old || old.status === 'Draft') && pr.customer_id) {
+    const chk = await blCreditCheck(pr.customer_id);
+    if (chk.blocked && !(isSuper(req.user) && b.md_override)) return res.status(423).json({ error: `This customer has ${chk.n} overdue bill${chk.n > 1 ? 's' : ''} (₹${chk.amount}). Collect the payment first, or ask the MD to approve.`, credit_block: true, ...chk, customer_id: pr.customer_id });
+    if (chk.blocked && b.md_override) await q(`INSERT INTO bl_credit_ok(customer_id,customer_name,doc_type,amount,note,status,requested_by,req_name,decided_by,decided_at,valid_until) VALUES($1,$2,$3,$4,'Approved while saving','approved',$5,$6,$6,now(),now())`,
+      [pr.customer_id, chk.customer, type, chk.amount, req.user.id, req.user.name]);
+  }
   const pos = blState(b.pos) || (pr.party.ship_address && pr.party.ship_state) || pr.party.state || brand.state || null;   // goods: place of supply = where they are delivered
   const inter = !!(brand.state && pos && pos !== brand.state);
   const pids = [...new Set((Array.isArray(b.items) ? b.items : []).map(i => +i.pid).filter(Boolean))];   // fill HSN / unit from the product when missing
@@ -4318,7 +4425,12 @@ const blSave = async (req, res, old) => {
   const c = blCalc(b.items, inter, b.extra_disc, b.charges, b.round_off !== undefined ? !!b.round_off : brand.round_off, kind === 'supply');
   if (!c.lines.length && !draft) return res.status(400).json({ error: 'Add at least one item with a quantity' });
   if (old && (type === 'invoice' || type === 'purchase') && c.total + 0.009 < old.paid + old.credited) return res.status(400).json({ error: `₹${old.paid + old.credited} is already received / credited — the total can’t be less than that` });
-  const dd = /^\d{4}-\d{2}-\d{2}$/.test(b.doc_date) ? b.doc_date : null, due = /^\d{4}-\d{2}-\d{2}$/.test(b.due_date) ? b.due_date : null;
+  const dd = /^\d{4}-\d{2}-\d{2}$/.test(b.doc_date) ? b.doc_date : null;
+  let due = /^\d{4}-\d{2}-\d{2}$/.test(b.due_date) ? b.due_date : null;
+  if (!due && type === 'invoice' && pr.customer_id) {   // due date from the customer's credit period
+    const cd = (await q('SELECT credit_days FROM customers WHERE id=$1', [pr.customer_id])).rows[0], cfg = await blCreditCfg(), days = cd && cd.credit_days !== null ? cd.credit_days : cfg.default_days;
+    if (days > 0) { const base = new Date((dd || await todayIST()) + 'T00:00:00Z'); base.setUTCDate(base.getUTCDate() + days); due = base.toISOString().slice(0, 10); }
+  }
   let against = null;
   if (type === 'credit_note' && b.against_id) { const a = (await q(`SELECT * FROM bl_docs WHERE id=$1 AND type='invoice' AND status NOT IN ('Cancelled','Draft')`, [+b.against_id])).rows[0];
     if (a) { const room = br2(Number(a.total) - Number(a.paid) - Number(a.credited) + (old && old.against_id === a.id ? old.total : 0)); if (c.total > room + 0.009) return res.status(400).json({ error: `This credit note (₹${c.total}) is more than what’s still due on ${a.no} (₹${room}). Record a refund for the rest.` }); against = a.id; } }
@@ -4376,13 +4488,18 @@ app.get('/api/bl/docs', need('billing', 'purchases'), wrap(async (req, res) => {
   if (Q.service_id) add('d.service_id=?', +Q.service_id);
   if (Q.from) add('d.doc_date>=?', Q.from); if (Q.to) add('d.doc_date<=?', Q.to);
   if (Q.q) { p.push('%' + Q.q + '%'); const n = '$' + p.length; w.push(`(d.no ILIKE ${n} OR d.party->>'name' ILIKE ${n} OR d.party->>'company' ILIKE ${n} OR d.party->>'phone' ILIKE ${n} OR d.ref_no ILIKE ${n})`); }
+  if (Q.amin !== undefined && Q.amin !== '' && !isNaN(+Q.amin)) add('d.total>=?', +Q.amin);
+  if (Q.amax !== undefined && Q.amax !== '' && !isNaN(+Q.amax)) add('d.total<=?', +Q.amax);
+  if (Q.no) add('d.no ILIKE ?', '%' + String(Q.no).trim() + '%');
+  if (Q.cust) { p.push('%' + String(Q.cust).trim() + '%'); const n = '$' + p.length; w.push(`(d.party->>'name' ILIKE ${n} OR d.party->>'company' ILIKE ${n} OR d.party->>'phone' ILIKE ${n})`); }
+  if (Q.delivery === 'pending') w.push(`d.type IN ('invoice','challan') AND d.delivery IS NULL`); else if (['transport', 'collected'].includes(Q.delivery)) add(`d.delivery->>'mode'=?`, Q.delivery);
   const wsAll = w.join(' AND '), pAll = p.slice();   // everything except the status tab → used for the tab counts
   if (Q.status) { const g = BL_GROUPS[Q.status]; if (g) w.push(g); else add('d.status=?', Q.status); }
   const ws = w.join(' AND ');
   const lim = Math.min(1000, +Q.limit || 300), off = Math.max(0, +Q.offset || 0);
   const items = (await q(`SELECT d.id, d.type, d.no, to_char(d.doc_date,'YYYY-MM-DD') doc_date, to_char(d.due_date,'YYYY-MM-DD') due_date, d.party->>'name' party, d.party->>'company' company, d.party->>'phone' phone,
-    d.total, d.paid, d.credited, d.status, d.brand_id, b.name brand, d.customer_id, d.vendor_id, d.lead_id, d.service_id, d.ref_no, d.share_token, d.created_by_name, d.created_at, d.bill_kind, jsonb_array_length(d.items) lines
-    FROM bl_docs d LEFT JOIN brands b ON b.id=d.brand_id WHERE ${ws} ORDER BY d.doc_date DESC, d.id DESC LIMIT ${lim} OFFSET ${off}`, p)).rows;
+    d.total, d.paid, d.credited, d.status, d.brand_id, b.name brand, d.customer_id, d.vendor_id, d.lead_id, d.service_id, d.ref_no, d.share_token, d.created_by_name, d.created_at, d.bill_kind, jsonb_array_length(d.items) lines, d.delivery
+    FROM bl_docs d LEFT JOIN brands b ON b.id=d.brand_id WHERE ${ws} ORDER BY ${BL_SORT[Q.sort] || 'd.doc_date DESC, d.id DESC'} LIMIT ${lim} OFFSET ${off}`, p)).rows;
   const t = (await q(`SELECT COUNT(*)::int n, COALESCE(SUM(total) FILTER (WHERE status NOT IN ('Cancelled','Draft')),0) total, COALESCE(SUM(paid) FILTER (WHERE status NOT IN ('Cancelled','Draft')),0) paid,
     COALESCE(SUM(total-paid-credited) FILTER (WHERE status IN ('Unpaid','Partial')),0) due, COALESCE(SUM(total) FILTER (WHERE ${BL_GROUPS.closed.replace(/d\./g, '')}),0) closed FROM bl_docs d WHERE ${ws}`, p)).rows[0];
   const cr = (await q(`SELECT COUNT(*)::int "all", ${Object.entries(BL_GROUPS).map(([k, v]) => `COUNT(*) FILTER (WHERE ${v})::int "${k}"`).join(', ')} FROM bl_docs d WHERE ${wsAll}`, pAll)).rows[0];
@@ -4397,13 +4514,13 @@ app.get('/api/bl/docs/:id', need('billing', 'purchases'), wrap(async (req, res) 
 }));
 app.post('/api/bl/docs/:id/convert', need('billing'), wrap(async (req, res) => {   // quotation / proforma / challan → invoice (or quotation → proforma / challan)
   const d = await blLoad(req, res, +req.params.id); if (!d) return;
-  const to = (req.body || {}).to;
+  const to = (req.body || {}).to, mdOk = !!(req.body || {}).md_override;
   const ok = { quotation: ['invoice', 'proforma', 'challan'], proforma: ['invoice', 'challan'], challan: ['invoice'] }[d.type] || [];
   if (!ok.includes(to)) return res.status(400).json({ error: 'This can’t be converted to that' });
   if (d.status === 'Cancelled') return res.status(400).json({ error: 'This document is cancelled' });
   if (d.status === 'Draft') return res.status(400).json({ error: 'Save this draft first' });
   req.body = { type: to, brand_id: d.brand_id, customer_id: d.customer_id, party: d.party, pos: d.pos, items: d.items, extra_disc: d.extra_disc, charges: d.charges, charges_label: d.charges_label, notes: d.notes, terms: d.terms, ref_id: d.id, lead_id: d.lead_id, service_id: d.service_id, template: d.template,
-    bill_kind: d.bill_kind, show_seal: d.show_seal, bank: d.bank || undefined };
+    bill_kind: d.bill_kind, show_seal: d.show_seal, bank: d.bank || undefined, md_override: mdOk };
   await blSave(req, res, null);
 }));
 app.post('/api/bl/docs/:id/status', need('billing', 'purchases'), wrap(async (req, res) => {   // quotation accepted / declined / reopened, or cancel any document
@@ -4524,7 +4641,7 @@ const blHTML = (d, b, opts = {}) => {
   const itHead = thermal ? '<tr><th colspan="2">Item</th><th class="r">Amount</th></tr>' : `<tr><th class="c">#</th><th>Item</th>${hasHsn ? '<th class="c">HSN/SAC</th>' : ''}<th class="r">Qty</th><th class="r">Rate</th>${hasDisc ? '<th class="r">Disc</th>' : ''}${supply ? '' : '<th class="r hm">Taxable</th><th class="r">GST</th>'}<th class="r">Amount</th></tr>`;
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${bhe(title + ' ' + d.no)}</title><style>${css}</style></head><body>
   ${opts.bar && !opts.embed ? `<div class="bar noprint"><button onclick="print()">🖨 Print / Save PDF</button></div>` : ''}${opts.embed ? '<style>body{background:#fff}.pg{margin:0 auto;box-shadow:none}</style>' : ''}
-  <div class="pg">${head}<div class="parties"><div>${to}</div>${ship}</div>
+  <div class="pg">${head}<div class="parties"><div>${to}</div>${ship}</div>${blDelivHTML(d)}
   <div class="itw"><table class="it">${itHead}${rows}</table></div>
   <div class="foot"><div>${gstTab}<div class="words">${blWords(Number(d.total))}</div>${bank}${notes ? `<div style="margin-top:10px">${notes}</div>` : ''}</div><div style="max-width:${thermal ? 'none' : '300px'}">${tot}<div class="sig${sealImg || signImg ? ' hasimg' : ''}">${sealImg || signImg ? `<div class="sigimgs">${sealImg}${signImg}</div>` : ''}<div>For ${bhe(b.legal_name || b.name)}${b.sign_name ? `<br><small>${bhe(b.sign_name)}</small>` : ''}<br><small>Authorised signatory</small></div></div></div></div>
   </div>${opts.auto ? '<script>setTimeout(()=>print(),400)</script>' : ''}</body></html>`;
@@ -4567,8 +4684,9 @@ app.get('/api/bl/counts', need('billing', 'purchases'), wrap(async (req, res) =>
   const u = req.user, out = {}, p = [], w = [`d.status NOT IN ('Cancelled','Draft')`]; blScopeDocs(u, p, w);
   if (req.query.brand) { p.push(+req.query.brand); w.push(`d.brand_id=$${p.length}`); }
   for (const r of (await q(`SELECT d.type, COUNT(*)::int n FROM bl_docs d WHERE ${w.join(' AND ')} GROUP BY d.type`, p)).rows) if (can(u, blTypeNeed(r.type))) out[r.type] = r.n;
-  out.products = (await q(`SELECT COUNT(*)::int n FROM bl_products WHERE active`)).rows[0].n;
-  out.inventory = (await q(`SELECT COUNT(*)::int n FROM bl_products WHERE active AND kind='product'`)).rows[0].n;
+  const pb = [], wb = ['true']; blProdBrand(u, req.query, pb, wb);
+  out.products = (await q(`SELECT COUNT(*)::int n FROM bl_products p WHERE active AND ${wb.join(' AND ')}`, pb)).rows[0].n;
+  out.inventory = (await q(`SELECT COUNT(*)::int n FROM bl_products p WHERE active AND kind='product' AND ${wb.join(' AND ')}`, pb)).rows[0].n;
   if (can(u, 'billing')) { const cp = []; let sc = custScope(u, cp); if (+req.query.brand) { cp.push(+req.query.brand); sc += ` AND c.brand_id=$${cp.length}`; } out.bcust = (await q(`SELECT COUNT(*)::int n FROM customers c WHERE ${sc}`, cp)).rows[0].n; }
   if (can(u, 'purchases')) {
     out.vendors = (await q(`SELECT COUNT(*)::int n FROM bl_vendors`)).rows[0].n;
@@ -4889,5 +5007,349 @@ app.get('/api/bl/export/:what', need('billing', 'purchases'), wrap(async (req, r
   await wb.xlsx.write(res); res.end();
 }));
 
-init().then(initGST).then(initChat).then(initProjects).then(initWA).then(initBL).then(initWC).then(initRoles).then(initFV).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
+// ===================== V29: branch-wise products, bill filters, delivery, call leads, email =====================
+const blProdBrand = (u, Q, p, w, a = 'p') => { const b = +Q.brand || (u.brand_id && !isSuper(u) ? u.brand_id : 0); if (!b) return; p.push(b); w.push(`(${a}.brand_id IS NULL OR ${a}.brand_id=$${p.length})`); };
+const BL_SORT = { amount: 'd.total, d.id', '-amount': 'd.total DESC, d.id DESC', no: 'd.seq, d.id', '-no': 'd.seq DESC, d.id DESC', customer: `lower(COALESCE(NULLIF(d.party->>'company',''),d.party->>'name')), d.id`,
+  '-customer': `lower(COALESCE(NULLIF(d.party->>'company',''),d.party->>'name')) DESC, d.id DESC`, status: 'd.status, d.doc_date DESC', '-status': 'd.status DESC, d.doc_date DESC', date: 'd.doc_date, d.id', '-date': 'd.doc_date DESC, d.id DESC' };
+async function initV29() {
+  await q(`ALTER TABLE bl_products ADD COLUMN IF NOT EXISTS brand_id INT;
+  ALTER TABLE bl_docs ADD COLUMN IF NOT EXISTS delivery JSONB;
+  ALTER TABLE wc_cases ADD COLUMN IF NOT EXISTS transport JSONB DEFAULT '[]';
+  CREATE TABLE IF NOT EXISTS bl_media (id SERIAL PRIMARY KEY, doc_id INT REFERENCES bl_docs(id) ON DELETE CASCADE, kind TEXT, data BYTEA, mime TEXT, created_at TIMESTAMPTZ DEFAULT now());
+  CREATE TABLE IF NOT EXISTS call_devices (id SERIAL PRIMARY KEY, user_id INT NOT NULL, token_hash TEXT UNIQUE NOT NULL, name TEXT, sim_label TEXT, sim_slot INT, active BOOLEAN DEFAULT true, last_seen TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT now());
+  CREATE TABLE IF NOT EXISTS calls (id SERIAL PRIMARY KEY, user_id INT NOT NULL, user_name TEXT, brand_id INT, device_id INT, phone TEXT NOT NULL, contact TEXT, direction TEXT, duration INT DEFAULT 0, sim_label TEXT,
+    started_at TIMESTAMPTZ NOT NULL, status TEXT DEFAULT 'pending', lead_id INT, decided_by TEXT, decided_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT now(), UNIQUE(user_id, phone, started_at));
+  CREATE INDEX IF NOT EXISTS idx_calls_st ON calls(status, started_at DESC);
+  CREATE TABLE IF NOT EXISTS user_mail (user_id INT PRIMARY KEY, email TEXT NOT NULL, from_name TEXT, signature TEXT, smtp_host TEXT, smtp_port INT, imap_host TEXT, imap_port INT, pass_enc TEXT NOT NULL, sent_folder TEXT, ok_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT now());
+  CREATE TABLE IF NOT EXISTS mail_log (id SERIAL PRIMARY KEY, user_id INT, user_name TEXT, from_email TEXT, to_email TEXT, cc TEXT, subject TEXT, body TEXT, lead_id INT, customer_id INT, doc_id INT, service_id INT, created_at TIMESTAMPTZ DEFAULT now());
+  CREATE INDEX IF NOT EXISTS idx_mail_lead ON mail_log(lead_id); CREATE INDEX IF NOT EXISTS idx_mail_cust ON mail_log(customer_id);`);
+}
+// one-time: give products a branch in bulk (empty = shared by all branches)
+app.post('/api/bl/products/brand', blNeed, wrap(async (req, res) => {
+  const b = req.body || {}, bid = +b.brand_id || null, ids = (Array.isArray(b.ids) ? b.ids : []).map(Number).filter(Boolean);
+  if (bid && !(await q('SELECT 1 FROM brands WHERE id=$1', [bid])).rows.length) return res.status(404).json({ error: 'Branch not found' });
+  let r;
+  if (ids.length) r = await q('UPDATE bl_products SET brand_id=$1, updated_at=now() WHERE id=ANY($2)', [bid, ids]);
+  else if (b.category !== undefined) r = await q(`UPDATE bl_products SET brand_id=$1, updated_at=now() WHERE ${b.category ? 'category=$2' : 'true'} ${b.only_shared ? 'AND brand_id IS NULL' : ''}`, b.category ? [bid, String(b.category)] : [bid]);
+  else return res.status(400).json({ error: 'Choose the products' });
+  res.json({ ok: true, n: r.rowCount });
+}));
+// billing customer box: customers AND open leads of the branch
+app.get('/api/bl/parties', need('billing'), wrap(async (req, res) => {
+  const v = String(req.query.q || '').trim(), bid = +req.query.brand || 0, like = '%' + v + '%';
+  const p = [like]; let sc = custScope(req.user, p); if (bid) { p.push(bid); sc += ` AND (c.brand_id=$${p.length} OR c.brand_id IS NULL)`; }
+  const cust = (await q(`SELECT c.id, c.name, c.company, c.phone, c.email, c.gstin, c.state, c.city, c.address, c.pincode, c.ship_address, c.ship_name, c.ship_phone, c.ship_city, c.ship_pincode, c.ship_state, c.brand_id,
+    COALESCE((SELECT SUM(d.total-d.paid-d.credited) FROM bl_docs d WHERE d.customer_id=c.id AND d.type='invoice' AND d.status NOT IN ('Cancelled','Draft')),0)+COALESCE(c.opening_bal,0) balance
+    FROM customers c WHERE (c.name ILIKE $1 OR c.phone ILIKE $1 OR c.company ILIKE $1 OR c.gstin ILIKE $1) AND ${sc} ORDER BY lower(c.name) LIMIT 12`, p)).rows;
+  let leads = [];
+  if (can(req.user, 'leads')) {
+    const lp = [like]; let ls = leadScope(req.user, lp); if (bid) { lp.push(bid); ls += ` AND l.brand_id=$${lp.length}`; }
+    leads = (await q(`SELECT l.id lead_id, l.name, l.company, l.phone, l.email, l.address, l.stage, l.source, l.brand_id FROM leads l WHERE l.customer_id IS NULL AND COALESCE(l.stage,'') NOT IN ('Won','Lost')
+      AND (l.name ILIKE $1 OR l.phone ILIKE $1 OR l.company ILIKE $1) AND ${ls} ORDER BY l.last_contact DESC NULLS LAST LIMIT 8`, lp)).rows;
+  }
+  res.json({ customers: cust, leads });
+}));
+// delivery: collected by the customer, or sent by transport (tracking no., details, photo)
+const blDelivHTML = d => {
+  const v = d.delivery; if (!v || !v.mode || !['invoice', 'challan'].includes(d.type)) return '';
+  const e = x => bhe(String(x || ''));
+  const rows = v.mode === 'transport'
+    ? [['Delivery', 'By transport'], ['Transport', v.transporter], ['Tracking / LR no.', v.tracking], ['Vehicle no.', v.vehicle], ['Date', v.date ? bdIN(v.date) : ''], ['Details', v.info]]
+    : [['Delivery', 'Collected by customer'], ['Collected by', v.person], ['Date', v.date ? bdIN(v.date) : ''], ['Details', v.info]];
+  return `<div style="margin:-4px 0 14px;padding:10px 12px;border:1px dashed #ccc;border-radius:8px;font-size:12px"><b>🚚 ${rows[0][1]}</b>${rows.slice(1).filter(r => r[1]).map(r => ` · ${r[0]}: <b>${e(r[1])}</b>`).join('')}</div>`;
+};
+app.post('/api/bl/docs/:id/delivery', need('billing'), wrap(async (req, res) => {
+  const d = await blLoad(req, res, +req.params.id); if (!d) return;
+  if (!['invoice', 'challan'].includes(d.type)) return res.status(400).json({ error: 'Delivery is only for invoices and delivery challans' });
+  const b = req.body || {}, t = (k, n = 200) => String(b[k] || '').trim().slice(0, n) || null;
+  if (b.clear) { await q('UPDATE bl_docs SET delivery=NULL, updated_at=now() WHERE id=$1', [d.id]); await q(`DELETE FROM bl_media WHERE doc_id=$1 AND kind='delivery'`, [d.id]); return res.json({ ok: true }); }
+  if (!['transport', 'collected'].includes(b.mode)) return res.status(400).json({ error: 'Choose transport or collected' });
+  const v = { mode: b.mode, date: /^\d{4}-\d{2}-\d{2}$/.test(b.date) ? b.date : (await todayIST()), info: t('info', 1000), by: req.user.name, at: new Date().toISOString() };
+  if (b.mode === 'transport') { Object.assign(v, { transporter: t('transporter'), tracking: t('tracking', 80), vehicle: t('vehicle', 30) }); if (!v.transporter && !v.tracking) return res.status(400).json({ error: 'Enter the transport name or tracking number' }); }
+  else v.person = t('person');
+  if (b.photo) {
+    const m = /^data:(image\/(?:jpeg|png|webp));base64,(.+)$/.exec(String(b.photo)); if (!m) return res.status(400).json({ error: 'Photo must be an image' });
+    const buf = Buffer.from(m[2], 'base64'); if (buf.length > 6e6) return res.status(400).json({ error: 'Photo is too big' });
+    await q(`DELETE FROM bl_media WHERE doc_id=$1 AND kind='delivery'`, [d.id]);
+    v.photo = (await q(`INSERT INTO bl_media(doc_id,kind,data,mime) VALUES($1,'delivery',$2,$3) RETURNING id`, [d.id, buf, m[1]])).rows[0].id;
+  } else if (b.keep_photo && d.delivery && d.delivery.photo) v.photo = d.delivery.photo;
+  else await q(`DELETE FROM bl_media WHERE doc_id=$1 AND kind='delivery'`, [d.id]);
+  await q('UPDATE bl_docs SET delivery=$2, updated_at=now() WHERE id=$1', [d.id, JSON.stringify(v)]);
+  res.json({ ok: true, delivery: v });
+}));
+app.get('/api/bl/media/:id', need('billing', 'purchases'), wrap(async (req, res) => {
+  const m = (await q('SELECT m.*, d.brand_id FROM bl_media m JOIN bl_docs d ON d.id=m.doc_id WHERE m.id=$1', [+req.params.id])).rows[0];
+  if (!m || (req.user.brand_id && !isSuper(req.user) && m.brand_id !== req.user.brand_id)) return res.status(404).end();
+  res.setHeader('Content-Type', m.mime); res.setHeader('Cache-Control', 'private, max-age=86400'); res.end(m.data);
+}));
+
+// warranty & service: transport details for each trip of the material (to vendor, back from vendor, to customer, from customer)
+const WC_LEGS = { to_vendor: 'Sent to vendor', from_vendor: 'Back from vendor', to_customer: 'Sent to customer', from_customer: 'Received from customer' };
+app.post('/api/wc/:id/transport', wrap(async (req, res) => {
+  const c = await wcLoad(req, res); if (!c) return;
+  if (!wcCan(req.user)) return res.status(403).json({ error: 'Not allowed' });
+  const b = req.body || {}, t = (k, n = 200) => String(b[k] || '').trim().slice(0, n) || null;
+  if (!WC_LEGS[b.leg]) return res.status(400).json({ error: 'Choose which trip this is' });
+  let legs = Array.isArray(c.transport) ? c.transport : [];
+  const old = legs.find(x => x.leg === b.leg);
+  if (b.clear) {
+    legs = legs.filter(x => x.leg !== b.leg); if (old && old.photo) await q('DELETE FROM wc_media WHERE id=$1 AND case_id=$2', [old.photo, c.id]);
+    await q('UPDATE wc_cases SET transport=$2, updated_at=now() WHERE id=$1', [c.id, JSON.stringify(legs)]); await wcLog(c.id, req.user.name, '🚚 Transport removed: ' + WC_LEGS[b.leg]); return res.json({ ok: true, transport: legs });
+  }
+  if (!['transport', 'collected'].includes(b.mode)) return res.status(400).json({ error: 'Choose transport or hand delivery' });
+  const v = { leg: b.leg, mode: b.mode, date: /^\d{4}-\d{2}-\d{2}$/.test(b.date) ? b.date : (await todayIST()), info: t('info', 1000), by: req.user.name, at: new Date().toISOString() };
+  if (b.mode === 'transport') { Object.assign(v, { transporter: t('transporter'), tracking: t('tracking', 80), vehicle: t('vehicle', 30) }); if (!v.transporter && !v.tracking) return res.status(400).json({ error: 'Enter the transport name or tracking number' }); }
+  else v.person = t('person');
+  if (b.photo) {
+    const ph = wcMedia(b.photo, /^image\//); if (!ph) return res.status(400).json({ error: 'Photo must be an image' });
+    if (old && old.photo) await q('DELETE FROM wc_media WHERE id=$1 AND case_id=$2', [old.photo, c.id]);
+    v.photo = (await q(`INSERT INTO wc_media(case_id,kind,mime,data,uploaded_by) VALUES($1,'transport',$2,$3,$4) RETURNING id`, [c.id, ph.mime, ph.buf, req.user.name])).rows[0].id;
+  } else if (b.keep_photo && old && old.photo) v.photo = old.photo;
+  else if (old && old.photo) await q('DELETE FROM wc_media WHERE id=$1 AND case_id=$2', [old.photo, c.id]);
+  legs = [...legs.filter(x => x.leg !== b.leg), v];
+  await q('UPDATE wc_cases SET transport=$2, updated_at=now() WHERE id=$1', [c.id, JSON.stringify(legs)]);
+  await wcLog(c.id, req.user.name, `🚚 ${WC_LEGS[b.leg]}: ${b.mode === 'transport' ? [v.transporter, v.tracking ? 'tracking ' + v.tracking : '', v.vehicle].filter(Boolean).join(' · ') : 'by hand' + (v.person ? ' (' + v.person + ')' : '')}`);
+  res.json({ ok: true, transport: legs });
+}));
+
+// ---------- call leads (Rago Calls Android app) ----------
+const callCfg = async () => Object.assign({ min_sec: 300, incoming: true, outgoing: true }, (await q(`SELECT v FROM settings WHERE k='call_cfg'`)).rows.map(r => { try { return JSON.parse(r.v); } catch (e) { return {}; } })[0] || {});
+const callSee = (u, p) => { if (isSuper(u)) return 'true'; if (can(u, 'leads_all')) { if (!u.brand_id) return 'true'; p.push(u.brand_id); return `c.brand_id=$${p.length}`; } p.push(u.id); return `c.user_id=$${p.length}`; };
+app.post('/api/calls/device-login', wrap(async (req, res) => {    // the phone app signs in once with the CRM username + password
+  const ip = req.ip, t = tries[ip] || { n: 0, at: Date.now() }; if (Date.now() - t.at > 600000) { t.n = 0; t.at = Date.now(); }
+  if (t.n >= 8) return res.status(429).json({ error: 'Too many attempts. Try again in 10 minutes.' });
+  const { username, password } = req.body || {}, uk = 'u:' + String(username || '').trim().toLowerCase(), tu = tries[uk] || { n: 0, at: Date.now() };
+  if (Date.now() - tu.at > 900000) { tu.n = 0; tu.at = Date.now(); }
+  if (tu.n >= 10) return res.status(429).json({ error: 'This account is locked for 15 minutes after many wrong passwords.' });
+  const u = (await q('SELECT * FROM users WHERE lower(username)=lower($1)', [String(username || '').trim()])).rows[0];
+  if (!u || !verify(String(password || ''), u.password_hash)) { tries[ip] = { n: t.n + 1, at: t.at }; if (u) tries[uk] = { n: tu.n + 1, at: tu.at }; return res.status(401).json({ error: 'Wrong username or password' }); }
+  delete tries[ip]; delete tries[uk];
+  if (!u.active) return res.status(403).json({ error: 'Your account has been disabled.' });
+  if (!isSuper(u) && !(u.permissions || []).includes('calls')) return res.status(403).json({ error: 'Call leads is not turned on for you. Ask the Super Admin to enable “Call leads” on your user.' });
+  const tok = 'rgd_' + crypto.randomBytes(30).toString('base64url');
+  const r = (await q(`INSERT INTO call_devices(user_id,token_hash,name,last_seen) VALUES($1,$2,$3,now()) RETURNING id`, [u.id, crypto.createHash('sha256').update(tok).digest('hex'), String((req.body || {}).device || 'Android phone').slice(0, 80)])).rows[0];
+  res.json({ ok: true, token: tok, device_id: r.id, name: u.name, cfg: await callCfg() });
+}));
+app.get('/api/calls/device/cfg', wrap(async (req, res) => {
+  await q('UPDATE call_devices SET last_seen=now() WHERE id=$1', [req.user.device_id]);
+  const d = (await q('SELECT sim_label, sim_slot FROM call_devices WHERE id=$1', [req.user.device_id])).rows[0] || {};
+  res.json({ name: req.user.name, cfg: await callCfg(), sim_label: d.sim_label, sim_slot: d.sim_slot });
+}));
+app.post('/api/calls/device/sim', wrap(async (req, res) => {
+  const b = req.body || {}; await q('UPDATE call_devices SET sim_label=$2, sim_slot=$3, last_seen=now() WHERE id=$1', [req.user.device_id, String(b.sim_label || '').slice(0, 60) || null, Number.isInteger(+b.sim_slot) ? +b.sim_slot : null]);
+  res.json({ ok: true });
+}));
+app.post('/api/calls/device/sync', wrap(async (req, res) => {    // calls from the chosen SIM; only those of the set length or longer are kept
+  const b = req.body || {}, cfg = await callCfg(), u = req.user, list = (Array.isArray(b.calls) ? b.calls : []).slice(0, 500);
+  await q('UPDATE call_devices SET last_seen=now() WHERE id=$1', [u.device_id]);
+  let added = 0, onLead = 0, skipped = 0;
+  for (const c of list) {
+    const ph = String(c.phone || '').replace(/[^\d+]/g, '').slice(0, 20), dg = digits(ph), dur = Math.max(0, Math.round(+c.duration || 0)), at = new Date(c.started_at);
+    const dir = ['incoming', 'outgoing'].includes(c.direction) ? c.direction : 'incoming';
+    if (dg.length < 7 || isNaN(at) || dur < cfg.min_sec || (dir === 'incoming' && !cfg.incoming) || (dir === 'outgoing' && !cfg.outgoing)) { skipped++; continue; }
+    const lead = (await q(`SELECT id FROM leads WHERE right(regexp_replace(COALESCE(phone,''),'\\D','','g'),10)=$1 ${u.brand_id ? 'AND brand_id=$2' : ''} ORDER BY id DESC LIMIT 1`, u.brand_id ? [dg.slice(-10), u.brand_id] : [dg.slice(-10)])).rows[0];
+    const r = await q(`INSERT INTO calls(user_id,user_name,brand_id,device_id,phone,contact,direction,duration,sim_label,started_at,status,lead_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (user_id,phone,started_at) DO NOTHING RETURNING id`,
+      [u.id, u.name, u.brand_id || null, u.device_id, ph, String(c.name || '').slice(0, 120) || null, dir, dur, String(b.sim_label || c.sim || '').slice(0, 60) || null, at, lead ? 'existing' : 'pending', lead ? lead.id : null]);
+    if (!r.rows.length) { skipped++; continue; }
+    if (lead) { onLead++; await leadLog(lead.id, u.name, `📞 ${dir === 'outgoing' ? 'Called' : 'Call from'} ${ph} · ${Math.floor(dur / 60)} min ${dur % 60} s`); await q('UPDATE leads SET last_contact=now() WHERE id=$1', [lead.id]); }
+    else added++;
+  }
+  if (added) notifyLink([u.id], 'New call leads', `${added} call${added > 1 ? 's' : ''} of ${Math.round(cfg.min_sec / 60)}+ min waiting — tap to add to Leads`, 'calls').catch(() => {});
+  res.json({ ok: true, added, on_lead: onLead, skipped, min_sec: cfg.min_sec });
+}));
+app.get('/api/calls', need('calls'), wrap(async (req, res) => {
+  const p = [], sc = callSee(req.user, p), st = ['pending', 'accepted', 'ignored', 'existing'].includes(req.query.status) ? req.query.status : 'pending'; p.push(st);
+  const items = (await q(`SELECT c.*, l.name lead_name FROM calls c LEFT JOIN leads l ON l.id=c.lead_id WHERE ${sc} AND c.status=$${p.length} ORDER BY c.started_at DESC LIMIT 300`, p)).rows;
+  const p2 = [], sc2 = callSee(req.user, p2), cnt = (await q(`SELECT status, COUNT(*)::int n FROM calls c WHERE ${sc2} GROUP BY status`, p2)).rows.reduce((o, r) => (o[r.status] = r.n, o), {});
+  const p3 = [req.user.id], devs = (await q(`SELECT id, name, sim_label, sim_slot, last_seen, created_at FROM call_devices WHERE user_id=$1 AND active ORDER BY id DESC`, p3)).rows;
+  res.json({ items, counts: cnt, cfg: await callCfg(), devices: devs, apk: fs.existsSync(path.join(__dirname, 'public', 'app', 'rago-calls.apk')) });
+}));
+const callGet = async (req, res) => { const p = [+req.params.id], sc = callSee(req.user, p); const c = (await q(`SELECT c.* FROM calls c WHERE c.id=$1 AND ${sc}`, p)).rows[0]; if (!c) res.status(404).json({ error: 'Call not found' }); return c; };
+app.post('/api/calls/:id/accept', need('calls'), wrap(async (req, res) => {
+  const c = await callGet(req, res); if (!c) return; if (c.status === 'accepted') return res.status(400).json({ error: 'Already added to leads' });
+  const b = req.body || {}, o = cleanLead({ name: b.name || c.contact || c.phone, company: b.company, phone: c.phone, interest: b.interest, notes: b.notes, source: 'Call', priority: b.priority, assigned_to: c.user_id });
+  o.source = 'Call'; o.assigned_to = c.user_id;
+  const ex = (await q(`SELECT id, name FROM leads WHERE right(regexp_replace(COALESCE(phone,''),'\\D','','g'),10)=$1 ${c.brand_id ? 'AND brand_id=$2' : ''} LIMIT 1`, c.brand_id ? [digits(c.phone).slice(-10), c.brand_id] : [digits(c.phone).slice(-10)])).rows[0];
+  const id = ex ? ex.id : await insLead(o, req.user.id, c.brand_id || await leadBrand(req.user));
+  await leadLog(id, req.user.name, ex ? `📞 Call ${c.phone} (${Math.round(c.duration / 60)} min) linked` : `Lead created from a ${Math.round(c.duration / 60)} min call (${c.direction}) on ${c.sim_label || 'phone'}`);
+  await q(`UPDATE calls SET status='accepted', lead_id=$2, decided_by=$3, decided_at=now() WHERE id=$1`, [c.id, id, req.user.name]);
+  if (c.user_id !== req.user.id && !ex) notify([c.user_id], 'Call added to leads', `${o.name} (${c.phone})`, null).catch(() => {});
+  res.json({ ok: true, lead_id: id, existing: !!ex });
+}));
+app.post('/api/calls/:id/ignore', need('calls'), wrap(async (req, res) => {
+  const c = await callGet(req, res); if (!c) return;
+  await q(`UPDATE calls SET status=$2, decided_by=$3, decided_at=now() WHERE id=$1`, [c.id, (req.body || {}).undo ? 'pending' : 'ignored', req.user.name]); res.json({ ok: true });
+}));
+app.post('/api/calls/settings', wrap(async (req, res) => {
+  if (!isSuper(req.user) && req.user.role !== 'Admin') return res.status(403).json({ error: 'Only the Super Admin or Admin can change this' });
+  const b = req.body || {}, v = { min_sec: Math.max(10, Math.min(3600, Math.round((+b.min_min || 5) * 60))), incoming: b.incoming !== false, outgoing: b.outgoing !== false };
+  await q(`INSERT INTO settings(k,v) VALUES('call_cfg',$1) ON CONFLICT (k) DO UPDATE SET v=excluded.v`, [JSON.stringify(v)]); res.json({ ok: true, cfg: v });
+}));
+app.delete('/api/calls/devices/:id', wrap(async (req, res) => {
+  await q(`UPDATE call_devices SET active=false WHERE id=$1 AND (user_id=$2 OR $3)`, [+req.params.id, req.user.id, isSuper(req.user)]); res.json({ ok: true });
+}));
+app.get('/rago-calls.apk', (req, res) => { const f = path.join(__dirname, 'public', 'app', 'rago-calls.apk'); if (!fs.existsSync(f)) return res.status(404).send('The Android app file is not uploaded yet.'); res.download(f, 'rago-calls.apk'); });
+
+// ---------- email: each user connects their own mailbox once (Hostinger by default) ----------
+let MAIL_KEY = null;
+const mailKey = async () => {
+  if (MAIL_KEY) return MAIL_KEY;
+  if (process.env.MAIL_KEY) return (MAIL_KEY = crypto.createHash('sha256').update(process.env.MAIL_KEY).digest());
+  let k = (await q(`SELECT v FROM settings WHERE k='mail_key'`)).rows[0];
+  if (!k) { const v = crypto.randomBytes(32).toString('hex'); await q(`INSERT INTO settings(k,v) VALUES('mail_key',$1) ON CONFLICT (k) DO NOTHING`, [v]); k = (await q(`SELECT v FROM settings WHERE k='mail_key'`)).rows[0]; }
+  return (MAIL_KEY = Buffer.from(k.v, 'hex'));
+};
+const mailEnc = async t => { const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', await mailKey(), iv), e = Buffer.concat([c.update(String(t), 'utf8'), c.final()]); return [iv, c.getAuthTag(), e].map(x => x.toString('base64')).join('.'); };
+const mailDec = async s => { const [iv, tag, e] = String(s).split('.').map(x => Buffer.from(x, 'base64')); const d = crypto.createDecipheriv('aes-256-gcm', await mailKey(), iv); d.setAuthTag(tag); return Buffer.concat([d.update(e), d.final()]).toString('utf8'); };
+const MAIL_TLS = process.env.MAIL_TEST_INSECURE === '1' ? { rejectUnauthorized: false } : undefined;   // only for local tests
+const mailCfgOf = (b, old = {}) => ({ smtp_host: String(b.smtp_host || old.smtp_host || 'smtp.hostinger.com').trim(), smtp_port: +b.smtp_port || old.smtp_port || 465, imap_host: String(b.imap_host || old.imap_host || 'imap.hostinger.com').trim(), imap_port: +b.imap_port || old.imap_port || 993 });
+const smtpOf = (c, user, pass) => require('nodemailer').createTransport({ host: c.smtp_host, port: c.smtp_port, secure: c.smtp_port === 465, auth: { user, pass }, tls: MAIL_TLS, connectionTimeout: 15000, greetingTimeout: 10000, socketTimeout: 30000 });
+const imapOf = (c, user, pass) => new (require('imapflow').ImapFlow)({ host: c.imap_host, port: c.imap_port, secure: c.imap_port === 993, auth: { user, pass }, logger: false, tls: MAIL_TLS, socketTimeout: 30000, emitLogs: false });
+const mailAcc = async uid => { const m = (await q('SELECT * FROM user_mail WHERE user_id=$1', [uid])).rows[0]; if (!m) return null; m.pass = await mailDec(m.pass_enc); return m; };
+const mailErr = e => /auth|login|credential|535|invalid/i.test(String(e && (e.message || e.response) || '')) ? 'Email or password is wrong' : /ENOTFOUND|ECONNREFUSED|ETIMEDOUT|timeout/i.test(String(e && e.message)) ? 'Could not reach the mail server' : 'Mail server error: ' + String(e && e.message || e).slice(0, 120);
+app.get('/api/mail/me', wrap(async (req, res) => {
+  const m = (await q('SELECT email, from_name, signature, smtp_host, smtp_port, imap_host, imap_port, ok_at FROM user_mail WHERE user_id=$1', [req.user.id])).rows[0];
+  res.json(m ? { connected: true, ...m } : { connected: false, email: req.user.email || '' });
+}));
+app.post('/api/mail/connect', wrap(async (req, res) => {
+  const b = req.body || {}, email = String(b.email || '').trim().toLowerCase(), old = (await q('SELECT * FROM user_mail WHERE user_id=$1', [req.user.id])).rows[0] || {};
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: 'Enter your email address' });
+  let pass = String(b.password || ''); if (!pass && old.pass_enc && old.email === email) pass = await mailDec(old.pass_enc);
+  if (!pass) return res.status(400).json({ error: 'Enter your email password' });
+  const c = mailCfgOf(b, old);
+  try { await smtpOf(c, email, pass).verify(); } catch (e) { return res.status(400).json({ error: 'Sending check failed — ' + mailErr(e) }); }
+  let sent = old.sent_folder || null;
+  try { const im = imapOf(c, email, pass); await im.connect(); const L = await im.list(); const f = L.find(x => x.specialUse === '\\Sent') || L.find(x => /^(INBOX\.)?Sent$/i.test(x.path)); sent = f ? f.path : null; await im.logout(); }
+  catch (e) { return res.status(400).json({ error: 'Inbox check failed — ' + mailErr(e) }); }
+  await q(`INSERT INTO user_mail(user_id,email,from_name,signature,smtp_host,smtp_port,imap_host,imap_port,pass_enc,sent_folder,ok_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
+    ON CONFLICT (user_id) DO UPDATE SET email=$2, from_name=$3, signature=$4, smtp_host=$5, smtp_port=$6, imap_host=$7, imap_port=$8, pass_enc=$9, sent_folder=$10, ok_at=now()`,
+    [req.user.id, email, String(b.from_name || req.user.name || '').slice(0, 80), String(b.signature || '').slice(0, 1000) || null, c.smtp_host, c.smtp_port, c.imap_host, c.imap_port, await mailEnc(pass), sent]);
+  res.json({ ok: true, email });
+}));
+app.patch('/api/mail/me', wrap(async (req, res) => {
+  const b = req.body || {}; await q('UPDATE user_mail SET from_name=COALESCE($2,from_name), signature=$3 WHERE user_id=$1', [req.user.id, b.from_name ? String(b.from_name).slice(0, 80) : null, String(b.signature || '').slice(0, 1000) || null]); res.json({ ok: true });
+}));
+app.delete('/api/mail/me', wrap(async (req, res) => { await q('DELETE FROM user_mail WHERE user_id=$1', [req.user.id]); res.json({ ok: true }); }));
+const mailEsc = s => String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+app.post('/api/mail/send', wrap(async (req, res) => {
+  const m = await mailAcc(req.user.id); if (!m) return res.status(400).json({ error: 'Connect your email first (Mail → Connect email)' });
+  const b = req.body || {}, list = x => String(x || '').split(/[,;\s]+/).map(s => s.trim()).filter(Boolean);
+  const to = list(b.to), cc = list(b.cc); if (!to.length) return res.status(400).json({ error: 'Enter who to send to' });
+  if ([...to, ...cc].some(e => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e))) return res.status(400).json({ error: 'One of the email addresses is not valid' });
+  const subject = String(b.subject || '').slice(0, 250), text = String(b.body || '').slice(0, 20000); if (!subject && !text) return res.status(400).json({ error: 'Write a subject or message' });
+  let link = '', doc = null;
+  if (+b.doc_id) {
+    doc = await blLoad(req, res, +b.doc_id); if (!doc) return;
+    if (!doc.share_token) { doc.share_token = crypto.randomBytes(12).toString('base64url'); await q('UPDATE bl_docs SET share_token=$2 WHERE id=$1', [doc.id, doc.share_token]); }
+    link = `${req.headers['x-forwarded-proto'] || req.protocol}://${req.get('host')}/d/${doc.share_token}`;
+  }
+  const sig = m.signature ? '\n\n' + m.signature : '';
+  const html = `<div style="font:14px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#222">${mailEsc(text).replace(/\n/g, '<br>')}${link ? `<p><a href="${link}" style="display:inline-block;background:#e0a92b;color:#111;padding:10px 18px;border-radius:999px;text-decoration:none;font-weight:700">View ${mailEsc(BL_TYPES[doc.type].l)} ${mailEsc(doc.no)}</a></p>` : ''}${sig ? `<p style="color:#555">${mailEsc(m.signature).replace(/\n/g, '<br>')}</p>` : ''}</div>`;
+  const msg = { from: { name: m.from_name || req.user.name, address: m.email }, to, cc: cc.length ? cc : undefined, subject, text: text + (link ? '\n\n' + link : '') + sig, html };
+  try { await smtpOf(m, m.email, m.pass).sendMail(msg); } catch (e) { return res.status(400).json({ error: 'Not sent — ' + mailErr(e) }); }
+  if (m.sent_folder) (async () => {   // keep a copy in the mailbox's Sent folder
+    try { const raw = await new Promise((ok, no) => new (require('nodemailer/lib/mail-composer'))(msg).compile().build((e, r) => e ? no(e) : ok(r))); const im = imapOf(m, m.email, m.pass); await im.connect(); await im.append(m.sent_folder, raw, ['\\Seen']); await im.logout(); } catch (e) { console.error('mail sent copy', e.message); }
+  })();
+  const ids = { lead_id: +b.lead_id || (doc && doc.lead_id) || null, customer_id: +b.customer_id || (doc && doc.customer_id) || null, service_id: +b.service_id || (doc && doc.service_id) || null };
+  if (!ids.lead_id && !ids.customer_id) { const l = (await q(`SELECT id FROM leads WHERE lower(email)=ANY($1) ORDER BY id DESC LIMIT 1`, [to.map(x => x.toLowerCase())])).rows[0]; if (l) ids.lead_id = l.id; }
+  await q(`INSERT INTO mail_log(user_id,user_name,from_email,to_email,cc,subject,body,lead_id,customer_id,doc_id,service_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    [req.user.id, req.user.name, m.email, to.join(', '), cc.join(', ') || null, subject, text, ids.lead_id, ids.customer_id, doc ? doc.id : null, ids.service_id]);
+  if (ids.lead_id) await leadLog(ids.lead_id, req.user.name, `✉ Email sent to ${to.join(', ')}: ${subject}`);
+  res.json({ ok: true });
+}));
+app.get('/api/mail/log', wrap(async (req, res) => {
+  const p = [], w = []; for (const k of ['lead_id', 'customer_id', 'doc_id', 'service_id']) if (+req.query[k]) { p.push(+req.query[k]); w.push(`${k}=$${p.length}`); }
+  if (!w.length) { p.push(req.user.id); w.push(`user_id=$${p.length}`); } else if (!isSuper(req.user)) { p.push(req.user.id); w.push(`(user_id=$${p.length} OR ${can(req.user, 'leads_all') || can(req.user, 'billing') ? 'true' : 'false'})`); }
+  res.json((await q(`SELECT id, user_name, from_email, to_email, cc, subject, body, lead_id, customer_id, doc_id, service_id, created_at FROM mail_log WHERE ${w.join(' AND ')} ORDER BY id DESC LIMIT 100`, p)).rows);
+}));
+app.get('/api/mail/inbox', wrap(async (req, res) => {
+  const m = await mailAcc(req.user.id); if (!m) return res.status(400).json({ error: 'Connect your email first', need_connect: true });
+  const folder = req.query.folder === 'sent' ? (m.sent_folder || 'INBOX.Sent') : 'INBOX', lim = Math.min(50, +req.query.limit || 30), before = +req.query.before || 0;
+  const im = imapOf(m, m.email, m.pass), out = [];
+  try {
+    await im.connect(); const lock = await im.getMailboxLock(folder);
+    try {
+      const total = im.mailbox.exists || 0;
+      if (total) { const end = before ? Math.min(before - 1, total) : total, start = Math.max(1, end - lim + 1);
+        if (end >= 1) for await (const x of im.fetch(`${start}:${end}`, { envelope: true, flags: true, uid: true })) out.push({ uid: x.uid, seq: x.seq, subject: x.envelope.subject || '(no subject)', from: (x.envelope.from || [])[0] || {}, to: (x.envelope.to || []).map(a => a.address).join(', '), date: x.envelope.date, seen: x.flags && x.flags.has('\\Seen') }); }
+      res.json({ folder: req.query.folder === 'sent' ? 'sent' : 'inbox', total, items: out.reverse(), email: m.email });
+    } finally { lock.release(); }
+    await im.logout();
+  } catch (e) { try { im.close(); } catch (x) {} if (!res.headersSent) res.status(400).json({ error: mailErr(e) }); }
+}));
+app.get('/api/mail/msg/:uid', wrap(async (req, res) => {
+  const m = await mailAcc(req.user.id); if (!m) return res.status(400).json({ error: 'Connect your email first', need_connect: true });
+  const folder = req.query.folder === 'sent' ? (m.sent_folder || 'INBOX.Sent') : 'INBOX', im = imapOf(m, m.email, m.pass);
+  try {
+    await im.connect(); const lock = await im.getMailboxLock(folder); let src;
+    try { const x = await im.fetchOne(String(+req.params.uid), { source: true }, { uid: true }); src = x && x.source; if (src) await im.messageFlagsAdd(String(+req.params.uid), ['\\Seen'], { uid: true }); } finally { lock.release(); }
+    await im.logout(); if (!src) return res.status(404).json({ error: 'Message not found' });
+    const P = await require('mailparser').simpleParser(src), from = (P.from && P.from.value[0]) || {};
+    const addr = String(from.address || '').toLowerCase(), pl = [addr];
+    const lead = addr ? (await q(`SELECT l.id, l.name FROM leads l WHERE lower(l.email)=$1 AND ${leadScope(req.user, pl)} ORDER BY l.id DESC LIMIT 1`, pl)).rows[0] : null;
+    const cust = addr ? (await q(`SELECT id, name, company FROM customers WHERE lower(email)=$1 LIMIT 1`, [addr])).rows[0] : null;
+    res.json({ uid: +req.params.uid, subject: P.subject || '', from, to: P.to ? P.to.text : '', cc: P.cc ? P.cc.text : '', date: P.date, text: P.text || '', html: P.html || null,
+      attachments: (P.attachments || []).map(a => ({ name: a.filename, size: a.size, type: a.contentType })), lead, customer: cust });
+  } catch (e) { try { im.close(); } catch (x) {} if (!res.headersSent) res.status(400).json({ error: mailErr(e) }); }
+}));
+
+// ---------- credit control: credit period per customer; no new invoice / quotation while a bill is overdue (unless paid or the MD approves) ----------
+const BL_CREDIT_TYPES = ['invoice', 'quotation'];
+const blCreditCfg = async () => Object.assign({ block: false, default_days: 0, grace_days: 0 }, (await q(`SELECT v FROM settings WHERE k='bl_credit'`)).rows.map(r => { try { return JSON.parse(r.v); } catch (e) { return {}; } })[0] || {});
+const blCreditCheck = async (cid) => {
+  const cfg = await blCreditCfg(), today = await todayIST();
+  const c = (await q('SELECT id, name, company, credit_days FROM customers WHERE id=$1', [cid])).rows[0]; if (!c) return { blocked: false };
+  const days = c.credit_days !== null && c.credit_days !== undefined ? c.credit_days : cfg.default_days;
+  const bills = (await q(`SELECT d.id, d.no, to_char(d.doc_date,'YYYY-MM-DD') doc_date, to_char(COALESCE(d.due_date, d.doc_date + $2::int),'YYYY-MM-DD') due, br.name brand, (d.total-d.paid-d.credited)::float bal
+    FROM bl_docs d LEFT JOIN brands br ON br.id=d.brand_id WHERE d.customer_id=$1 AND d.type='invoice' AND d.status IN ('Unpaid','Partial') AND d.total-d.paid-d.credited>0.5
+    AND COALESCE(d.due_date, d.doc_date + $2::int) + $3::int < $4::date ORDER BY COALESCE(d.due_date, d.doc_date + $2::int) LIMIT 20`, [cid, days, cfg.grace_days, today])).rows;
+  const amount = br2(bills.reduce((t, x) => t + x.bal, 0));
+  const pass = (await q(`SELECT id, decided_by, valid_until FROM bl_credit_ok WHERE customer_id=$1 AND status='approved' AND valid_until>now() ORDER BY id DESC LIMIT 1`, [cid])).rows[0] || null;
+  const pending = (await q(`SELECT id, req_name, created_at FROM bl_credit_ok WHERE customer_id=$1 AND status='pending' ORDER BY id DESC LIMIT 1`, [cid])).rows[0] || null;
+  return { on: cfg.block, credit_days: days, n: bills.length, amount, bills, approved: pass, pending, customer: c.company || c.name, blocked: cfg.block && bills.length > 0 && !pass };
+};
+async function initV30() {
+  await q(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS credit_days INT;
+  CREATE TABLE IF NOT EXISTS bl_credit_ok (id SERIAL PRIMARY KEY, customer_id INT NOT NULL, customer_name TEXT, doc_type TEXT, amount NUMERIC(14,2), note TEXT, status TEXT DEFAULT 'pending',
+    requested_by INT, req_name TEXT, decided_by TEXT, decided_at TIMESTAMPTZ, decide_note TEXT, valid_until TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT now());`);
+}
+const endOfDayIST = () => { const d = new Date(Date.now() + 5.5 * 3600e3); d.setUTCHours(23, 59, 59, 0); return new Date(d.getTime() - 5.5 * 3600e3); };
+app.get('/api/bl/credit-settings', need('billing'), wrap(async (req, res) => res.json(await blCreditCfg())));
+app.post('/api/bl/credit-settings', superOnly, wrap(async (req, res) => {
+  const b = req.body || {}, v = { block: !!b.block, default_days: Math.max(0, Math.min(365, Math.round(+b.default_days || 0))), grace_days: Math.max(0, Math.min(90, Math.round(+b.grace_days || 0))) };
+  await q(`INSERT INTO settings(k,v) VALUES('bl_credit',$1) ON CONFLICT (k) DO UPDATE SET v=excluded.v`, [JSON.stringify(v)]); res.json({ ok: true, cfg: v });
+}));
+app.get('/api/bl/credit-check', need('billing'), wrap(async (req, res) => {
+  const p = [+req.query.customer_id], sc = custScope(req.user, p);
+  if (!(await q(`SELECT 1 FROM customers c WHERE c.id=$1 AND ${sc}`, p)).rows.length) return res.status(404).json({ error: 'Customer not found' });
+  res.json(await blCreditCheck(+req.query.customer_id));
+}));
+app.post('/api/bl/credit-approvals', need('billing'), wrap(async (req, res) => {    // staff asks the MD (Super Admin) to allow a new bill
+  const b = req.body || {}, p = [+b.customer_id], sc = custScope(req.user, p);
+  if (!(await q(`SELECT 1 FROM customers c WHERE c.id=$1 AND ${sc}`, p)).rows.length) return res.status(404).json({ error: 'Customer not found' });
+  const chk = await blCreditCheck(+b.customer_id);
+  if (!chk.blocked) return res.json({ ok: true, not_needed: true });
+  if (chk.pending) return res.json({ ok: true, id: chk.pending.id, already: true });
+  const r = (await q(`INSERT INTO bl_credit_ok(customer_id,customer_name,doc_type,amount,note,requested_by,req_name) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+    [+b.customer_id, chk.customer, BL_CREDIT_TYPES.includes(b.doc_type) ? b.doc_type : 'invoice', chk.amount, String(b.note || '').slice(0, 500) || null, req.user.id, req.user.name])).rows[0];
+  const supers = (await q(`SELECT id FROM users WHERE role=$1 AND active`, [SUPER])).rows.map(x => x.id).filter(id => id !== req.user.id);
+  await notifyLink(supers, '🔒 Approval needed: new bill', `${req.user.name} wants to make a ${b.doc_type === 'quotation' ? 'quotation' : 'invoice'} for ${chk.customer} — ₹${chk.amount} overdue (${chk.n} bill${chk.n > 1 ? 's' : ''})${b.note ? ' · ' + String(b.note).slice(0, 80) : ''}`, 'credit').catch(() => {});
+  res.json({ ok: true, id: r.id });
+}));
+app.get('/api/bl/credit-approvals', need('billing'), wrap(async (req, res) => {
+  const p = [], w = [];
+  if (!isSuper(req.user)) { p.push(req.user.id); w.push(`requested_by=$${p.length}`); }
+  if (req.query.status === 'pending') w.push(`status='pending'`);
+  res.json((await q(`SELECT id, customer_id, customer_name, doc_type, amount::float amount, note, status, req_name, decided_by, decided_at, decide_note, valid_until, created_at FROM bl_credit_ok ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY (status='pending') DESC, id DESC LIMIT 100`, p)).rows);
+}));
+app.post('/api/bl/credit-approvals/:id/decide', superOnly, wrap(async (req, res) => {
+  const a = (await q(`SELECT * FROM bl_credit_ok WHERE id=$1`, [+req.params.id])).rows[0]; if (!a) return res.status(404).json({ error: 'Not found' });
+  if (a.status !== 'pending') return res.status(400).json({ error: 'Already ' + a.status });
+  const ok = !!(req.body || {}).approve, note = String((req.body || {}).note || '').slice(0, 300) || null;
+  await q(`UPDATE bl_credit_ok SET status=$2, decided_by=$3, decided_at=now(), decide_note=$4, valid_until=$5 WHERE id=$1`, [a.id, ok ? 'approved' : 'rejected', req.user.name, note, ok ? endOfDayIST() : null]);
+  if (a.requested_by) await notifyLink([a.requested_by], ok ? '✅ MD approved — you can make the bill' : '❌ MD did not approve the bill', `${a.customer_name}${ok ? ' · allowed till tonight' : ''}${note ? ' · ' + note : ''}`, 'credit').catch(() => {});
+  res.json({ ok: true });
+}));
+
+init().then(initGST).then(initChat).then(initProjects).then(initWA).then(initBL).then(initWC).then(initRoles).then(initFV).then(initV29).then(initV30).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
   .catch(e => { console.error('DB init failed', e.message); process.exit(1); });
