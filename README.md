@@ -375,3 +375,15 @@ A full GST billing section inside the CRM: **Billing** in the menu. It needs the
   - Support staff can now also be given Field visits.
 - **Desktop sidebar:** shows icons only. **Move the mouse over it and it opens with the names** (over the page, so nothing jumps). It closes when the mouse leaves.
 - **Smoother on phones:** faster taps (no tap delay or grey flash), a small press effect on buttons, and pages / pop-ups don't drag the whole app when scrolled to the end.
+
+## Version 26 — ₹/km per person on the user form, field visits assigned from leads, map fix
+- **Per-person kilometre rate while creating / editing a member (Super Admin):** when **Field visits** is ticked, a box **"📍 Field visit rate per km (₹)"** appears. Each marketing / field person can have a different rate. Empty = the common rate in ⚙ Km & rate. It is the same rate as in ⚙ Km & rate, so changing it in one place changes it in the other. Only Super Admin sees and sets it.
+- **Assign a field visit from a lead (Super Admin, Admin, Sales admin):**
+  - In the lead pop-up there is a new section **📍 Field visits** with a **📍 Assign field visit** button. Choose the field sales person (only people with Field visits are listed, with how many visits they already have), the date (today / tomorrow / any later day) and a note.
+  - The person gets a **notification** (bell + phone push). Tapping it opens Field Visits.
+  - The lead now **shows in that person's Leads** (even if it is not assigned to them), with a badge **"📍 Visit · name · date"** on the lead card ("Visited" once done). Admin and Super Admin see the same badge.
+  - On their **Field Visits** page a **🗓 Planned visits** list comes first: today, overdue and coming visits, with the customer, phone, address, the note, who assigned it, **🧭 Go** (Google Maps directions) and **📍 Check in**.
+  - Checking in from a planned visit fills the customer from the lead. At check-out no duplicate lead is made; the customer is linked to the lead.
+  - The visit result goes into the **lead history**, the planned visit becomes **Visited**, and **the person who assigned it gets a "✅ Field visit done" notification**.
+  - The assigner can **cancel** a planned visit (✕ in the lead), and the field person is told.
+- **Fix:** the map on Field Visits no longer covers the bottom menu bar and the top bar while scrolling on phones.

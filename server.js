@@ -147,7 +147,9 @@ app.post('/api/password', wrap(async (req, res) => {
 }));
 
 // ---------- leads (Heaven Automation pipeline) ----------
-const LSEL = `SELECT l.id,l.name,l.company,l.brand_id,(SELECT name FROM brands WHERE id=l.brand_id) brand,(SELECT COUNT(*)::int FROM lead_voice v WHERE v.lead_id=l.id) voices,l.phone,l.email,l.source,l.interest,l.address,l.priority,l.stage,l.assigned_to,l.value,to_char(l.follow_up,'YYYY-MM-DD') follow_up,l.last_contact,l.notes,l.lost_reason,l.customer_id,l.created_at,l.lat,l.lng,l.map_url,l.location_by,l.location_on,u.name agent FROM leads l LEFT JOIN users u ON u.id=l.assigned_to`;
+const LSEL = `SELECT l.id,l.name,l.company,l.brand_id,(SELECT name FROM brands WHERE id=l.brand_id) brand,(SELECT COUNT(*)::int FROM lead_voice v WHERE v.lead_id=l.id) voices,l.phone,l.email,l.source,l.interest,l.address,l.priority,l.stage,l.assigned_to,l.value,to_char(l.follow_up,'YYYY-MM-DD') follow_up,l.last_contact,l.notes,l.lost_reason,l.customer_id,l.created_at,l.lat,l.lng,l.map_url,l.location_by,l.location_on,u.name agent,
+  (SELECT json_build_object('id',fp.id,'user_id',fp.user_id,'user',fu.name,'date',to_char(fp.plan_date,'YYYY-MM-DD'),'status',fp.status) FROM fv_plans fp JOIN users fu ON fu.id=fp.user_id WHERE fp.lead_id=l.id ORDER BY fp.id DESC LIMIT 1) fv_plan
+  FROM leads l LEFT JOIN users u ON u.id=l.assigned_to`;
 const digits = v => String(v || '').replace(/\D/g, '');
 const pickOf = (v, list, d) => list.includes(v) ? v : d;
 const cleanLead = (b, cur = {}) => {
@@ -169,7 +171,7 @@ const insLead = async (o, uid, brandId) => (await q(`INSERT INTO leads(name,phon
 const leadScope = (u, p) => {
   if (u.role === SUPER) return 'true';
   if ((u.permissions || []).includes('leads_all')) { if (!u.brand_id) return 'true'; p.push(u.brand_id); return `l.brand_id=$${p.length}`; }
-  p.push(u.id); let w = `(l.assigned_to=$${p.length} OR l.created_by=$${p.length})`;
+  p.push(u.id); let w = `(l.assigned_to=$${p.length} OR l.created_by=$${p.length} OR EXISTS (SELECT 1 FROM fv_plans fp WHERE fp.lead_id=l.id AND fp.user_id=$${p.length} AND fp.status<>'cancelled'))`;
   if (u.brand_id) { p.push(u.brand_id); w += ` AND l.brand_id=$${p.length}`; }
   return w;
 };
@@ -589,6 +591,11 @@ const brandFor = async (role, v) => {
   if (role === 'Admin' && !id) return { error: 'Choose the brand this admin staff works for' };
   return { id };
 };
+// per-person field visit ₹/km (kept with the other km settings)
+const fvSetRate = async (uid, v) => { let c = {}; try { c = JSON.parse(((await q(`SELECT v FROM settings WHERE k='fv_cfg'`)).rows[0] || {}).v || '{}'); } catch (e) {}
+  c.rates = c.rates && typeof c.rates === 'object' ? c.rates : {}; if (v === '' || v === null || !(+v >= 0)) delete c.rates[uid]; else c.rates[uid] = Math.min(1000, Math.round(+v * 100) / 100);
+  await q(`INSERT INTO settings(k,v) VALUES('fv_cfg',$1) ON CONFLICT (k) DO UPDATE SET v=excluded.v`, [JSON.stringify(c)]); };
+const fvRateAdd = (u, c) => x => isSuper(u) ? { ...x, fv_rate: c.rates[x.id] ?? null } : x;
 const jobRole = (role, name) => { const c = name && CUSTOM_ROLES.find(x => x.name === name); return c && c.base === role ? c.name : null; };
 const manages = (me, role) => isSuper(me) || !['Admin', SUPER].includes(role);
 // salary, joining date and "salary paid by" brand — only the Super Admin can set them
@@ -601,7 +608,7 @@ const payFields = (me, b, cur) => {
   if (b.att_rules && typeof b.att_rules === 'object') { const c = cleanRules(b.att_rules, cur && cur.att_rules); if (c.error) o.error = c.error; else o.att_rules = c.rules; }
   return o;
 };
-app.get('/api/users', need('team'), wrap(async (req, res) => res.json((await q(`SELECT u.id,u.name,u.email,u.phone,u.role,u.job_role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at,u.pay_brand_id,to_char(u.join_date,'YYYY-MM-DD') join_date,${isSuper(req.user) ? 'u.salary, u.att_rules' : 'NULL salary'}, COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id ORDER BY u.active DESC, u.role, u.name`)).rows.map(pub))));
+app.get('/api/users', need('team'), wrap(async (req, res) => res.json((await q(`SELECT u.id,u.name,u.email,u.phone,u.role,u.job_role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at,u.pay_brand_id,to_char(u.join_date,'YYYY-MM-DD') join_date,${isSuper(req.user) ? 'u.salary, u.att_rules' : 'NULL salary'}, COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id ORDER BY u.active DESC, u.role, u.name`)).rows.map(pub).map(fvRateAdd(req.user, await fvCfg())))));
 app.post('/api/users', need('team'), wrap(async (req, res) => {
   const b = req.body || {};
   if (!b.name || !b.email || !b.phone) return res.status(400).json({ error: 'Name, email and phone are required' });
@@ -622,6 +629,7 @@ app.post('/api/users', need('team'), wrap(async (req, res) => {
   const jr = jobRole(b.role, b.job_role);
   const r = await q('INSERT INTO users(name,email,phone,role,username,password_hash,permissions,brand_id,salary,join_date,pay_brand_id,att_rules,job_role) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *',
     [b.name.trim(), b.email.trim(), b.phone.trim(), b.role, username, hash(password), cleanPerms(b.role, Array.isArray(b.permissions) ? b.permissions : jr ? (CUSTOM_ROLES.find(x => x.name === jr) || {}).perms : undefined), br.id, pay.salary ?? 0, pay.join_date ?? null, pay.pay_brand_id ?? br.id, pay.att_rules ? JSON.stringify(pay.att_rules) : null, jr]);
+  if (isSuper(req.user) && b.fv_rate !== undefined) await fvSetRate(r.rows[0].id, b.fv_rate);
   res.json({ user: pub(r.rows[0]), credentials: { username, password } });
 }));
 app.patch('/api/users/:id', need('team'), wrap(async (req, res) => {
@@ -642,6 +650,7 @@ app.patch('/api/users/:id', need('team'), wrap(async (req, res) => {
     [b.name || cur.name, b.email ?? cur.email, b.phone ?? cur.phone, role, cleanPerms(role, b.permissions ?? cur.permissions), b.active ?? cur.active, br.id,
      pay.salary ?? cur.salary, pay.join_date !== undefined ? pay.join_date : cur.join_date, pay.pay_brand_id !== undefined ? pay.pay_brand_id : (cur.pay_brand_id ?? br.id), cur.id]);
   if (pay.att_rules) await q('UPDATE users SET att_rules=$2 WHERE id=$1', [cur.id, JSON.stringify(pay.att_rules)]);
+  if (isSuper(req.user) && b.fv_rate !== undefined) await fvSetRate(cur.id, b.fv_rate);
   if (b.job_role !== undefined || role !== cur.role) await q('UPDATE users SET job_role=$2 WHERE id=$1', [cur.id, jobRole(role, b.job_role !== undefined ? b.job_role : cur.job_role)]);
   if ((b.active ?? cur.active) === false && cur.active) { await q('DELETE FROM push_subs WHERE user_id=$1', [cur.id]).catch(() => {}); }   // disabled → signed out everywhere (every request checks "active")
   res.json({ ok: true });
@@ -3528,9 +3537,14 @@ async function initFV() {
   CREATE TABLE IF NOT EXISTS fv_media (id SERIAL PRIMARY KEY, visit_id INT REFERENCES fv_visits(id) ON DELETE CASCADE, data BYTEA, mime TEXT, lat DOUBLE PRECISION, lng DOUBLE PRECISION, created_at TIMESTAMPTZ DEFAULT now());
   CREATE TABLE IF NOT EXISTS fv_track (id BIGSERIAL PRIMARY KEY, user_id INT NOT NULL, day DATE NOT NULL, at TIMESTAMPTZ NOT NULL, lat DOUBLE PRECISION NOT NULL, lng DOUBLE PRECISION NOT NULL, acc INT, kind TEXT DEFAULT 'gps');
   CREATE INDEX IF NOT EXISTS idx_fvt_user ON fv_track(user_id, day, at);
+  CREATE TABLE IF NOT EXISTS fv_plans (id SERIAL PRIMARY KEY, lead_id INT, customer_id INT, user_id INT NOT NULL, plan_date DATE NOT NULL, note TEXT, status TEXT DEFAULT 'planned', visit_id INT,
+    by_id INT, by_name TEXT, created_at TIMESTAMPTZ DEFAULT now(), done_at TIMESTAMPTZ);
+  CREATE INDEX IF NOT EXISTS idx_fvp_user ON fv_plans(user_id, status, plan_date);
+  CREATE INDEX IF NOT EXISTS idx_fvp_lead ON fv_plans(lead_id);
   CREATE TABLE IF NOT EXISTS fv_legs (user_id INT NOT NULL, t_from TIMESTAMPTZ NOT NULL, t_to TIMESTAMPTZ NOT NULL, km NUMERIC(9,2), src TEXT, mins INT, created_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY(user_id, t_from, t_to));
   CREATE TABLE IF NOT EXISTS fv_days (user_id INT NOT NULL, day DATE NOT NULL, started_at TIMESTAMPTZ, start_lat DOUBLE PRECISION, start_lng DOUBLE PRECISION, ended_at TIMESTAMPTZ, end_lat DOUBLE PRECISION, end_lng DOUBLE PRECISION, PRIMARY KEY(user_id, day));`);
   await q(`ALTER TABLE fv_days ADD COLUMN IF NOT EXISTS rate NUMERIC(8,2)`);
+  await q(`ALTER TABLE fv_visits ADD COLUMN IF NOT EXISTS plan_id INT`);
   if (!(await q(`SELECT 1 FROM settings WHERE k='fv_perm_v1'`)).rows.length) {   // sales people get field visits once
     await q(`UPDATE users SET permissions = (SELECT ARRAY(SELECT DISTINCT unnest(permissions || ARRAY['field']))) WHERE role='Sales'`);
     await q(`INSERT INTO settings(k,v) VALUES('fv_perm_v1','1') ON CONFLICT (k) DO NOTHING`);
@@ -3642,6 +3656,47 @@ app.post('/api/fv/recalc', superOnly, wrap(async (req, res) => {   // drop store
   const uid = +(req.body || {}).user, day = (req.body || {}).date; if (!uid || !/^\d{4}-\d{2}-\d{2}$/.test(day || '')) return res.status(400).json({ error: 'Choose the person and day' });
   await q(`DELETE FROM fv_legs WHERE user_id=$1 AND (t_from AT TIME ZONE '${TZ}')::date=$2`, [uid, day]); res.json({ ok: true, ...(await fvDay(uid, day)) });
 }));
+// ---- visits assigned from a lead by Super Admin / Admin / Sales Admin ----
+const fvCanAssign = u => isSuper(u) || u.role === 'Admin' || can(u, 'field_team');
+const fvPush = async (ids, title, body, link) => { for (const id of [...new Set(ids)].filter(Boolean)) { await q('INSERT INTO notifications(user_id,title,body,link) VALUES($1,$2,$3,$4)', [id, title, body, link]); pushTo(id, title, body, null, { url: '/?att=' + link, att: link, tag: 'gz-fv-' + Date.now() }).catch(() => {}); } };
+const FVP_SEL = `SELECT fp.*, to_char(fp.plan_date,'YYYY-MM-DD') plan_date, u.name user_name, l.name lead_name, l.company lead_company, l.phone lead_phone, l.address lead_address, l.lat, l.lng, l.map_url, l.customer_id lead_customer_id
+  FROM fv_plans fp JOIN users u ON u.id=fp.user_id LEFT JOIN leads l ON l.id=fp.lead_id`;
+app.get('/api/fv/staff', need('leads', 'field_team'), wrap(async (req, res) => {   // who can be sent on a field visit
+  if (!fvCanAssign(req.user)) return res.status(403).json({ error: 'Only Super Admin / Admin can assign field visits' });
+  const p = []; let w = `u.active AND (u.role=$${p.push(SUPER) && p.length} OR 'field'=ANY(u.permissions))`;
+  if (req.user.brand_id && !isSuper(req.user)) { p.push(req.user.brand_id); w += ` AND (u.brand_id IS NULL OR u.brand_id=$${p.length})`; }
+  res.json((await q(`SELECT u.id, u.name, u.role, u.job_role, (SELECT COUNT(*)::int FROM fv_plans fp WHERE fp.user_id=u.id AND fp.status='planned') planned FROM users u WHERE ${w} AND u.role<>'${SUPER}' ORDER BY u.name`, p)).rows);
+}));
+app.post('/api/fv/plans', need('leads', 'field_team'), wrap(async (req, res) => {
+  if (!fvCanAssign(req.user)) return res.status(403).json({ error: 'Only Super Admin / Admin can assign field visits' });
+  const b = req.body || {}, lp = [+b.lead_id], sc = leadScope(req.user, lp);
+  const l = (await q(`SELECT l.* FROM leads l WHERE l.id=$1 AND ${sc}`, lp)).rows[0]; if (!l) return res.status(404).json({ error: 'Lead not found' });
+  const u = (await q(`SELECT id, name, permissions, active FROM users WHERE id=$1`, [+b.user_id])).rows[0];
+  if (!u || !u.active || !(u.permissions || []).includes('field')) return res.status(400).json({ error: 'Choose a field sales person' });
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(b.date) ? b.date : await todayIST();
+  if (day < await todayIST()) return res.status(400).json({ error: 'Choose today or a later date' });
+  const note = String(b.note || '').trim().slice(0, 1000) || null;
+  const r = (await q(`INSERT INTO fv_plans(lead_id,customer_id,user_id,plan_date,note,by_id,by_name) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`, [l.id, l.customer_id || null, u.id, day, note, req.user.id, req.user.name])).rows[0];
+  await leadLog(l.id, req.user.name, `📍 Field visit assigned to ${u.name} for ${day}${note ? ' — ' + note : ''}`);
+  await fvPush([u.id], '📍 New field visit', `${l.company || l.name}${l.address ? ' · ' + l.address : ''} — ${day === await todayIST() ? 'today' : day}${note ? ' · ' + note : ''} (by ${req.user.name})`, 'fvp:' + r.id);
+  res.json({ ok: true, id: r.id });
+}));
+app.get('/api/fv/plans', need('leads', 'field', 'field_team'), wrap(async (req, res) => {
+  if (req.query.lead_id) { const lp = [+req.query.lead_id], sc = leadScope(req.user, lp); if (!(await q(`SELECT 1 FROM leads l WHERE l.id=$1 AND ${sc}`, lp)).rows.length) return res.status(404).json({ error: 'Lead not found' });
+    return res.json({ items: (await q(`${FVP_SEL} WHERE fp.lead_id=$1 ORDER BY fp.id DESC`, [+req.query.lead_id])).rows, can_assign: fvCanAssign(req.user) }); }
+  const uid = fvUid(req); if (!uid) return res.status(403).json({ error: 'Not allowed' });   // my planned visits (today, overdue and coming days)
+  res.json({ items: (await q(`${FVP_SEL} WHERE fp.user_id=$1 AND fp.status='planned' ORDER BY fp.plan_date, fp.id LIMIT 100`, [uid])).rows });
+}));
+app.patch('/api/fv/plans/:id', need('leads', 'field', 'field_team'), wrap(async (req, res) => {   // cancel (assigner / boss) or move the date
+  const pl = (await q(`SELECT * FROM fv_plans WHERE id=$1`, [+req.params.id])).rows[0]; if (!pl) return res.status(404).json({ error: 'Not found' });
+  if (!fvCanAssign(req.user) && pl.by_id !== req.user.id) return res.status(403).json({ error: 'Not allowed' });
+  if (pl.status !== 'planned') return res.status(400).json({ error: 'This visit is already ' + pl.status });
+  const b = req.body || {};
+  if (b.status === 'cancelled') { await q(`UPDATE fv_plans SET status='cancelled' WHERE id=$1`, [pl.id]); if (pl.lead_id) await leadLog(pl.lead_id, req.user.name, '📍 Field visit cancelled');
+    await fvPush([pl.user_id], '📍 Field visit cancelled', `The visit planned for ${pl.plan_date.toISOString ? pl.plan_date.toISOString().slice(0, 10) : pl.plan_date} was cancelled by ${req.user.name}`, 'fvp:' + pl.id); }
+  else if (/^\d{4}-\d{2}-\d{2}$/.test(b.date || '')) await q(`UPDATE fv_plans SET plan_date=$2 WHERE id=$1`, [pl.id, b.date]);
+  res.json({ ok: true });
+}));
 app.get('/api/fv/meta', need('field', 'field_team'), wrap(async (req, res) => {
   const staff = can(req.user, 'field_team') || isSuper(req.user) ? (await q(`SELECT id, name, role, brand_id FROM users WHERE active AND (role=$1 OR 'field'=ANY(permissions)) ORDER BY name`, [SUPER])).rows.filter(u => u.role !== SUPER || u.id === req.user.id) : [];
   res.json({ purposes: FV_PURPOSE, outcomes: FV_OUTCOME, staff, today: (await todayIST()), me: req.user.id, team: can(req.user, 'field_team') || isSuper(req.user) });
@@ -3703,8 +3758,12 @@ const fvPhoto = async (visitId, b) => {
 app.post('/api/fv/checkin', need('field'), wrap(async (req, res) => {
   const b = req.body || {}, pt = fvPoint(b); if (!pt) return res.status(400).json({ error: 'Location needed — turn on GPS and allow location' });
   if ((await q(`SELECT 1 FROM fv_visits WHERE user_id=$1 AND out_at IS NULL`, [req.user.id])).rows.length) return res.status(400).json({ error: 'You are still checked in at another place — check out there first' });
-  let c = null;
-  if (+b.customer_id) { const pp = [+b.customer_id], sc = custScope(req.user, pp); c = (await q(`SELECT c.* FROM customers c WHERE c.id=$1 AND ${sc}`, pp)).rows[0]; if (!c) return res.status(404).json({ error: 'Customer not found' }); }
+  let c = null, plan = null;
+  if (+b.plan_id) { plan = (await q(`${FVP_SEL} WHERE fp.id=$1`, [+b.plan_id])).rows[0];
+    if (!plan || plan.user_id !== req.user.id || plan.status !== 'planned') return res.status(400).json({ error: 'This planned visit is not open for you' });
+    if (!b.customer_id && plan.lead_customer_id) b.customer_id = plan.lead_customer_id;
+    if (!b.customer_id && !b.cust) b.cust = { name: plan.lead_name, company: plan.lead_company, phone: plan.lead_phone, address: plan.lead_address }; }
+  if (+b.customer_id) { const pp = [+b.customer_id], sc = +b.plan_id ? 'true' : custScope(req.user, pp); c = (await q(`SELECT c.* FROM customers c WHERE c.id=$1 AND ${sc}`, pp)).rows[0]; if (!c) return res.status(404).json({ error: 'Customer not found' }); }
   const n = b.cust || {}, t = (k, l = 200) => String(n[k] || '').trim().slice(0, l) || null;
   if (!c && !t('name') && !t('company')) return res.status(400).json({ error: 'Choose the customer or type the new customer’s name' });
   if (!c && t('phone') && digits(t('phone')).length >= 7) {   // typed a phone that is already a customer → use that customer
@@ -3717,6 +3776,8 @@ app.post('/api/fv/checkin', need('field'), wrap(async (req, res) => {
   [req.user.id, req.user.name, req.user.brand_id || (c && c.brand_id) || null, day, c ? c.id : null, !c, c ? c.name : t('name') || t('company'), c ? c.company : t('company'), c ? c.phone : t('phone', 30), c ? c.address : t('address', 500),
     FV_PURPOSE.includes(b.purpose) ? b.purpose : 'Sales visit', String(b.notes || '').slice(0, 4000) || null, pt.lat, pt.lng, pt.acc])).rows[0];
   await q(`INSERT INTO fv_track(user_id,day,at,lat,lng,acc,kind) VALUES($1,$2,now(),$3,$4,$5,'in')`, [req.user.id, day, pt.lat, pt.lng, pt.acc]);
+  if (plan) { await q(`UPDATE fv_visits SET plan_id=$2, lead_id=$3 WHERE id=$1`, [r.id, plan.id, plan.lead_id]); await q(`UPDATE fv_plans SET visit_id=$2 WHERE id=$1`, [plan.id, r.id]);
+    if (plan.lead_id) await leadLog(plan.lead_id, req.user.name, `📍 Reached the site (field visit) at ${new Date().toLocaleTimeString('en-IN', { timeZone: TZ, hour: 'numeric', minute: '2-digit' })}`); }
   if (b.photo) { const e = await fvPhoto(r.id, b); if (e) return res.status(400).json({ error: e }); }
   res.json({ ok: true, id: r.id, old_customer: !!c, customer_id: c ? c.id : null });
 }));
@@ -3757,7 +3818,8 @@ app.post('/api/fv/:id/checkout', need('field'), wrap(async (req, res) => {
     const ex = n.phone && digits(n.phone).length >= 7 ? (await q(`SELECT id FROM customers WHERE right(regexp_replace(COALESCE(phone,''),'\\D','','g'),10)=$1 LIMIT 1`, [digits(n.phone).slice(-10)])).rows[0] : null;
     custId = ex ? ex.id : (await q(`INSERT INTO customers(name,company,phone,address,brand_id) VALUES($1,$2,$3,$4,$5) RETURNING id`, [n.name, n.company, n.phone, n.address, v.brand_id || req.user.brand_id || await blDefBrand(req.user)])).rows[0].id;
     await q(`UPDATE fv_visits SET cust_name=$2, cust_company=$3, cust_phone=$4, cust_address=$5 WHERE id=$1`, [v.id, n.name, n.company, n.phone, n.address]);
-    if (b.add_lead !== false) {
+    if (v.lead_id) await q(`UPDATE leads SET customer_id=COALESCE(customer_id,$2) WHERE id=$1`, [v.lead_id, custId]);
+    else if (b.add_lead !== false) {
       leadId = await insLead({ name: n.name, company: n.company, phone: n.phone, address: n.address, source: 'Field visit', notes, follow_up: fu, assigned_to: req.user.id, stage: 'New Enquiry' }, req.user.id, v.brand_id || req.user.brand_id || await blDefBrand(req.user));
       await q(`UPDATE leads SET customer_id=$2, lat=$3, lng=$4, location_by=$5, location_on=now() WHERE id=$1`, [leadId, custId, v.in_lat, v.in_lng, req.user.name]);
       await leadLog(leadId, req.user.name, `📍 Field visit (${v.purpose}) — ${outcome}: ${notes}`);
@@ -3766,7 +3828,10 @@ app.post('/api/fv/:id/checkout', need('field'), wrap(async (req, res) => {
   await q(`UPDATE fv_visits SET out_at=now(), out_lat=$2, out_lng=$3, out_acc=$4, notes=$5, outcome=$6, follow_up=$7, customer_id=$8, lead_id=COALESCE($9,lead_id) WHERE id=$1`, [v.id, pt.lat, pt.lng, pt.acc, notes.slice(0, 4000), outcome, fu, custId, leadId]);
   await q(`INSERT INTO fv_track(user_id,day,at,lat,lng,acc,kind) VALUES($1,$2,now(),$3,$4,$5,'out')`, [v.user_id, v.day, pt.lat, pt.lng, pt.acc]);
   const mins = Math.round((Date.now() - new Date(v.in_at)) / 60e3);
-  res.json({ ok: true, minutes: mins, customer_id: custId, lead_id: leadId });
+  if (v.lead_id && !leadId) await leadLog(v.lead_id, req.user.name, `📍 Field visit done (${mins} min) — ${outcome}: ${notes.slice(0, 500)}${fu ? ' · follow-up ' + fu : ''}`);
+  if (v.plan_id) { const pl = (await q(`UPDATE fv_plans SET status='done', done_at=now() WHERE id=$1 RETURNING by_id`, [v.plan_id])).rows[0];
+    if (pl && pl.by_id && pl.by_id !== req.user.id) await fvPush([pl.by_id], '✅ Field visit done', `${req.user.name} visited ${v.cust_company || v.cust_name || ''} — ${outcome}: ${notes.slice(0, 120)}`, 'leadchat:' + v.lead_id); }
+  res.json({ ok: true, minutes: mins, customer_id: custId, lead_id: leadId || v.lead_id });
 }));
 app.get('/api/fv/media/:pid', need('field', 'field_team'), wrap(async (req, res) => {
   const m = (await q(`SELECT m.data, m.mime, v.user_id FROM fv_media m JOIN fv_visits v ON v.id=m.visit_id WHERE m.id=$1`, [+req.params.pid])).rows[0];
