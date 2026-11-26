@@ -975,6 +975,14 @@ addEventListener('pageshow',()=>{if(!$('mroot').innerHTML.trim())document.body.c
 const TXT=el=>!!el&&(el.tagName=='TEXTAREA'||(el.tagName=='INPUT'&&!/^(checkbox|radio|file|button|submit|range|color|date)$/.test(el.type)));   // on-screen keyboard fields only (not dropdown filters)
 document.addEventListener('focusin',e=>{if(TXT(e.target))document.body.classList.add('kbd')});document.addEventListener('focusout',()=>setTimeout(()=>{if(!TXT(document.activeElement))document.body.classList.remove('kbd')},50));
 const X=`<button class="ib" onclick="closeM()">✕</button>`;
+/* ---------- inside the Rago CRM Android app ---------- */
+const RAPP=window.RagoApp||null;
+if(RAPP){const dummy={print(){},focus(){},close(){},closed:false,addEventListener(){}};
+ window.open=function(u){if(!u||u==='about:blank'){let h='';return Object.assign({},dummy,{document:{write:x=>{h+=x},writeln:x=>{h+=x+'\n'},open(){},close:()=>{try{RAPP.printHtml(h,document.title||'Rago')}catch(e){}}}})}
+  const a=new URL(u,location.href).href;if(/\/print(\?|$)/.test(a))RAPP.printUrl(a);else RAPP.openExternal(a);return dummy};
+ window.appBack=()=>{const s2=document.getElementById('mroot2');if(s2&&s2.innerHTML.trim()){closeS();return true}if(typeof ME!='undefined'&&ME&&$('mroot').innerHTML.trim()){closeM();return true}if(typeof NV!='undefined'&&NV){return false}return false};
+}
+
 
 /* ---------- login / boot ---------- */
 function showLogin(){$('mroot').innerHTML=`<div class="ov" style="background:var(--bg);backdrop-filter:none"><form class="md lg" onsubmit="doLogin(event)"><img class="llogo" src="/logo.png" alt="Rago"><h2 class="sr">Rago</h2><p class="dim">Heaven Automation · sign in</p>
@@ -983,8 +991,9 @@ function showLogin(){$('mroot').innerHTML=`<div class="ov" style="background:var
 async function doLogin(e){e.preventDefault();$('lb').textContent='Signing in…';
  const r=await api('/api/login',{m:'POST',b:{username:$('lu').value.trim(),password:$('lp').value}});
  if(r.error){$('le').textContent=r.error;$('lb').textContent='Sign in';return}ME=r;closeM();boot()}
-async function logout(){await api('/api/logout',{m:'POST',b:{}}).catch(()=>{});ME=null;showLogin()}
-async function boot(){M=await api('/api/meta');lastUn=-1;nav(menu()[0][0]);setTimeout(fvBoot,1500);startPulse();if(pushOK()&&Notification.permission=='granted')pushOn(true);const qs=new URLSearchParams(location.search),j=qs.get('job'),td=qs.get('todo'),at=qs.get('att');if(j)setTimeout(()=>gotoJob(+j),500);if(td)setTimeout(()=>openTodo(+td),600);if(at)setTimeout(()=>openAttLink(at),300);const cq=qs.get('chat');if(cq)setTimeout(()=>openChatLink(+cq),400);setTimeout(()=>greetCheck(),cq||at||j||td?2500:900);const sy=qs.get('say'),ld=qs.get('lead');if(sy&&ME.role!='Staff')setTimeout(()=>{nav('todo');setTimeout(()=>sayRem(),300)},300);if(ld&&can('leads'))setTimeout(()=>{nav('leads');setTimeout(()=>leadForm(),500)},300);if(j||td||at||sy||ld||cq)history.replaceState(null,'','/')}
+function appHello(){if(!RAPP||!ME)return;try{RAPP.loggedIn(String(ME.id),(ME.permissions||[]).includes('calls')||ME.role=='Super Admin'?'1':'0')}catch(e){}}
+async function logout(){if(RAPP){try{RAPP.loggedOut()}catch(e){}}await api('/api/logout',{m:'POST',b:{}}).catch(()=>{});ME=null;showLogin()}
+async function boot(){appHello();M=await api('/api/meta');lastUn=-1;nav(menu()[0][0]);setTimeout(fvBoot,1500);startPulse();if(pushOK()&&Notification.permission=='granted')pushOn(true);const qs=new URLSearchParams(location.search),j=qs.get('job'),td=qs.get('todo'),at=qs.get('att');if(j)setTimeout(()=>gotoJob(+j),500);if(td)setTimeout(()=>openTodo(+td),600);if(at)setTimeout(()=>openAttLink(at),300);const cq=qs.get('chat');if(cq)setTimeout(()=>openChatLink(+cq),400);setTimeout(()=>greetCheck(),cq||at||j||td?2500:900);const sy=qs.get('say'),ld=qs.get('lead');if(sy&&ME.role!='Staff')setTimeout(()=>{nav('todo');setTimeout(()=>sayRem(),300)},300);if(ld&&can('leads'))setTimeout(()=>{nav('leads');setTimeout(()=>leadForm(),500)},300);if(j||td||at||sy||ld||cq)history.replaceState(null,'','/')}
 function nav(v,t){if(!menu().some(m=>m[0]==v))v=menu()[0][0];if((view=='chat'||view=='proj'||view=='wa')&&v!=view){if(WA.rec)waRecCancel();if(CH.rec)chRecCancel();VA.pause();document.body.classList.remove('chat-open');if(view=='proj')CH.id=null}if(v!='todo'){NV=false;document.body.classList.remove('nv')}view=v;if(t)tab=t;$('page').classList.toggle('pchat',v=='chat');
  document.title='Rago · '+menu().find(n=>n[0]==v)[1];
  $('snav').innerHTML=menu().filter(n=>n[0]!='me').map(n=>`<button class="ni ${n[0]==v?'on':''}" title="${n[1]}" aria-label="${n[1]}" onclick="nav('${n[0]}')">${ic(n[2],22)}<span class="nl">${n[1]}</span>${n[0]=='chat'?'<i class="cbn" hidden></i>':''}${n[0]=='wa'?'<i class="cbn wbn" hidden></i>':''}</button>`).join('');
@@ -1309,7 +1318,7 @@ const officePanel=()=>{const o=M.office||{};return `<div class="panel"><div clas
 let OFG=null;function ofGPS(b){b.textContent='Getting location…';getGPS().then(g=>{b.textContent='📍 Use my current location';if(!g)return alert('Could not get location. Turn on GPS.');OFG=g;$('ofU').value=g.lat.toFixed(7)+', '+g.lng.toFixed(7)})}
 async function saveOffice(){const o=M.office||{},u=$('ofU').value.trim(),b={name:$('ofN').value,radius:$('ofR').value,late:$('ofL').value};if(u)b.map_url=u;else{b.lat=o.lat;b.lng=o.lng}
  const r=await api('/api/attendance/office',{m:'POST',b});if(r.error){$('ofE').textContent=r.error;return}toast('Office settings saved ✓');Me()}
-const APPV='Version 30 · 26 Nov 2026';
+const APPV='Version 31 · 26 Nov 2026';
 function shrinkImg(file,size=320){return new Promise((ok,no)=>{const r=new FileReader();r.onerror=no;r.onload=()=>{const im=new Image();im.onerror=()=>no(new Error('bad image'));im.onload=()=>{const s=Math.min(im.width,im.height),c=document.createElement('canvas');c.width=c.height=size;
  c.getContext('2d').drawImage(im,(im.width-s)/2,(im.height-s)/2,s,s,0,0,size,size);ok(c.toDataURL('image/jpeg',.85))};im.src=r.result};r.readAsDataURL(file)})}
 let NEWPH=null;async function pickNewPhoto(inp){const f=inp.files&&inp.files[0];if(!f)return;try{NEWPH=await shrinkImg(f)}catch(e){return toast('Could not read that image')}$('nph').querySelector('.av').outerHTML=`<div class="av ph lg"><img src="${NEWPH}" alt=""></div>`}
@@ -2864,10 +2873,10 @@ const fvT=t=>t?new Date(t).toLocaleTimeString('en-IN',{hour:'numeric',minute:'2-
 // GPS trail while on field duty (the app must be open — phones don't allow web apps to track when closed)
 async function fvBoot(){if(!fvSelf())return;const d=await api('/api/fv/day');if(!d||d.error)return;FV.mine=d;fvDuty(d)}
 function fvDuty(d){const on=(d.open||(d.visits.length||(d.started&&d.started.started_at)))&&!(d.started&&d.started.ended_at)&&d.day==fvToday();on?fvTrackOn():fvTrackOff()}
-function fvTrackOn(){if(FV.watch!=null||!navigator.geolocation)return;FV.on=true;
+function fvTrackOn(){if(RAPP){try{RAPP.trackStart()}catch(e){}}if(FV.watch!=null||!navigator.geolocation)return;FV.on=true;
  try{FV.watch=navigator.geolocation.watchPosition(p=>{const t=Date.now();if(t-FV.lastT<30000)return;if(p.coords.accuracy>150)return;FV.lastT=t;FV.buf.push({lat:+p.coords.latitude.toFixed(6),lng:+p.coords.longitude.toFixed(6),acc:Math.round(p.coords.accuracy),t});if(FV.buf.length>=2||t-(FV.flT||0)>90000)fvFlush()},()=>{},{enableHighAccuracy:true,maximumAge:15000,timeout:30000})}catch(e){}
  if(!FV.iv)FV.iv=setInterval(fvFlush,90000)}
-function fvTrackOff(){FV.on=false;try{if(FV.watch!=null)navigator.geolocation.clearWatch(FV.watch)}catch(e){}FV.watch=null;fvFlush()}
+function fvTrackOff(){if(RAPP){try{RAPP.trackStop()}catch(e){}}FV.on=false;try{if(FV.watch!=null)navigator.geolocation.clearWatch(FV.watch)}catch(e){}FV.watch=null;fvFlush()}
 async function fvFlush(){if(!FV.buf.length)return;const pts=FV.buf.splice(0);FV.flT=Date.now();try{const r=await fetch('/api/fv/track',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({points:pts}),keepalive:true,credentials:'same-origin'});const j=await r.json().catch(()=>({}));if(j.off)fvTrackOff()}catch(e){FV.buf.unshift(...pts)}}
 document.addEventListener('visibilitychange',()=>{if(document.hidden)fvFlush()});
 async function Fv(){if(!FV.meta)FV.meta=await api('/api/fv/meta');const M2=FV.meta;FV.date=FV.date||fvToday();
@@ -3128,10 +3137,13 @@ async function Calls(){const r=await api('/api/calls?status='+CL.st);if(r.error)
  <div class="panel tlist" id="clList" style="margin-top:14px">${r.items.length?r.items.map((x,i)=>`<div class="trow clrow" data-id="${x.id}"><div class="av mid">${x.direction=='outgoing'?'↗':'↙'}</div><div class="tinfo"><b>${esc(x.contact||x.phone)}</b><div class="dim tsub">${[x.contact?x.phone:'',`⏱ ${clDur(x.duration)}`,x.direction=='outgoing'?'Outgoing':'Incoming',x.sim_label?'SIM: '+x.sim_label:'',fmt(x.started_at),x.user_id!=ME.id?'by '+x.user_name:''].filter(Boolean).map(esc).join(' · ')}${x.lead_id&&x.lead_name?` · lead <b>${esc(x.lead_name)}</b>`:''}</div></div>
   <div class="clact">${x.status=='pending'?`<button class="btn sm" onclick="callAcc(${i})">＋ Add to leads</button><button class="btn g sm" onclick="callIgn(${x.id})">Ignore</button>`:x.status=='ignored'?`<button class="btn g sm" onclick="callIgn(${x.id},1)">Undo</button>`:x.lead_id?`<button class="btn g sm" onclick="nav('leads');setTimeout(()=>openLead(${x.lead_id}),400)">Open lead ›</button>`:''}</div></div>`).join('')
   :`<div class="dim" style="padding:22px;text-align:center">${CL.st=='pending'?'No calls waiting. Calls of '+mm+'+ minutes appear here after the phone app syncs.':'Nothing here.'}</div>`}</div>
- <div class="panel" id="clSetup"><div class="pt"><h3>📱 Set up your phone</h3></div>
-  <ol class="clsteps"><li>On your <b>Android</b> phone, download the <b>Rago Calls</b> app: ${r.apk?`<a class="btn g sm" href="/rago-calls.apk">⬇️ Download app</a>`:`<span class="badge warn" id="clNoApk">app file not added yet</span>`}</li><li>Open it and sign in with your CRM username and password.</li><li>Choose the <b>SIM</b> to track and allow “Call logs”. Calls of ${mm}+ min on that SIM are sent here automatically.</li><li>Android 13+: if “Call logs” is greyed out, open the app’s settings → ⋮ → <b>Allow restricted settings</b>, then allow it.</li><li>Battery: set Rago Calls to <b>No restrictions</b> so it keeps syncing.</li></ol>
+ ${RAPP?clAppCard():''}<div class="panel" id="clSetup" ${RAPP?'hidden':''}><div class="pt"><h3>📱 Set up your phone</h3></div>
+  <ol class="clsteps"><li>On your <b>Android</b> phone, download the <b>Rago CRM</b> app (the CRM + call leads in one app): ${r.apk?`<a class="btn g sm" href="/rago-crm.apk">⬇️ Download app</a>`:`<span class="badge warn" id="clNoApk">app file not added yet</span>`}</li><li>Open it and log in with your CRM username and password. Then open <b>Call leads → This phone → Set up</b>.</li><li>Choose the <b>SIM</b> to track and allow “Call logs”. Calls of ${mm}+ min on that SIM are sent here automatically.</li><li>Android 13+: if “Call logs” is greyed out, open the app’s settings → ⋮ → <b>Allow restricted settings</b>, then allow it.</li><li>Battery: set Rago Calls to <b>No restrictions</b> so it keeps syncing.</li></ol>
   <p class="dim" style="font-size:12.5px">iPhone does not allow any app to read calls, so this works on Android phones only.</p>
   ${r.devices.length?`<div class="sec3">Your phones</div>${r.devices.map(d=>`<div class="crow1"><b>📱 ${esc(d.name||'Phone')}</b><span>${d.sim_label?'SIM: '+esc(d.sim_label)+' · ':''}last sync ${d.last_seen?fmt(d.last_seen):'—'}</span><button class="ib sm" aria-label="Remove phone" onclick="callDev(${d.id})">✕</button></div>`).join('')}`:''}</div>`}
+function clAppCard(){let st={};try{st=JSON.parse(RAPP.callStatus()||'{}')}catch(e){}
+ return `<div class="panel" id="clApp"><div class="pt"><h3>📱 This phone</h3><button class="btn sm" id="clAppSet" onclick="RAPP.openCallSettings()">${st.ready?'Change':'Set up'}</button></div>
+ <p class="dim" style="margin:0">${st.ready?`✅ Call leads is on · SIM: <b>${esc(st.sim||'All SIMs')}</b><br>${esc(st.last||'')}`:'Tap “Set up”, allow Call logs and choose the SIM. Calls of the set length then come here by themselves.'}</p></div>`}
 function callAcc(i){const x=window._CL[i],I=(M&&M.LEAD_INTERESTS)||[];
  modal(`<div class="row"><h2 class="sp">＋ Add call to leads</h2>${X}</div><p class="dim" style="margin-top:-4px">${esc(x.phone)} · ${clDur(x.duration)} · ${fmt(x.started_at)}</p>
  <div class="fg2"><div class="fld"><label>Name *</label><input id="ca_name" value="${esc(x.contact||'')}"></div><div class="fld"><label>Company</label><input id="ca_company"></div></div>
@@ -3464,7 +3476,7 @@ async function biDlvGo(){const o=biDlvRead('bdv');if(!o){$('bdvE').textContent='
 async function biDlvClear(){if(!confirm('Remove the delivery details?'))return;await api(`/api/bl/docs/${window._BD.id}/delivery`,{m:'POST',b:{clear:true}});closeS();biView(window._BD.id);if(view=='bill')biBody()}
 function biMail(){const d=window._BD,P=d.party||{};mailCompose({to:P.email||'',subject:`${BT1[d.type]} ${d.no} from ${d.brand||ME.brand||'us'}`,body:`Dear ${P.name||P.company||'Sir/Madam'},\n\nPlease find the ${BT1[d.type].toLowerCase()} ${d.no} for ${inr(d.total)}. Tap the button below to view or download it.\n\nThank you.`,doc_id:d.id,lead_id:d.lead_id,customer_id:d.customer_id})}
 function biVw(el){segPick(el);const f=el.dataset.v=='full';try{localStorage.biVw=el.dataset.v}catch(e){}$('bivFull').hidden=!f;$('bivSum').hidden=f;if(f)biFit($('bivF'))}
-function biFit(f){try{const d=f.contentDocument;if(!d||!d.body)return;f.style.height=(d.documentElement.scrollHeight+4)+'px';if(window._bvPrint){window._bvPrint=false;setTimeout(()=>f.contentWindow.print(),300)}}catch(e){}}
+function biFit(f){try{const d=f.contentDocument;if(!d||!d.body)return;f.style.height=(d.documentElement.scrollHeight+4)+'px';if(window._bvPrint){window._bvPrint=false;if(RAPP)RAPP.printUrl(new URL(f.getAttribute('src'),location.href).href);else setTimeout(()=>f.contentWindow.print(),300)}}catch(e){}}
 addEventListener('resize',()=>{const f=$('bivF');if(f)biFit(f)});
 function biPrint(id,t){const w=window.open(`/api/bl/docs/${id}/print?auto=1${t?'&t='+t:''}`,'_blank');if(!w)toast('Allow pop-ups to print')}
 async function biConv(id,to,mdOk){if(!mdOk&&!confirm(`Make a ${BT1[to].toLowerCase()} from this?`))return;const r=await api(`/api/bl/docs/${id}/convert`,{m:'POST',b:{to,md_override:!!mdOk}});if(r.credit_block){r.retry=()=>biConv(id,to,1);return biCrBlock(r)}if(r.error)return toast(r.error);toast(`${r.no} created ✓`);if(view=='bill')biBody();biView(r.id)}

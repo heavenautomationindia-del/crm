@@ -5130,6 +5130,13 @@ app.post('/api/calls/device-login', wrap(async (req, res) => {    // the phone a
   const r = (await q(`INSERT INTO call_devices(user_id,token_hash,name,last_seen) VALUES($1,$2,$3,now()) RETURNING id`, [u.id, crypto.createHash('sha256').update(tok).digest('hex'), String((req.body || {}).device || 'Android phone').slice(0, 80)])).rows[0];
   res.json({ ok: true, token: tok, device_id: r.id, name: u.name, cfg: await callCfg() });
 }));
+app.post('/api/calls/device-token', wrap(async (req, res) => {    // the Rago CRM Android app: the logged-in user turns on call leads on this phone
+  if (!isSuper(req.user) && !can(req.user, 'calls')) return res.status(403).json({ error: 'Call leads is not turned on for you' });
+  const name = String((req.body || {}).device || 'Android phone').slice(0, 80), tok = 'rgd_' + crypto.randomBytes(30).toString('base64url');
+  await q(`UPDATE call_devices SET active=false WHERE user_id=$1 AND name=$2 AND active`, [req.user.id, name]);
+  const r = (await q(`INSERT INTO call_devices(user_id,token_hash,name,last_seen) VALUES($1,$2,$3,now()) RETURNING id`, [req.user.id, crypto.createHash('sha256').update(tok).digest('hex'), name])).rows[0];
+  res.json({ ok: true, token: tok, device_id: r.id, name: req.user.name, cfg: await callCfg() });
+}));
 app.get('/api/calls/device/cfg', wrap(async (req, res) => {
   await q('UPDATE call_devices SET last_seen=now() WHERE id=$1', [req.user.device_id]);
   const d = (await q('SELECT sim_label, sim_slot FROM call_devices WHERE id=$1', [req.user.device_id])).rows[0] || {};
@@ -5188,7 +5195,7 @@ app.post('/api/calls/settings', wrap(async (req, res) => {
 app.delete('/api/calls/devices/:id', wrap(async (req, res) => {
   await q(`UPDATE call_devices SET active=false WHERE id=$1 AND (user_id=$2 OR $3)`, [+req.params.id, req.user.id, isSuper(req.user)]); res.json({ ok: true });
 }));
-app.get('/rago-calls.apk', (req, res) => { const f = path.join(__dirname, 'public', 'app', 'rago-calls.apk'); if (!fs.existsSync(f)) return res.status(404).send('The Android app file is not uploaded yet.'); res.download(f, 'rago-calls.apk'); });
+app.get(['/rago-calls.apk', '/rago-crm.apk'], (req, res) => { const f = path.join(__dirname, 'public', 'app', 'rago-calls.apk'); if (!fs.existsSync(f)) return res.status(404).send('The Android app file is not uploaded yet.'); res.download(f, 'rago-crm.apk'); });
 
 // ---------- email: each user connects their own mailbox once (Hostinger by default) ----------
 let MAIL_KEY = null;

@@ -481,3 +481,27 @@ Any web app has to send its screen code to the browser to run it, so a determine
   1. the overdue payment is received, or
   2. the **MD (Super Admin) approves**. Staff tap **🔒 Ask MD approval** (with a note), and the MD gets a notification and sees **🔒 Approvals** in Billing. An approval is valid **till tonight** for that customer.
 - The MD can also approve directly while saving ("Approve as MD & save"). Every approval is recorded.
+
+## Version 31 — Rago CRM Android app (the CRM + call leads in one app)
+
+**What it is**
+- One Android app, **Rago CRM** (`public/app/rago-calls.apk`, downloaded from `/rago-crm.apk`). It opens the CRM and stays logged in.
+- It is an update of the Rago Calls app: phones that have Rago Calls get it updated without uninstalling, and it keeps the same signing key.
+- Every CRM update (GitHub → Render) shows up in the app by itself. A new APK is only needed when the app itself changes.
+
+**Works inside the app**
+- Camera and gallery for all photo uploads (check-in, delivery, warranty), microphone for voice notes, and GPS for field visits.
+- **Field visit km keep counting when the app is closed.** A "Field visit day is on" notification shows while the day is on, and it stops when the day ends.
+- Print / Save as PDF for bills, ledgers, reports and salary slips (opens Android's print screen).
+- WhatsApp, phone, maps and email links open in their own apps. Excel/CSV downloads go to the phone's Downloads folder.
+- Phone back button: closes the open pop-up first; on a plain screen the app goes to the background.
+- **Phone notifications:** new CRM alerts (leads, approvals, call leads…) show on the phone within about 15 minutes, even when the app is closed.
+- **Call leads:** open Call leads → **This phone → Set up** → "Turn on with my CRM login" → allow Call logs → choose the SIM. No second password needed.
+
+**Install**
+1. On the Android phone, open the CRM in Chrome → Call leads → Download app (or open `https://rago-crm.onrender.com/rago-crm.apk`).
+2. Open the file → Install. Allow "Install unknown apps" if asked.
+3. Open Rago CRM → log in → allow Location, Camera, Microphone and Notifications when asked.
+4. Battery: Settings → Apps → Rago CRM → Battery → **No restrictions**.
+
+iPhone: keep using Safari → Share → Add to Home Screen. Call leads are not possible on iPhone.
