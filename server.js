@@ -34,7 +34,7 @@ const BANKS = ['HDFC BANK LTD - 50200080113661', 'HDFC BANK LTD - 50200090005267
 // Super Admin = owner: everything, and the ONLY role that can delete anything.
 // Admin staff / Sales staff / Technician staff: Super Admin ticks what each person can use.
 const SUPER = 'Super Admin';
-const ROLES = [SUPER, 'Admin', 'Sales', 'Technician', 'Staff'];   // Staff = drivers, cleaners… attendance only
+const ROLES = [SUPER, 'Admin', 'Sales Admin', 'Sales', 'Technician', 'Staff'];   // Staff = drivers, cleaners… attendance only
 const PERMS = [
   { k: 'dashboard', l: 'Dashboard', g: 'Menus' }, { k: 'services', l: 'Services & jobs', g: 'Menus' },
   { k: 'customers', l: 'Customers', g: 'Menus' }, { k: 'team', l: 'Team', g: 'Menus' }, { k: 'leads', l: 'Leads', g: 'Menus' },
@@ -48,22 +48,30 @@ const PERMS = [
   { k: 'purchases', l: 'Purchases, vendors, expenses & profit reports', g: 'Actions' },
   { k: 'warranty', l: 'Warranty & service — material cases, W&S vendors and charges', g: 'Actions' },
   { k: 'lead_lists', l: 'Add lead sources & interests', g: 'Actions' },
+  { k: 'leads_all', l: 'See all leads of the brand (not only their own)', g: 'Actions' },
   { k: 'att_team', l: 'See team attendance — who came, leave, absent, late', g: 'Attendance & pay' },
   { k: 'leave_approve', l: 'Approve leave / permission / attendance requests & mark attendance', g: 'Attendance & pay' },
   { k: 'payroll', l: 'Payroll — staff salaries, advances & salary download', g: 'Attendance & pay' },
   { k: 'chat', l: 'Team chat', g: 'Features' }, { k: 'projects', l: 'Projects', g: 'Features' },
   { k: 'voice_assign', l: 'Send voice messages & tasks to other staff', g: 'Features' },
   { k: 'whatsapp', l: 'WhatsApp — see and reply on the Sales & Service numbers', g: 'Features' },
+  { k: 'field', l: 'Field visits — check in / out at customer sites with GPS, photos & km travelled', g: 'Features' },
+  { k: 'field_team', l: 'See everyone’s field visits, routes & kilometres', g: 'Attendance & pay' },
 ];
-const TECH_KEYS = ['view_phone', 'view_charges', 'chat', 'projects', 'voice_assign', 'whatsapp'], STAFF_KEYS = ['chat'];
+const TECH_KEYS = ['view_phone', 'view_charges', 'chat', 'projects', 'voice_assign', 'whatsapp', 'field'], STAFF_KEYS = ['chat', 'field'];
 const ALL_KEYS = PERMS.map(p => p.k);
 const DEFAULTS = {
   Admin: ALL_KEYS.filter(k => !['team', 'payroll'].includes(k)),
-  Sales: ['dashboard', 'services', 'customers', 'leads', 'service_create', 'view_charges', 'view_phone', 'chat', 'projects', 'voice_assign', 'whatsapp'],
+  'Sales Admin': ['dashboard', 'customers', 'leads', 'leads_all', 'lead_lists', 'service_create', 'view_charges', 'view_phone', 'customer_edit', 'billing', 'chat', 'projects', 'voice_assign', 'whatsapp', 'field', 'field_team', 'att_team'],
+  Sales: ['dashboard', 'services', 'customers', 'leads', 'service_create', 'view_charges', 'view_phone', 'chat', 'projects', 'voice_assign', 'whatsapp', 'field'],
   Technician: ['view_phone', 'chat', 'projects'],
   Staff: ['chat'],
 };
-const cleanPerms = (role, list) => role === SUPER ? ALL_KEYS : (Array.isArray(list) ? list : DEFAULTS[role] || []).filter(k => (role === 'Technician' ? TECH_KEYS : role === 'Staff' ? STAFF_KEYS : ALL_KEYS).includes(k));
+// Super Admin can change each role's default features and add their own roles (stored in settings)
+let ROLE_DEF = {}, CUSTOM_ROLES = [];
+const roleDefaults = () => Object.fromEntries(Object.keys(DEFAULTS).map(r => [r, Array.isArray(ROLE_DEF[r]) ? ROLE_DEF[r] : DEFAULTS[r]]));
+const roleKeys = role => role === 'Technician' ? TECH_KEYS : role === 'Staff' ? STAFF_KEYS : ALL_KEYS;
+const cleanPerms = (role, list) => role === SUPER ? ALL_KEYS : (Array.isArray(list) ? list : roleDefaults()[role] || []).filter(k => (role === 'Technician' ? TECH_KEYS : role === 'Staff' ? STAFF_KEYS : ALL_KEYS).includes(k));
 const BRANDS = ['Heaven', 'G Media'];
 const JOB_TYPES = ['New Installation', 'CCTV Camera Fitting', 'Automation Fitting', 'Wiring / Cabling', 'Site Survey', 'AMC Visit', 'Other'];
 const OPEN_ST = ['Work Not Started', 'On-Process', 'Work Pending'];   // a technician with one of these is busy
@@ -94,7 +102,7 @@ const superOnly = (req, res, next) => isSuper(req.user) ? next() : res.status(40
 const techOnly = (req, res, next) => (isTech(req.user) || isSuper(req.user)) ? next() : res.status(403).json({ error: 'Not allowed' });
 const auth = wrap(async (req, res, next) => {
   const d = unsign(cookies(req.headers.cookie).gz);
-  const u = d && (await q('SELECT u.id,u.name,u.email,u.phone,u.role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at, b.name brand_name FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.id=$1 AND u.active', [d.id])).rows[0];
+  const u = d && (await q('SELECT u.id,u.name,u.email,u.phone,u.role,u.job_role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at, b.name brand_name FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.id=$1 AND u.active', [d.id])).rows[0];
   if (!u) return res.status(401).json({ error: 'Login required' });
   req.user = u; next();
 });
@@ -127,7 +135,7 @@ app.use('/api', (req, res, next) => {
 app.use('/api', (req, res, next) => (req.path === '/login' || req.path === '/logout') ? next() : auth(req, res, next));
 app.get('/api/pulse', wrap(async (req, res) => {
   const r = (await q('SELECT COALESCE(MAX(id),0)::int last, COUNT(*) FILTER (WHERE NOT read)::int unread FROM notifications WHERE user_id=$1', [req.user.id])).rows[0];
-  res.set('Cache-Control', 'no-store').json({ v: VER, last: r.last, unread: r.unread, chat: can(req.user, 'chat') ? await chatUnread(req.user.id).catch(() => 0) : 0, wa: can(req.user, 'whatsapp') ? await waUnread(req.user.id).catch(() => 0) : 0, wa_last: can(req.user, 'whatsapp') ? ((await q('SELECT COALESCE(MAX(id),0)::int n FROM wa_messages').catch(() => ({ rows: [{ n: 0 }] }))).rows[0].n) : 0, chat_last: (await q('SELECT COALESCE(MAX(id),0)::int n FROM chat_messages')).rows[0].n });
+  res.set('Cache-Control', 'no-store').json({ v: VER, last: r.last, unread: r.unread, chat: can(req.user, 'chat') ? await chatUnread(req.user.id).catch(() => 0) : 0, wa: can(req.user, 'whatsapp') ? await waUnread(req.user).catch(() => 0) : 0, wa_last: can(req.user, 'whatsapp') ? ((await q('SELECT COALESCE(MAX(id),0)::int n FROM wa_messages').catch(() => ({ rows: [{ n: 0 }] }))).rows[0].n) : 0, chat_last: (await q('SELECT COALESCE(MAX(id),0)::int n FROM chat_messages')).rows[0].n });
 }));
 app.get('/api/me', (req, res) => res.json(me(req.user)));
 app.post('/api/password', wrap(async (req, res) => {
@@ -160,6 +168,7 @@ const insLead = async (o, uid, brandId) => (await q(`INSERT INTO leads(name,phon
 // allocated to them or created by them — and, if they belong to a brand, only within that brand.
 const leadScope = (u, p) => {
   if (u.role === SUPER) return 'true';
+  if ((u.permissions || []).includes('leads_all')) { if (!u.brand_id) return 'true'; p.push(u.brand_id); return `l.brand_id=$${p.length}`; }
   p.push(u.id); let w = `(l.assigned_to=$${p.length} OR l.created_by=$${p.length})`;
   if (u.brand_id) { p.push(u.brand_id); w += ` AND l.brand_id=$${p.length}`; }
   return w;
@@ -526,10 +535,10 @@ const techList = async () => {
   return [...m.values()];
 };
 app.get('/api/meta', wrap(async (req, res) => {
-  const ag = await q(`SELECT id,name FROM users WHERE role IN ('${SUPER}','Admin','Sales') AND active ORDER BY name`);
+  const ag = await q(`SELECT id,name FROM users WHERE role IN ('${SUPER}','Admin','Sales Admin','Sales') AND active ORDER BY name`);
   let it = { rows: [] }; try { it = await q('SELECT id,name FROM issue_types ORDER BY id'); } catch (e) { /* table missing: fall back to defaults */ }
   const ISSUE_TYPES = it.rows, JT = (await q('SELECT id,name FROM job_types ORDER BY id')).rows, brands = (await q('SELECT id,name FROM brands ORDER BY id')).rows;
-  res.json({ SERVICE_TYPES: ISSUE_TYPES.length ? ISSUE_TYPES.map(r => r.name) : SERVICE_TYPES, ISSUE_TYPES, JOB_TYPES: JT.map(r => r.name), JOB_TYPE_ROWS: JT, brands, VISIT_TYPES, STATUSES, APPROVALS, BANKS, ROLES, PERMS, DEFAULTS, TECH_KEYS, STAFF_KEYS, LEAD_STAGES, LEAD_PRIORITIES, LEAD_SOURCES, LEAD_INTERESTS, LEAVE_TYPES, technicians: await techList(), agents: ag.rows });
+  res.json({ SERVICE_TYPES: ISSUE_TYPES.length ? ISSUE_TYPES.map(r => r.name) : SERVICE_TYPES, ISSUE_TYPES, JOB_TYPES: JT.map(r => r.name), JOB_TYPE_ROWS: JT, brands, VISIT_TYPES, STATUSES, APPROVALS, BANKS, ROLES, PERMS, DEFAULTS: roleDefaults(), CUSTOM_ROLES, TECH_KEYS, STAFF_KEYS, LEAD_STAGES, LEAD_PRIORITIES, LEAD_SOURCES, LEAD_INTERESTS, LEAVE_TYPES, technicians: await techList(), agents: ag.rows });
 }));
 
 // issue types (for services) and job types (for jobs): add = Super Admin or "Add issue types & job types"; delete = Super Admin only
@@ -580,6 +589,7 @@ const brandFor = async (role, v) => {
   if (role === 'Admin' && !id) return { error: 'Choose the brand this admin staff works for' };
   return { id };
 };
+const jobRole = (role, name) => { const c = name && CUSTOM_ROLES.find(x => x.name === name); return c && c.base === role ? c.name : null; };
 const manages = (me, role) => isSuper(me) || !['Admin', SUPER].includes(role);
 // salary, joining date and "salary paid by" brand — only the Super Admin can set them
 const payFields = (me, b, cur) => {
@@ -591,7 +601,7 @@ const payFields = (me, b, cur) => {
   if (b.att_rules && typeof b.att_rules === 'object') { const c = cleanRules(b.att_rules, cur && cur.att_rules); if (c.error) o.error = c.error; else o.att_rules = c.rules; }
   return o;
 };
-app.get('/api/users', need('team'), wrap(async (req, res) => res.json((await q(`SELECT u.id,u.name,u.email,u.phone,u.role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at,u.pay_brand_id,to_char(u.join_date,'YYYY-MM-DD') join_date,${isSuper(req.user) ? 'u.salary, u.att_rules' : 'NULL salary'}, COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id ORDER BY u.active DESC, u.role, u.name`)).rows.map(pub))));
+app.get('/api/users', need('team'), wrap(async (req, res) => res.json((await q(`SELECT u.id,u.name,u.email,u.phone,u.role,u.job_role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at,u.pay_brand_id,to_char(u.join_date,'YYYY-MM-DD') join_date,${isSuper(req.user) ? 'u.salary, u.att_rules' : 'NULL salary'}, COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id ORDER BY u.active DESC, u.role, u.name`)).rows.map(pub))));
 app.post('/api/users', need('team'), wrap(async (req, res) => {
   const b = req.body || {};
   if (!b.name || !b.email || !b.phone) return res.status(400).json({ error: 'Name, email and phone are required' });
@@ -609,8 +619,9 @@ app.post('/api/users', need('team'), wrap(async (req, res) => {
     if (req.user.brand_id && hb !== req.user.brand_id) return res.status(403).json({ error: 'You can only choose your own brand' });
     pay.pay_brand_id = hb;
   }
-  const r = await q('INSERT INTO users(name,email,phone,role,username,password_hash,permissions,brand_id,salary,join_date,pay_brand_id,att_rules) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *',
-    [b.name.trim(), b.email.trim(), b.phone.trim(), b.role, username, hash(password), cleanPerms(b.role, b.permissions), br.id, pay.salary ?? 0, pay.join_date ?? null, pay.pay_brand_id ?? br.id, pay.att_rules ? JSON.stringify(pay.att_rules) : null]);
+  const jr = jobRole(b.role, b.job_role);
+  const r = await q('INSERT INTO users(name,email,phone,role,username,password_hash,permissions,brand_id,salary,join_date,pay_brand_id,att_rules,job_role) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *',
+    [b.name.trim(), b.email.trim(), b.phone.trim(), b.role, username, hash(password), cleanPerms(b.role, Array.isArray(b.permissions) ? b.permissions : jr ? (CUSTOM_ROLES.find(x => x.name === jr) || {}).perms : undefined), br.id, pay.salary ?? 0, pay.join_date ?? null, pay.pay_brand_id ?? br.id, pay.att_rules ? JSON.stringify(pay.att_rules) : null, jr]);
   res.json({ user: pub(r.rows[0]), credentials: { username, password } });
 }));
 app.patch('/api/users/:id', need('team'), wrap(async (req, res) => {
@@ -631,6 +642,7 @@ app.patch('/api/users/:id', need('team'), wrap(async (req, res) => {
     [b.name || cur.name, b.email ?? cur.email, b.phone ?? cur.phone, role, cleanPerms(role, b.permissions ?? cur.permissions), b.active ?? cur.active, br.id,
      pay.salary ?? cur.salary, pay.join_date !== undefined ? pay.join_date : cur.join_date, pay.pay_brand_id !== undefined ? pay.pay_brand_id : (cur.pay_brand_id ?? br.id), cur.id]);
   if (pay.att_rules) await q('UPDATE users SET att_rules=$2 WHERE id=$1', [cur.id, JSON.stringify(pay.att_rules)]);
+  if (b.job_role !== undefined || role !== cur.role) await q('UPDATE users SET job_role=$2 WHERE id=$1', [cur.id, jobRole(role, b.job_role !== undefined ? b.job_role : cur.job_role)]);
   if ((b.active ?? cur.active) === false && cur.active) { await q('DELETE FROM push_subs WHERE user_id=$1', [cur.id]).catch(() => {}); }   // disabled → signed out everywhere (every request checks "active")
   res.json({ ok: true });
 }));
@@ -776,6 +788,28 @@ app.get('/api/dashboard', need('dashboard'), wrap(async (req, res) => {
   res.json(out);
 }));
 
+// service engineers: who is free (no open job), who is busy and on what, who is away today
+app.get('/api/services/engineers', need('service_assign', 'service_create', 'service_edit'), wrap(async (req, res) => {
+  if (isTech(req.user)) return res.status(403).json({ error: 'Not allowed' });
+  const techs = await techList(), today = await todayIST(), mb = req.user.brand_id && !isSuper(req.user) ? req.user.brand_id : null;
+  const info = {}; (await q(`SELECT id, phone FROM users WHERE role='Technician' AND active`)).rows.forEach(u => { info[u.id] = u; });
+  const att = {}; (await q(`SELECT user_id, to_char(check_in AT TIME ZONE '${TZ}','HH24:MI') cin, to_char(check_out AT TIME ZONE '${TZ}','HH24:MI') cout, status FROM attendance WHERE day=$1`, [today])).rows.forEach(a => { att[a.user_id] = a; });
+  const jobs = (await q(`SELECT s.id, s.ticket_no, s.status, s.brand_id, b.name brand, s.technician_id, s.helper_id, s.service_type, c.name customer, c.city
+    FROM services s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN brands b ON b.id=s.brand_id WHERE s.status=ANY($1::text[]) AND (s.technician_id IS NOT NULL OR s.helper_id IS NOT NULL) ORDER BY s.id`, [OPEN_ST])).rows;
+  const last = {}; (await q(`SELECT technician_id id, MAX(COALESCE(work_done_on, resolved_on)) t FROM services WHERE technician_id IS NOT NULL AND status IN ('Resolved','Awaiting Payment','Billing') GROUP BY 1`)).rows.forEach(r => { last[r.id] = r.t; });
+  const out = techs.map(t => {
+    const J = jobs.filter(j => j.technician_id === t.id || j.helper_id === t.id).map(j => {
+      const own = !mb || j.brand_id === mb;
+      return { id: own ? j.id : null, ticket_no: j.ticket_no, status: j.status, brand: j.brand, helper: j.helper_id === t.id, customer: own ? j.customer : null, city: own ? j.city : null, service_type: own ? j.service_type : null };
+    });
+    const a = att[t.id];
+    return { id: t.id, name: t.name, photo_v: t.photo_v, phone: can(req.user, 'view_phone') ? (info[t.id] || {}).phone : undefined, away: t.away, note: t.note, jobs: J,
+      state: t.away ? 'away' : J.length ? 'busy' : 'free', checked_in: a && a.cin || null, checked_out: a && a.cout || null, att: a ? a.status : null, last_done: last[t.id] || null };
+  });
+  const rank = x => (x.state === 'free' ? 0 : x.state === 'busy' ? 1 : 2) * 10 + (x.checked_in && !x.checked_out ? 0 : 1);
+  out.sort((x, y) => rank(x) - rank(y) || x.jobs.length - y.jobs.length || x.name.localeCompare(y.name));
+  res.json({ items: out, free: out.filter(x => x.state === 'free').length, busy: out.filter(x => x.state === 'busy').length, away: out.filter(x => x.state === 'away').length });
+}));
 app.get('/api/services/counts', wrap(async (req, res) => {
   const { type, tech, kind, brand, q: search } = req.query, p = [], w = []; scope(req.user, p, w);   // counts follow the same filters as the list
   const add = (c, v) => { p.push(v); w.push(c.replace('?', '$' + p.length)); };
@@ -1069,8 +1103,9 @@ app.get('/api/tech/dashboard', techOnly, wrap(async (req, res) => {
 }));
 // Super Admin: delete old data (choose what). Team logins, brands, issue & job types stay.
 const WIPE = {
-  services: 'TRUNCATE services, customers, payments, service_history, service_photos RESTART IDENTITY CASCADE',
-  leads: 'DELETE FROM chats WHERE lead_id IS NOT NULL; TRUNCATE leads, lead_activity RESTART IDENTITY CASCADE',
+  // numbers restart from 1, so links from other places to the deleted rows are cleared first (else they would point at new, unrelated rows)
+  services: 'UPDATE wa_threads SET customer_id=NULL; UPDATE bl_docs SET customer_id=NULL; UPDATE fv_visits SET customer_id=NULL; UPDATE leads SET customer_id=NULL; TRUNCATE services, customers, payments, service_history, service_photos RESTART IDENTITY CASCADE',
+  leads: 'UPDATE wa_threads SET lead_id=NULL; UPDATE bl_docs SET lead_id=NULL; UPDATE fv_visits SET lead_id=NULL; DELETE FROM chats WHERE lead_id IS NOT NULL; TRUNCATE leads, lead_activity RESTART IDENTITY CASCADE',
   todos: 'TRUNCATE todos RESTART IDENTITY',
   attendance: 'TRUNCATE attendance, leave_requests RESTART IDENTITY',
   notifications: 'TRUNCATE notifications RESTART IDENTITY',
@@ -2654,33 +2689,45 @@ app.delete('/api/notes/:id', wrap(async (req, res) => {
 // Keys can be set in Render → Environment (WA_TOKEN, WA_APP_SECRET, WA_VERIFY_TOKEN, WA_WABA_ID,
 // WA_SALES_PHONE_ID, WA_SERVICE_PHONE_ID) or in the app: Profile → WhatsApp setup (Super Admin).
 // =====================================================================
-const WA_LINES = ['sales', 'service'];
+// Every WhatsApp number is a row in wa_numbers: brand + purpose (Sales / Service), its own Phone number ID,
+// optional own WhatsApp Business Account (WABA) and token. Staff see only the numbers of their own brand.
 const WA_RATES = { service: 0.115, utility: 0.115, marketing: 0.8631, authentication: 0.115, free: 1000, gst: 0.18 };   // Meta India card (Oct 2026), ₹ per message
 let WA_CFG = null;
+async function waDb() { try { return JSON.parse(((await q(`SELECT v FROM settings WHERE k='wa_cfg'`)).rows[0] || {}).v || '{}'); } catch (e) { return {}; } }
 async function waCfg(fresh) {
   if (WA_CFG && !fresh) return WA_CFG;
-  let db = {}; try { db = JSON.parse(((await q(`SELECT v FROM settings WHERE k='wa_cfg'`)).rows[0] || {}).v || '{}'); } catch (e) { db = {}; }
-  const E = process.env, pick = (k, e) => E[e] || db[k] || '';
-  WA_CFG = {
-    token: pick('token', 'WA_TOKEN'), app_secret: pick('app_secret', 'WA_APP_SECRET'), verify_token: pick('verify_token', 'WA_VERIFY_TOKEN'), waba_id: pick('waba_id', 'WA_WABA_ID'),
-    sales: { phone_id: pick('sales_phone_id', 'WA_SALES_PHONE_ID'), number: db.sales_number || '', brand_id: +db.sales_brand_id || null, label: 'Sales' },
-    service: { phone_id: pick('service_phone_id', 'WA_SERVICE_PHONE_ID'), number: db.service_number || '', brand_id: +db.service_brand_id || null, label: 'Service' },
-    auto_lead: db.auto_lead !== false, graph: (E.WA_GRAPH_URL || 'https://graph.facebook.com') + '/' + (E.WA_API_VERSION || 'v21.0'),
-    from_env: { token: !!E.WA_TOKEN, app_secret: !!E.WA_APP_SECRET, verify_token: !!E.WA_VERIFY_TOKEN, waba_id: !!E.WA_WABA_ID, sales_phone_id: !!E.WA_SALES_PHONE_ID, service_phone_id: !!E.WA_SERVICE_PHONE_ID },
-  };
+  const db = await waDb(), E = process.env, pick = (k, e) => E[e] || db[k] || '';
+  const token = pick('token', 'WA_TOKEN'), waba = pick('waba_id', 'WA_WABA_ID');
+  const rows = (await q(`SELECT n.*, b.name brand FROM wa_numbers n LEFT JOIN brands b ON b.id=n.brand_id ORDER BY n.sort, n.id`).catch(() => ({ rows: [] }))).rows;
+  const numbers = rows.map(n => {
+    const envPid = n.key === 'sales' ? E.WA_SALES_PHONE_ID : n.key === 'service' ? E.WA_SERVICE_PHONE_ID : '';
+    const purpose = n.purpose === 'service' ? 'service' : 'sales';
+    return { id: n.id, key: n.key, line: n.key, purpose, brand_id: n.brand_id || null, brand: n.brand || null, phone_id: String(envPid || n.phone_id || ''), number: n.number || '',
+      waba_id: n.waba_id || waba, own_waba: !!n.waba_id, token: n.token || token, own_token: !!n.token, enabled: n.enabled !== false, auto_lead: n.auto_lead !== false, env_phone: !!envPid,
+      name: n.label || '', label: n.label || ((n.brand ? n.brand + ' · ' : '') + (purpose === 'sales' ? 'Sales' : 'Service')) };
+  });
+  const by = {}; numbers.forEach(n => { by[n.key] = n; });
+  WA_CFG = { token, app_secret: pick('app_secret', 'WA_APP_SECRET'), verify_token: pick('verify_token', 'WA_VERIFY_TOKEN'), waba_id: waba, numbers, by,
+    graph: (E.WA_GRAPH_URL || 'https://graph.facebook.com') + '/' + (E.WA_API_VERSION || 'v21.0'),
+    from_env: { token: !!E.WA_TOKEN, app_secret: !!E.WA_APP_SECRET, verify_token: !!E.WA_VERIFY_TOKEN, waba_id: !!E.WA_WABA_ID, sales_phone_id: !!E.WA_SALES_PHONE_ID, service_phone_id: !!E.WA_SERVICE_PHONE_ID } };
   return WA_CFG;
 }
-const waLineOf = async phoneId => { const c = await waCfg(); return WA_LINES.find(l => c[l].phone_id && c[l].phone_id === String(phoneId)) || null; };
+const waLineOf = async phoneId => { const c = await waCfg(); const n = c.numbers.find(x => x.phone_id && x.phone_id === String(phoneId)); return n ? n.key : null; };
+const waReady = n => !!(n && n.token && n.phone_id);
+// who sees a number: Super Admin all; others only switched-on numbers of their brand (or numbers shared by all brands)
+const waSees = (u, n) => !!n && (isSuper(u) || (n.enabled && (!u.brand_id || !n.brand_id || n.brand_id === u.brand_id)));
+const waMine = async u => (await waCfg()).numbers.filter(n => waSees(u, n));
 const waDigits = p => { let d = String(p || '').replace(/\D/g, ''); if (d.length === 10) d = '91' + d; return d; };
 const last10 = p => String(p || '').replace(/\D/g, '').slice(-10);
-// call Meta's Graph API
+const waSlug = name => { const w = String(name || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim().split(/\s+/).filter(Boolean); return !w.length ? '' : w[0].length <= 2 && w[1] ? w[0] + w[1] : w[0]; };
+// call Meta's Graph API (each number may have its own token)
 async function graph(path, opt = {}) {
-  const c = await waCfg();
-  if (!c.token) throw new Error('WhatsApp is not connected yet — add the access token in WhatsApp setup');
-  const r = await fetch(c.graph + path, { method: opt.method || 'GET', headers: { Authorization: 'Bearer ' + c.token, ...(opt.json ? { 'Content-Type': 'application/json' } : {}) }, body: opt.json ? JSON.stringify(opt.json) : opt.body });
+  const c = await waCfg(), token = opt.token || c.token;
+  if (!token) throw new Error('WhatsApp is not connected yet — add the access token in WhatsApp setup');
+  const r = await fetch(c.graph + path, { method: opt.method || 'GET', headers: { Authorization: 'Bearer ' + token, ...(opt.json ? { 'Content-Type': 'application/json' } : {}) }, body: opt.json ? JSON.stringify(opt.json) : opt.body });
   const t = await r.text(); let j = {}; try { j = JSON.parse(t); } catch (e) { j = { raw: t }; }
   if (!r.ok || j.error) {
-    const e = j.error || {}, d = (e.error_data && e.error_data.details) || '';
+    const e = j.error || {}, d = (e.error_data && e.error_data.details) || e.error_user_msg || '';
     const nice = e.code === 131047 || e.code === 131026 ? 'More than 24 hours since the customer’s last message — send a template instead'
       : e.code === 190 ? 'The access token has expired or is wrong — update it in WhatsApp setup'
       : e.code === 131030 ? 'This number is not in the allowed list (test mode) — add it in Meta or go live'
@@ -2697,14 +2744,22 @@ async function initWA() {
     type TEXT, body TEXT, media_id TEXT, mime TEXT, fname TEXT, data BYTEA, lat DOUBLE PRECISION, lng DOUBLE PRECISION, status TEXT, error TEXT,
     category TEXT, template TEXT, sent_by INT, sent_by_name TEXT, reply_to TEXT, created_at TIMESTAMPTZ DEFAULT now());
   CREATE INDEX IF NOT EXISTS idx_wam_thread ON wa_messages(thread_id, id);
-  CREATE TABLE IF NOT EXISTS wa_reads (thread_id INT NOT NULL REFERENCES wa_threads(id) ON DELETE CASCADE, user_id INT NOT NULL, last_read INT DEFAULT 0, PRIMARY KEY(thread_id, user_id));`);
+  CREATE TABLE IF NOT EXISTS wa_reads (thread_id INT NOT NULL REFERENCES wa_threads(id) ON DELETE CASCADE, user_id INT NOT NULL, last_read INT DEFAULT 0, PRIMARY KEY(thread_id, user_id));
+  CREATE TABLE IF NOT EXISTS wa_numbers (id SERIAL PRIMARY KEY, key TEXT UNIQUE NOT NULL, label TEXT, purpose TEXT DEFAULT 'sales', brand_id INT, phone_id TEXT, number TEXT,
+    waba_id TEXT, token TEXT, enabled BOOLEAN DEFAULT true, auto_lead BOOLEAN DEFAULT true, sort INT DEFAULT 0, created_at TIMESTAMPTZ DEFAULT now());`);
   if (!(await q(`SELECT 1 FROM settings WHERE k='wa_perm_v1'`)).rows.length) {   // admin staff & sales get WhatsApp switched on once
     await q(`UPDATE users SET permissions = (SELECT ARRAY(SELECT DISTINCT unnest(permissions || ARRAY['whatsapp']))) WHERE role IN ('Admin','Sales')`);
     await q(`INSERT INTO settings(k,v) VALUES('wa_perm_v1','1') ON CONFLICT (k) DO NOTHING`);
   }
+  if (!(await q(`SELECT 1 FROM wa_numbers LIMIT 1`)).rows.length) {   // the first two numbers (Version 14–20 setup) become rows
+    const db = await waDb();
+    await q(`INSERT INTO wa_numbers(key,purpose,brand_id,phone_id,number,auto_lead,sort) VALUES('sales','sales',$1,$2,$3,$4,1),('service','service',$5,$6,$7,true,2) ON CONFLICT (key) DO NOTHING`,
+      [+db.sales_brand_id || null, db.sales_phone_id || null, db.sales_number || null, db.auto_lead !== false, +db.service_brand_id || null, db.service_phone_id || null, db.service_number || null]);
+  }
+  await waCfg(true);
 }
 const waNeed = need('whatsapp');
-// the thread for a phone on a line (made if missing); links it to a lead / customer with the same number
+// the thread for a phone on a number (made if missing); links it to a lead / customer with the same number
 async function waThread(line, phone, name) {
   const p = waDigits(phone);
   let t = (await q('SELECT * FROM wa_threads WHERE line=$1 AND wa_phone=$2', [line, p])).rows[0];
@@ -2714,7 +2769,13 @@ async function waThread(line, phone, name) {
   if (!t.customer_id) { const c = (await q(`SELECT id FROM customers WHERE right(regexp_replace(COALESCE(phone,''),'\\D','','g'),10)=$1 ORDER BY id DESC LIMIT 1`, [l10])).rows[0]; if (c) { await q('UPDATE wa_threads SET customer_id=$2 WHERE id=$1', [t.id, c.id]); t.customer_id = c.id; } }
   return t;
 }
-const waUsers = async () => (await q(`SELECT id FROM users WHERE active AND (role=$1 OR 'whatsapp'=ANY(permissions))`, [SUPER])).rows.map(r => r.id);
+// a chat the user may open (404 / 403 answered here)
+async function waTh(req, res) {
+  const t = (await q('SELECT * FROM wa_threads WHERE id=$1', [req.params.id])).rows[0]; if (!t) { res.status(404).json({ error: 'Not found' }); return null; }
+  const n = (await waCfg()).by[t.line]; if (!waSees(req.user, n)) { res.status(403).json({ error: 'This chat is on another brand’s WhatsApp number' }); return null; }
+  t.num = n; return t;
+}
+const waUsers = async n => (await q(`SELECT id, role, brand_id FROM users WHERE active AND (role=$1 OR 'whatsapp'=ANY(permissions))`, [SUPER])).rows.filter(u => waSees(u, n)).map(r => r.id);
 const waText = m => m.type === 'text' ? m.body : m.type === 'image' ? '📷 Photo' + (m.body ? ' · ' + m.body : '') : m.type === 'document' ? '📄 ' + (m.fname || 'Document') : m.type === 'audio' ? '🎤 Voice message'
   : m.type === 'video' ? '🎬 Video' : m.type === 'sticker' ? '🙂 Sticker' : m.type === 'location' ? '📍 Location' : m.type === 'template' ? '📋 ' + (m.body || m.template || 'Template') : m.type === 'reaction' ? (m.body || '👍') : (m.body || 'Message');
 // ---------- webhook (Meta calls this) ----------
@@ -2737,18 +2798,19 @@ app.post('/webhook/whatsapp', wrap(async (req, res) => {
     if (sig.length !== exp.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(exp))) { await waHookLog({ ok: false, why: 'App secret does not match — copy it again from Meta → App settings → Basic', ...sum }); return res.status(401).send('bad signature'); }
   }
   res.sendStatus(200);   // answer Meta at once, then process
-  const known = sum.phone_ids.filter(id => [c.sales && c.sales.phone_id, c.service && c.service.phone_id].filter(Boolean).map(String).includes(id));
-  await waHookLog({ ok: !!known.length || !sum.phone_ids.length, why: !sum.fields.includes('messages') ? 'Not a message event (' + sum.fields.join(', ') + ')' : !known.length && sum.phone_ids.length ? `Phone number ID ${sum.phone_ids.join(', ')} is not the Sales or Service ID saved in setup` : sum.messages ? 'Message received ✓' : sum.statuses ? 'Delivery / read update ✓' : 'Received', ...sum });
+  const known = sum.phone_ids.map(id => c.numbers.find(n => n.phone_id === id)).filter(Boolean);
+  sum.numbers = known.map(n => n.label + (n.enabled ? '' : ' (switched off)'));
+  await waHookLog({ ok: !!known.length || !sum.phone_ids.length, why: !sum.fields.includes('messages') ? 'Not a message event (' + sum.fields.join(', ') + ')' : !known.length && sum.phone_ids.length ? `Phone number ID ${sum.phone_ids.join(', ')} is not added in WhatsApp setup → Numbers` : sum.messages ? 'Message received ✓' : sum.statuses ? 'Delivery / read update ✓' : 'Received', ...sum });
   try { for (const e of (req.body && req.body.entry) || []) for (const ch of e.changes || []) if (ch.field === 'messages') await waIncoming(ch.value || {}); } catch (err) { console.error('wa webhook', err.message); }
 }));
 async function waIncoming(v) {
   const line = await waLineOf(v.metadata && v.metadata.phone_number_id); if (!line) return;
+  const C = await waCfg(), n = C.by[line];
   const names = {}; (v.contacts || []).forEach(x => { names[x.wa_id] = x.profile && x.profile.name; });
   for (const st of v.statuses || []) {   // sent / delivered / read / failed
     const err = st.errors && st.errors[0] ? (st.errors[0].title || '') + (st.errors[0].error_data && st.errors[0].error_data.details ? ' — ' + st.errors[0].error_data.details : '') : null;
     await q(`UPDATE wa_messages SET status=CASE WHEN status='read' AND $2<>'failed' THEN status ELSE $2 END, error=COALESCE($3,error), category=COALESCE(category,$4) WHERE wa_id=$1`, [st.id, st.status, err, st.pricing && st.pricing.category || null]);
   }
-  const C = await waCfg();
   for (const m of v.messages || []) {
     const t = await waThread(line, m.from, names[m.from]);
     if (names[m.from] && !t.name) await q('UPDATE wa_threads SET name=$2 WHERE id=$1', [t.id, names[m.from]]);
@@ -2765,26 +2827,27 @@ async function waIncoming(v) {
       [t.id, m.id, type, body, media, mime, fname, lat, lng, m.context && m.context.id || null, +m.timestamp || Date.now() / 1000])).rows[0];
     if (!ins) continue;
     await q('UPDATE wa_threads SET last_in_at=now(), last_at=now() WHERE id=$1', [t.id]);
-    if (media) waFetchMedia(ins.id, media).catch(e => console.error('wa media', e.message));
-    // a new number on the Sales line becomes a lead
+    if (media) waFetchMedia(ins.id, media, n.token).catch(e => console.error('wa media', e.message));
+    // a new number on a Sales number becomes a lead of that number's brand
     let isNewLead = false;
-    if (line === 'sales' && !t.lead_id && C.auto_lead) {
-      const brand = C.sales.brand_id || (await q(`SELECT id FROM brands ORDER BY (lower(name)='heaven') DESC, id LIMIT 1`)).rows[0].id;
+    if (n.purpose === 'sales' && n.enabled && n.auto_lead && !t.lead_id) {
+      const brand = n.brand_id || (await q(`SELECT id FROM brands ORDER BY (lower(name)='heaven') DESC, id LIMIT 1`)).rows[0].id;
       const l = (await q(`INSERT INTO leads(name,phone,source,stage,priority,brand_id,notes) VALUES($1,$2,'WhatsApp','New Enquiry','Warm',$3,$4) RETURNING id`,
         [names[m.from] || ('WhatsApp ' + last10(m.from)), '+' + waDigits(m.from), brand, body ? 'First message: ' + String(body).slice(0, 300) : null])).rows[0];
       await q('UPDATE wa_threads SET lead_id=$2 WHERE id=$1', [t.id, l.id]); t.lead_id = l.id; isNewLead = true;
-      await q(`INSERT INTO lead_activity(lead_id,by_name,text) VALUES($1,'WhatsApp','New lead from WhatsApp (Sales number)')`, [l.id]).catch(() => {});
+      await q(`INSERT INTO lead_activity(lead_id,by_name,text) VALUES($1,'WhatsApp',$2)`, [l.id, `New lead from WhatsApp (${n.label} number)`]).catch(() => {});
     }
+    if (!n.enabled) continue;   // switched-off number: message kept, nobody disturbed
     const who = names[m.from] || t.name || '+' + waDigits(m.from), pv = waText({ type, body, fname }).slice(0, 120);
-    for (const id of await waUsers()) {
-      if (isNewLead) await q('INSERT INTO notifications(user_id,title,body,link) VALUES($1,$2,$3,$4)', [id, '🟢 New WhatsApp lead', `${who}: ${pv}`, 'wa:' + t.id]);
-      pushTo(id, `🟢 ${who} · WhatsApp ${line === 'sales' ? 'Sales' : 'Service'}`, pv, null, { url: '/?att=wa:' + t.id, att: 'wa:' + t.id, tag: 'rago-wa-' + t.id }).catch(() => {});
+    for (const id of await waUsers(n)) {
+      if (isNewLead) await q('INSERT INTO notifications(user_id,title,body,link) VALUES($1,$2,$3,$4)', [id, '🟢 New WhatsApp lead · ' + n.label, `${who}: ${pv}`, 'wa:' + t.id]);
+      pushTo(id, `🟢 ${who} · WhatsApp ${n.label}`, pv, null, { url: '/?att=wa:' + t.id, att: 'wa:' + t.id, tag: 'rago-wa-' + t.id }).catch(() => {});
     }
   }
 }
-async function waFetchMedia(msgId, mediaId) {
-  const info = await graph('/' + mediaId), c = await waCfg();
-  const r = await fetch(info.url, { headers: { Authorization: 'Bearer ' + c.token } });
+async function waFetchMedia(msgId, mediaId, token) {
+  const info = await graph('/' + mediaId, { token }), c = await waCfg();
+  const r = await fetch(info.url, { headers: { Authorization: 'Bearer ' + (token || c.token) } });
   if (!r.ok) throw new Error('media download ' + r.status);
   const buf = Buffer.from(await r.arrayBuffer());
   if (buf.length > 25 * 1024 * 1024) return;
@@ -2794,76 +2857,90 @@ async function waFetchMedia(msgId, mediaId) {
 // ---------- inbox for staff ----------
 const WA_MCOLS = `id, thread_id, dir, wa_id, type, body, mime, fname, lat, lng, status, error, category, template, sent_by_name, reply_to, created_at, (data IS NOT NULL OR media_id IS NOT NULL) has_media, length(data) size`;
 const waOpen = t => !!(t.last_in_at && Date.now() - new Date(t.last_in_at) < 24 * 3600 * 1000);
+const waPub = n => ({ line: n.key, label: n.label, brand: n.brand, brand_id: n.brand_id, purpose: n.purpose, number: n.number, ready: waReady(n), enabled: n.enabled });
 app.get('/api/wa/status', waNeed, wrap(async (req, res) => {
-  const c = await waCfg();
-  res.json({ connected: !!c.token, lines: WA_LINES.map(l => ({ line: l, label: c[l].label, ready: !!(c.token && c[l].phone_id), number: c[l].number })), templates: !!c.waba_id });
+  const c = await waCfg(), mine = await waMine(req.user);
+  res.json({ connected: !!c.token || c.numbers.some(n => n.own_token), lines: mine.map(waPub), templates: !!c.waba_id || mine.some(n => n.waba_id) });
 }));
 app.get('/api/wa/threads', waNeed, wrap(async (req, res) => {
-  const line = WA_LINES.includes(req.query.line) ? req.query.line : null, p = [req.user.id], w = [];
-  if (line) { p.push(line); w.push(`t.line=$${p.length}`); }
+  const keys = (await waMine(req.user)).map(n => n.key);
+  if (!keys.length) return res.set('Cache-Control', 'no-store').json({ unread: {}, items: [] });
+  const p = [req.user.id, keys], w = [`t.line = ANY($2::text[])`];
+  if (req.query.line && keys.includes(String(req.query.line))) { p.push(String(req.query.line)); w.push(`t.line=$${p.length}`); }
   if (req.query.q) { p.push('%' + String(req.query.q).slice(0, 60) + '%'); w.push(`(t.name ILIKE $${p.length} OR t.wa_phone ILIKE $${p.length} OR l.name ILIKE $${p.length} OR c.name ILIKE $${p.length} OR c.company ILIKE $${p.length} OR l.company ILIKE $${p.length})`); }
   const rows = (await q(`SELECT t.*, l.name lead_name, l.company lead_company, l.stage lead_stage, c.name cust_name, c.company cust_company,
       (SELECT COUNT(*)::int FROM wa_messages m WHERE m.thread_id=t.id AND m.dir='in' AND m.id>COALESCE(r.last_read,0)) unread,
       (SELECT row_to_json(x) FROM (SELECT dir, type, body, fname, template, status, created_at FROM wa_messages m WHERE m.thread_id=t.id ORDER BY m.id DESC LIMIT 1) x) last
     FROM wa_threads t LEFT JOIN leads l ON l.id=t.lead_id LEFT JOIN customers c ON c.id=t.customer_id LEFT JOIN wa_reads r ON r.thread_id=t.id AND r.user_id=$1
-    ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY t.last_at DESC LIMIT 300`, p)).rows;
-  const counts = (await q(`SELECT t.line, COUNT(*)::int n FROM wa_threads t JOIN wa_messages m ON m.thread_id=t.id AND m.dir='in' LEFT JOIN wa_reads r ON r.thread_id=t.id AND r.user_id=$1 WHERE m.id>COALESCE(r.last_read,0) GROUP BY t.line`, [req.user.id])).rows;
+    WHERE ${w.join(' AND ')} ORDER BY t.last_at DESC LIMIT 300`, p)).rows;
+  const counts = (await q(`SELECT t.line, COUNT(*)::int n FROM wa_threads t JOIN wa_messages m ON m.thread_id=t.id AND m.dir='in' LEFT JOIN wa_reads r ON r.thread_id=t.id AND r.user_id=$1 WHERE m.id>COALESCE(r.last_read,0) AND t.line = ANY($2::text[]) GROUP BY t.line`, [req.user.id, keys])).rows;
   const un = {}; counts.forEach(x => { un[x.line] = x.n; });
   res.set('Cache-Control', 'no-store').json({ unread: un, items: rows.map(t => ({ ...t, open: waOpen(t), title: t.lead_name || t.cust_name || t.name || '+' + t.wa_phone, preview: t.last ? (t.last.dir === 'out' ? 'You: ' : '') + waText(t.last) : '' })) });
 }));
 const waThreadFor = async id => (await q(`SELECT t.*, l.name lead_name, l.company lead_company, l.stage lead_stage, c.name cust_name, c.company cust_company FROM wa_threads t LEFT JOIN leads l ON l.id=t.lead_id LEFT JOIN customers c ON c.id=t.customer_id WHERE t.id=$1`, [id])).rows[0];
 app.get('/api/wa/threads/:id', waNeed, wrap(async (req, res) => {
-  const t = await waThreadFor(+req.params.id); if (!t) return res.status(404).json({ error: 'Not found' });
+  const g = await waTh(req, res); if (!g) return; const t = await waThreadFor(g.id), n = g.num;
   const after = +req.query.after || 0, before = +req.query.before || 0;
   const items = after ? (await q(`SELECT ${WA_MCOLS} FROM wa_messages WHERE thread_id=$1 AND id>$2 ORDER BY id`, [t.id, after])).rows
     : (await q(`SELECT * FROM (SELECT ${WA_MCOLS} FROM wa_messages WHERE thread_id=$1 ${before ? 'AND id<$2' : ''} ORDER BY id DESC LIMIT 80) x ORDER BY id`, before ? [t.id, before] : [t.id])).rows;
   // status ticks change after sending: give the latest statuses of the last 40 outgoing messages
   const st = after ? (await q(`SELECT id, status, error FROM wa_messages WHERE thread_id=$1 AND dir='out' ORDER BY id DESC LIMIT 40`, [t.id])).rows : [];
-  const c = await waCfg();
-  res.set('Cache-Control', 'no-store').json({ thread: { ...t, open: waOpen(t), title: t.lead_name || t.cust_name || t.name || '+' + t.wa_phone, number: c[t.line].number, ready: !!(c.token && c[t.line].phone_id) }, items, statuses: st, more: !after && items.length === 80 });
+  res.set('Cache-Control', 'no-store').json({ thread: { ...t, open: waOpen(t), title: t.lead_name || t.cust_name || t.name || '+' + t.wa_phone, number: n.number, label: n.label, purpose: n.purpose, brand: n.brand, enabled: n.enabled, ready: waReady(n) && n.enabled }, items, statuses: st, more: !after && items.length === 80 });
 }));
 app.post('/api/wa/threads/:id/read', waNeed, wrap(async (req, res) => {
-  const t = (await q('SELECT * FROM wa_threads WHERE id=$1', [req.params.id])).rows[0]; if (!t) return res.status(404).json({ error: 'Not found' });
+  const t = await waTh(req, res); if (!t) return; const n = t.num;
   const last = (await q(`SELECT MAX(id) n FROM wa_messages WHERE thread_id=$1`, [t.id])).rows[0].n || 0;
   await q(`INSERT INTO wa_reads(thread_id,user_id,last_read) VALUES($1,$2,$3) ON CONFLICT (thread_id,user_id) DO UPDATE SET last_read=GREATEST(wa_reads.last_read,$3)`, [t.id, req.user.id, last]);
   // blue ticks for the customer on their latest message
-  const lastIn = (await q(`SELECT wa_id FROM wa_messages WHERE thread_id=$1 AND dir='in' ORDER BY id DESC LIMIT 1`, [t.id])).rows[0], c = await waCfg();
-  if (lastIn && c.token && c[t.line].phone_id && req.body && req.body.seen !== false) graph(`/${c[t.line].phone_id}/messages`, { method: 'POST', json: { messaging_product: 'whatsapp', status: 'read', message_id: lastIn.wa_id } }).catch(() => {});
-  res.json({ ok: true, unread: await waUnread(req.user.id) });
+  const lastIn = (await q(`SELECT wa_id FROM wa_messages WHERE thread_id=$1 AND dir='in' ORDER BY id DESC LIMIT 1`, [t.id])).rows[0];
+  if (lastIn && waReady(n) && req.body && req.body.seen !== false) graph(`/${n.phone_id}/messages`, { method: 'POST', token: n.token, json: { messaging_product: 'whatsapp', status: 'read', message_id: lastIn.wa_id } }).catch(() => {});
+  res.json({ ok: true, unread: await waUnread(req.user) });
 }));
-const waUnread = async uid => (await q(`SELECT COUNT(*)::int n FROM wa_messages m JOIN wa_threads t ON t.id=m.thread_id LEFT JOIN wa_reads r ON r.thread_id=t.id AND r.user_id=$1 WHERE m.dir='in' AND m.id>COALESCE(r.last_read,0)`, [uid])).rows[0].n;
-// open (or make) the chat for a lead / customer / ticket — leads use the Sales number, services the Service number
+const waUnread = async u => { const keys = (await waMine(u)).map(n => n.key); if (!keys.length) return 0;
+  return (await q(`SELECT COUNT(*)::int n FROM wa_messages m JOIN wa_threads t ON t.id=m.thread_id LEFT JOIN wa_reads r ON r.thread_id=t.id AND r.user_id=$1 WHERE m.dir='in' AND m.id>COALESCE(r.last_read,0) AND t.line = ANY($2::text[])`, [u.id, keys])).rows[0].n; };
+// open (or make) a chat for a lead / customer / ticket / phone. Picks the number of the same brand and purpose
+// (lead → Sales, ticket / customer → Service); when more than one could fit, answers { choose } so the app asks.
 app.post('/api/wa/open', waNeed, wrap(async (req, res) => {
-  const b = req.body || {}; let phone = b.phone, name = b.name, line = WA_LINES.includes(b.line) ? b.line : null, lead = null, cust = null;
-  if (b.lead_id) { const l = (await q('SELECT id, name, phone FROM leads WHERE id=$1', [b.lead_id])).rows[0]; if (!l) return res.status(404).json({ error: 'Lead not found' }); phone = l.phone; name = l.name; lead = l.id; line = line || 'sales'; }
-  if (b.service_id) { const s = (await q('SELECT c.id, c.name, c.phone FROM services s JOIN customers c ON c.id=s.customer_id WHERE s.id=$1', [b.service_id])).rows[0]; if (!s) return res.status(404).json({ error: 'Ticket not found' }); phone = s.phone; name = s.name; cust = s.id; line = line || 'service'; }
-  if (b.customer_id) { const c2 = (await q('SELECT id, name, phone FROM customers WHERE id=$1', [b.customer_id])).rows[0]; if (!c2) return res.status(404).json({ error: 'Customer not found' }); phone = c2.phone; name = c2.name; cust = c2.id; line = line || 'service'; }
+  const b = req.body || {}; let phone = b.phone, name = b.name, lead = null, cust = null, brand = +b.brand_id || null, purpose = ['sales', 'service'].includes(b.purpose) ? b.purpose : null;
+  if (b.lead_id) { const l = (await q('SELECT id, name, phone, brand_id FROM leads WHERE id=$1', [b.lead_id])).rows[0]; if (!l) return res.status(404).json({ error: 'Lead not found' }); phone = l.phone; name = l.name; lead = l.id; brand = brand || l.brand_id; purpose = purpose || 'sales'; }
+  if (b.service_id) { const s = (await q('SELECT c.id, c.name, c.phone, s.brand_id FROM services s JOIN customers c ON c.id=s.customer_id WHERE s.id=$1', [b.service_id])).rows[0]; if (!s) return res.status(404).json({ error: 'Ticket not found' }); phone = s.phone; name = s.name; cust = s.id; brand = brand || s.brand_id; purpose = purpose || 'service'; }
+  if (b.customer_id) { const c2 = (await q('SELECT id, name, phone, brand_id FROM customers WHERE id=$1', [b.customer_id])).rows[0]; if (!c2) return res.status(404).json({ error: 'Customer not found' }); phone = phone || c2.phone; name = name || c2.name; cust = c2.id; brand = brand || c2.brand_id; purpose = purpose || 'service'; }
   if (waDigits(phone).length < 11) return res.status(400).json({ error: 'This contact has no valid mobile number' });
-  const t = await waThread(line || 'sales', phone, name);
+  const c = await waCfg(), mine = c.numbers.filter(n => waSees(req.user, n) && n.enabled);
+  let num = null;
+  if (b.line) { num = c.by[b.line]; if (!num || !mine.includes(num)) return res.status(403).json({ error: 'You can’t use this WhatsApp number' }); }
+  else {
+    if (!mine.length) return res.status(400).json({ error: 'No WhatsApp number is switched on for you — ask the Super Admin' });
+    const score = n => (purpose && n.purpose === purpose ? 3 : 0) + (brand && n.brand_id === brand ? 2 : !n.brand_id ? 1 : brand ? -10 : 0);
+    const ranked = mine.map(n => ({ n, s: score(n) })).sort((x, y) => y.s - x.s), top = ranked[0].s, best = ranked.filter(x => x.s === top);
+    if (mine.length === 1 || (best.length === 1 && top >= 3 && !b.ask)) num = best[0].n;
+    else return res.json({ choose: ranked.map(x => ({ ...waPub(x.n), best: x.s === top && top > 0 })) });
+  }
+  const t = await waThread(num.key, phone, name);
   if (lead && !t.lead_id) await q('UPDATE wa_threads SET lead_id=$2 WHERE id=$1', [t.id, lead]);
   if (cust && !t.customer_id) await q('UPDATE wa_threads SET customer_id=$2 WHERE id=$1', [t.id, cust]);
-  res.json({ id: t.id });
+  res.json({ id: t.id, line: num.key, label: num.label });
 }));
 app.patch('/api/wa/threads/:id', waNeed, wrap(async (req, res) => {   // link to a lead / customer, rename
-  const t = (await q('SELECT * FROM wa_threads WHERE id=$1', [req.params.id])).rows[0]; if (!t) return res.status(404).json({ error: 'Not found' });
+  const t = await waTh(req, res); if (!t) return;
   const b = req.body || {};
   if (b.lead_id !== undefined) await q('UPDATE wa_threads SET lead_id=$2 WHERE id=$1', [t.id, +b.lead_id || null]);
   if (b.customer_id !== undefined) await q('UPDATE wa_threads SET customer_id=$2 WHERE id=$1', [t.id, +b.customer_id || null]);
   if (b.name !== undefined) await q('UPDATE wa_threads SET name=$2 WHERE id=$1', [t.id, String(b.name || '').trim().slice(0, 80) || null]);
   res.json({ ok: true });
 }));
-// make a lead from a chat (Sales) or a ticket's customer (Service)
+// make a lead from a chat
 app.post('/api/wa/threads/:id/lead', waNeed, need('leads'), wrap(async (req, res) => {
-  const t = (await q('SELECT * FROM wa_threads WHERE id=$1', [req.params.id])).rows[0]; if (!t) return res.status(404).json({ error: 'Not found' });
+  const t = await waTh(req, res); if (!t) return;
   if (t.lead_id) return res.json({ id: t.lead_id });
-  const c = await waCfg(), brand = req.user.brand_id || c[t.line].brand_id || (await q(`SELECT id FROM brands ORDER BY (lower(name)='heaven') DESC, id LIMIT 1`)).rows[0].id;
+  const brand = req.user.brand_id || t.num.brand_id || (await q(`SELECT id FROM brands ORDER BY (lower(name)='heaven') DESC, id LIMIT 1`)).rows[0].id;
   const l = (await q(`INSERT INTO leads(name,phone,source,stage,priority,brand_id,created_by,assigned_to) VALUES($1,$2,'WhatsApp','New Enquiry','Warm',$3,$4,$4) RETURNING id`, [t.name || ('WhatsApp ' + last10(t.wa_phone)), '+' + t.wa_phone, brand, req.user.id])).rows[0];
   await q('UPDATE wa_threads SET lead_id=$2 WHERE id=$1', [t.id, l.id]); res.json({ id: l.id });
 }));
 // send: text, file (photo / document / voice) or an approved template
-async function waUpload(phoneId, buf, mime, fname) {
+async function waUpload(n, buf, mime, fname) {
   const fd = new FormData(); fd.append('messaging_product', 'whatsapp'); fd.append('type', mime); fd.append('file', new Blob([buf], { type: mime }), fname || 'file');
-  return (await graph(`/${phoneId}/media`, { method: 'POST', body: fd })).id;
+  return (await graph(`/${n.phone_id}/media`, { method: 'POST', body: fd, token: n.token })).id;
 }
 // Chrome records voice as WebM — WhatsApp needs OGG/Opus, so convert (ffmpeg comes with the app)
 function toOgg(buf) {
@@ -2875,9 +2952,9 @@ function toOgg(buf) {
   });
 }
 app.post('/api/wa/threads/:id/send', waNeed, wrap(async (req, res) => {
-  const t = (await q('SELECT * FROM wa_threads WHERE id=$1', [req.params.id])).rows[0]; if (!t) return res.status(404).json({ error: 'Not found' });
-  const c = await waCfg(), phoneId = c[t.line].phone_id;
-  if (!c.token || !phoneId) return res.status(400).json({ error: `The ${c[t.line].label} number is not connected yet — Super Admin: Profile → WhatsApp setup` });
+  const t = await waTh(req, res); if (!t) return; const n = t.num;
+  if (!n.enabled) return res.status(400).json({ error: `The ${n.label} number is switched off — Super Admin: WhatsApp setup → Numbers` });
+  if (!waReady(n)) return res.status(400).json({ error: `The ${n.label} number is not connected yet — Super Admin: Profile → WhatsApp setup` });
   const b = req.body || {}; let payload, row = { type: 'text', body: null, mime: null, fname: null, data: null, template: null, category: null };
   try {
     if (b.template) {
@@ -2895,7 +2972,7 @@ app.post('/api/wa/threads/:id/send', waNeed, wrap(async (req, res) => {
         let kind = /^image\/(jpeg|png)$/.test(mime) ? 'image' : /^audio\//.test(mime) || b.voice ? 'audio' : /^video\/(mp4|3gpp)$/.test(mime) ? 'video' : 'document';
         if (kind === 'audio' && !/ogg|mpeg|mp4|aac|amr/.test(mime)) { try { buf = await toOgg(buf); mime = 'audio/ogg'; fname = 'voice.ogg'; } catch (e) { kind = 'document'; } }
         if (kind === 'audio' && /ogg/.test(mime)) mime = 'audio/ogg';
-        const mid = await waUpload(phoneId, buf, mime.split(';')[0], fname);
+        const mid = await waUpload(n, buf, mime.split(';')[0], fname);
         payload = { type: kind, [kind]: { id: mid, ...(kind === 'document' ? { filename: fname } : {}), ...(b.text && kind !== 'audio' ? { caption: String(b.text).slice(0, 1000) } : {}) } };
         row = { ...row, type: kind, body: b.text || null, mime: mime.split(';')[0], fname, data: buf };
       } else {
@@ -2905,7 +2982,7 @@ app.post('/api/wa/threads/:id/send', waNeed, wrap(async (req, res) => {
       }
     }
     if (b.reply_to) { const rt = (await q('SELECT wa_id FROM wa_messages WHERE id=$1 AND thread_id=$2', [b.reply_to, t.id])).rows[0]; if (rt && rt.wa_id) payload.context = { message_id: rt.wa_id }; }
-    const r = await graph(`/${phoneId}/messages`, { method: 'POST', json: { messaging_product: 'whatsapp', recipient_type: 'individual', to: t.wa_phone, ...payload } });
+    const r = await graph(`/${n.phone_id}/messages`, { method: 'POST', token: n.token, json: { messaging_product: 'whatsapp', recipient_type: 'individual', to: t.wa_phone, ...payload } });
     const wid = r.messages && r.messages[0] && r.messages[0].id;
     const ins = (await q(`INSERT INTO wa_messages(thread_id,dir,wa_id,type,body,mime,fname,data,status,category,template,sent_by,sent_by_name,reply_to) VALUES($1,'out',$2,$3,$4,$5,$6,$7,'sent',$8,$9,$10,$11,$12) RETURNING id`,
       [t.id, wid || null, row.type, row.body, row.mime, row.fname, row.data, row.category || (b.template ? null : 'service'), row.template, req.user.id, req.user.name, payload.context ? payload.context.message_id : null])).rows[0];
@@ -2915,10 +2992,11 @@ app.post('/api/wa/threads/:id/send', waNeed, wrap(async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message, need_template: /24 hours/.test(e.message) }); }
 }));
 app.get('/api/wa/media/:id', waNeed, wrap(async (req, res) => {
-  let m = (await q('SELECT id, data, mime, media_id, fname, type FROM wa_messages WHERE id=$1', [req.params.id])).rows[0];
+  let m = (await q('SELECT m.id, m.data, m.mime, m.media_id, m.fname, m.type, t.line FROM wa_messages m JOIN wa_threads t ON t.id=m.thread_id WHERE m.id=$1', [req.params.id])).rows[0];
   if (!m) return res.status(404).end();
+  const n = (await waCfg()).by[m.line]; if (!waSees(req.user, n)) return res.status(403).end();
   let buf = m.data;
-  if (!buf && m.media_id) { try { buf = await waFetchMedia(m.id, m.media_id); } catch (e) { return res.status(404).end(); } }
+  if (!buf && m.media_id) { try { buf = await waFetchMedia(m.id, m.media_id, n.token); } catch (e) { return res.status(404).end(); } }
   if (!buf) return res.status(404).end();
   const total = buf.length, range = /bytes=(\d*)-(\d*)/.exec(req.headers.range || '');
   res.set({ 'Content-Type': m.mime || 'application/octet-stream', 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, max-age=604800', 'X-Content-Type-Options': 'nosniff' });
@@ -2926,67 +3004,154 @@ app.get('/api/wa/media/:id', waNeed, wrap(async (req, res) => {
   if (range) { const s = range[1] ? +range[1] : 0, e = range[2] ? Math.min(+range[2], total - 1) : total - 1; return res.status(206).set('Content-Range', `bytes ${s}-${e}/${total}`).send(buf.subarray(s, e + 1)); }
   res.send(buf);
 }));
-// approved templates from Meta (cached 10 minutes)
-let WA_TPL = { at: 0, items: [] };
-app.get('/api/wa/templates', waNeed, wrap(async (req, res) => {
+// ---------- templates (each WhatsApp Business Account has its own; cached 10 minutes) ----------
+const WA_TPL = {};
+const waTplOf = async (waba, token, fresh) => {
+  const k = waba, c = WA_TPL[k];
+  if (c && !fresh && Date.now() - c.at < 600000) return c.items;
+  const r = await graph(`/${waba}/message_templates?fields=name,language,status,category,components,rejected_reason&limit=200`, { token });
+  const items = (r.data || []).map(x => {
+    const body = (x.components || []).find(k2 => k2.type === 'BODY') || {}, head = (x.components || []).find(k2 => k2.type === 'HEADER') || {};
+    return { name: x.name, lang: x.language, status: x.status, reason: x.rejected_reason && x.rejected_reason !== 'NONE' ? x.rejected_reason : null, category: x.category, text: body.text || '', header: head.format === 'TEXT' ? head.text : head.format ? '[' + head.format.toLowerCase() + ']' : '', params: ((body.text || '').match(/\{\{\d+\}\}/g) || []).length, media_header: !!(head.format && head.format !== 'TEXT') };
+  });
+  WA_TPL[k] = { at: Date.now(), items }; return items;
+};
+// templates named after another brand (e.g. gmedia_… on a Heaven number) are hidden
+const waBrandTpl = async (items, n) => {
+  if (!n || !n.brand_id) return items;
+  const others = (await q('SELECT id, name FROM brands')).rows.filter(b => b.id !== n.brand_id).map(b => waSlug(b.name)).filter(Boolean), mine = waSlug(n.brand);
+  return items.filter(t => !others.some(s => s !== mine && t.name.startsWith(s + '_')));
+};
+const waTplTarget = async (req, line) => {   // → { waba, token, n }
   const c = await waCfg();
-  if (!c.waba_id) return res.json({ items: [], error: 'Add the WhatsApp Business Account ID in WhatsApp setup to use templates' });
+  if (line) { const n = c.by[line]; if (!waSees(req.user, n)) return { error: 'You can’t use this WhatsApp number' }; return { waba: n.waba_id, token: n.token, n }; }
+  return { waba: c.waba_id, token: c.token, n: null };
+};
+app.get('/api/wa/templates', waNeed, wrap(async (req, res) => {
+  const tg = await waTplTarget(req, req.query.line); if (tg.error) return res.status(403).json(tg);
+  if (!tg.waba) return res.json({ items: [], error: 'Add the WhatsApp Business Account ID in WhatsApp setup to use templates' });
   try {
-    if (req.query.fresh || Date.now() - WA_TPL.at > 600000) {
-      const r = await graph(`/${c.waba_id}/message_templates?fields=name,language,status,category,components&limit=200`);
-      WA_TPL = { at: Date.now(), items: (r.data || []).filter(x => x.status === 'APPROVED').map(x => {
-        const body = (x.components || []).find(k => k.type === 'BODY') || {}, head = (x.components || []).find(k => k.type === 'HEADER') || {};
-        return { name: x.name, lang: x.language, category: x.category, text: body.text || '', header: head.format === 'TEXT' ? head.text : head.format ? '[' + head.format.toLowerCase() + ']' : '', params: ((body.text || '').match(/\{\{\d+\}\}/g) || []).length, media_header: !!(head.format && head.format !== 'TEXT') };
-      }) };
-    }
-    res.json({ items: WA_TPL.items });
+    let items = await waTplOf(tg.waba, tg.token, !!req.query.fresh);
+    if (!(req.query.all && isSuper(req.user))) items = await waBrandTpl(items.filter(x => x.status === 'APPROVED'), tg.n);
+    res.json({ items, waba: isSuper(req.user) ? tg.waba : undefined });
   } catch (e) { res.json({ items: [], error: e.message }); }
 }));
-// this month: messages sent and an estimate of Meta's bill
+// Super Admin: create a template from the CRM (Meta reviews it, usually within minutes to a day)
+app.post('/api/wa/templates', superOnly, wrap(async (req, res) => {
+  const b = req.body || {}, tg = await waTplTarget(req, b.line); if (tg.error) return res.status(403).json(tg);
+  if (!tg.waba) return res.status(400).json({ error: 'Add the WhatsApp Business Account ID first' });
+  const name = String(b.name || '').trim().toLowerCase(), body = String(b.body || '').trim(), cat = String(b.category || 'UTILITY').toUpperCase(), lang = String(b.lang || 'en').trim();
+  if (!/^[a-z0-9_]{3,100}$/.test(name)) return res.status(400).json({ error: 'Name: small letters, numbers and _ only (e.g. heaven_service_update)' });
+  if (!['UTILITY', 'MARKETING'].includes(cat)) return res.status(400).json({ error: 'Choose Utility or Marketing' });
+  if (!body || body.length > 1024) return res.status(400).json({ error: 'Write the message (up to 1024 letters)' });
+  const vars = (body.match(/\{\{(\d+)\}\}/g) || []).map(v => +v.replace(/\D/g, ''));
+  if (vars.some((v, i) => v !== i + 1)) return res.status(400).json({ error: 'Blanks must be numbered in order: {{1}}, {{2}}, {{3}}…' });
+  if (/^\s*\{\{\d+\}\}/.test(body) || /\{\{\d+\}\}[\s.!]*$/.test(body)) return res.status(400).json({ error: 'Meta does not allow a blank at the very start or end — add a word before / after it' });
+  if (/\{\{\d+\}\}\s*\{\{\d+\}\}/.test(body)) return res.status(400).json({ error: 'Put a word between two blanks' });
+  const ex = (Array.isArray(b.examples) ? b.examples : []).map(x => String(x || '').trim().slice(0, 200));
+  if (vars.length && (ex.length < vars.length || ex.slice(0, vars.length).some(x => !x))) return res.status(400).json({ error: 'Give an example for every blank — Meta needs it to approve' });
+  const comps = [];
+  if (b.header) comps.push({ type: 'HEADER', format: 'TEXT', text: String(b.header).trim().slice(0, 60) });
+  comps.push({ type: 'BODY', text: body, ...(vars.length ? { example: { body_text: [ex.slice(0, vars.length)] } } : {}) });
+  if (b.footer) comps.push({ type: 'FOOTER', text: String(b.footer).trim().slice(0, 60) });
+  try {
+    const r = await graph(`/${tg.waba}/message_templates`, { method: 'POST', token: tg.token, json: { name, language: lang, category: cat, components: comps } });
+    delete WA_TPL[tg.waba]; res.json({ ok: true, id: r.id, status: r.status || 'PENDING', category: r.category || cat });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+}));
+// this month: messages sent and an estimate of Meta's bill, per number
 app.get('/api/wa/usage', waNeed, wrap(async (req, res) => {
-  const m = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : (await todayIST()).slice(0, 7);
+  const m = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : (await todayIST()).slice(0, 7), mine = await waMine(req.user);
   const rows = (await q(`SELECT t.line, COALESCE(m.category,'service') cat, COUNT(*)::int n FROM wa_messages m JOIN wa_threads t ON t.id=m.thread_id
     WHERE m.dir='out' AND m.status<>'failed' AND to_char(m.created_at AT TIME ZONE '${TZ}','YYYY-MM')=$1 GROUP BY 1,2`, [m])).rows;
   const inN = (await q(`SELECT t.line, COUNT(*)::int n FROM wa_messages m JOIN wa_threads t ON t.id=m.thread_id WHERE m.dir='in' AND to_char(m.created_at AT TIME ZONE '${TZ}','YYYY-MM')=$1 GROUP BY 1`, [m])).rows;
-  const out = WA_LINES.map(l => {
-    const g = k => (rows.find(r => r.line === l && r.cat === k) || {}).n || 0, svc = g('service') + g('free_customer_service'), mk = g('marketing'), ut = g('utility'), au = g('authentication');
+  const out = mine.map(n => {
+    const l = n.key, g = k => (rows.find(r => r.line === l && r.cat === k) || {}).n || 0, svc = g('service') + g('free_customer_service'), mk = g('marketing'), ut = g('utility'), au = g('authentication');
     const cost = Math.max(0, svc - WA_RATES.free) * WA_RATES.service + mk * WA_RATES.marketing + ut * WA_RATES.utility + au * WA_RATES.authentication;
-    return { line: l, received: (inN.find(r => r.line === l) || {}).n || 0, replies: svc, free_left: Math.max(0, WA_RATES.free - svc), marketing: mk, utility: ut + au, cost: Math.round(cost * 100) / 100, with_gst: Math.round(cost * (1 + WA_RATES.gst) * 100) / 100 };
+    return { line: l, label: n.label, purpose: n.purpose, received: (inN.find(r => r.line === l) || {}).n || 0, replies: svc, free_left: Math.max(0, WA_RATES.free - svc), marketing: mk, utility: ut + au, cost: Math.round(cost * 100) / 100, with_gst: Math.round(cost * (1 + WA_RATES.gst) * 100) / 100 };
   });
   res.json({ month: m, rates: WA_RATES, lines: out, total: Math.round(out.reduce((t, x) => t + x.with_gst, 0) * 100) / 100 });
 }));
 // ---------- setup (Super Admin) ----------
 const mask = v => v ? '••••' + String(v).slice(-4) : '';
+const waNumOut = async () => { const c = await waCfg(true), th = {}; (await q(`SELECT line, COUNT(*)::int n FROM wa_threads GROUP BY 1`)).rows.forEach(r => { th[r.line] = r.n; });
+  return c.numbers.map(n => ({ id: n.id, key: n.key, label: n.name, title: n.label, purpose: n.purpose, brand_id: n.brand_id, brand: n.brand, phone_id: n.phone_id, number: n.number, waba_id: n.own_waba ? n.waba_id : '', token: n.own_token ? mask(n.token) : '', enabled: n.enabled, auto_lead: n.auto_lead, env_phone: n.env_phone, ready: waReady(n), chats: th[n.key] || 0 })); };
 app.get('/api/wa/settings', superOnly, wrap(async (req, res) => {
-  const c = await waCfg(true); let db = {}; try { db = JSON.parse(((await q(`SELECT v FROM settings WHERE k='wa_cfg'`)).rows[0] || {}).v || '{}'); } catch (e) { db = {}; }
-  if (!c.verify_token) { db.verify_token = crypto.randomBytes(12).toString('hex'); await q(`INSERT INTO settings(k,v) VALUES('wa_cfg',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [JSON.stringify(db)]); await waCfg(true); }
-  const C = await waCfg();
-  res.json({ token: mask(C.token), app_secret: mask(C.app_secret), verify_token: C.verify_token, waba_id: C.waba_id, sales_phone_id: C.sales.phone_id, service_phone_id: C.service.phone_id,
-    sales_number: C.sales.number, service_number: C.service.number, sales_brand_id: C.sales.brand_id, service_brand_id: C.service.brand_id, auto_lead: C.auto_lead, from_env: C.from_env });
+  const c = await waCfg(true), db = await waDb();
+  if (!c.verify_token) { db.verify_token = crypto.randomBytes(12).toString('hex'); await q(`INSERT INTO settings(k,v) VALUES('wa_cfg',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [JSON.stringify(db)]); }
+  const C = await waCfg(true), S = C.by.sales || {}, V = C.by.service || {};
+  res.json({ token: mask(C.token), app_secret: mask(C.app_secret), verify_token: C.verify_token, waba_id: C.waba_id, from_env: C.from_env, numbers: await waNumOut(),
+    sales_phone_id: S.phone_id || '', service_phone_id: V.phone_id || '', sales_number: S.number || '', service_number: V.number || '', sales_brand_id: S.brand_id || null, service_brand_id: V.brand_id || null, auto_lead: S.auto_lead !== false });
 }));
 app.get('/api/wa/hooks', superOnly, wrap(async (req, res) => { let a = []; try { a = JSON.parse(((await q(`SELECT v FROM settings WHERE k='wa_hooks'`)).rows[0] || {}).v || '[]'); } catch (e) {} res.json(a); }));
 app.put('/api/wa/settings', superOnly, wrap(async (req, res) => {
-  let db = {}; try { db = JSON.parse(((await q(`SELECT v FROM settings WHERE k='wa_cfg'`)).rows[0] || {}).v || '{}'); } catch (e) { db = {}; }
-  const b = req.body || {}, str = (k, max = 600) => { if (b[k] !== undefined && !/^••••/.test(String(b[k]))) db[k] = String(b[k] || '').trim().slice(0, max); };
-  ['token', 'app_secret'].forEach(k => str(k, 1200)); ['verify_token', 'waba_id', 'sales_phone_id', 'service_phone_id', 'sales_number', 'service_number'].forEach(k => str(k, 80));
-  for (const k of ['sales_brand_id', 'service_brand_id']) if (b[k] !== undefined) db[k] = +b[k] || null;
-  if (b.auto_lead !== undefined) db.auto_lead = !!b.auto_lead;
-  await q(`INSERT INTO settings(k,v) VALUES('wa_cfg',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [JSON.stringify(db)]); await waCfg(true); WA_TPL.at = 0;
+  const db = await waDb(), b = req.body || {}, str = (k, max = 600) => { if (b[k] !== undefined && !/^••••/.test(String(b[k]))) db[k] = String(b[k] || '').trim().slice(0, max); };
+  ['token', 'app_secret'].forEach(k => str(k, 1200)); ['verify_token', 'waba_id'].forEach(k => str(k, 80));
+  await q(`INSERT INTO settings(k,v) VALUES('wa_cfg',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [JSON.stringify(db)]);
+  // older screens / scripts still send the two fixed numbers
+  for (const key of ['sales', 'service']) {
+    const set = {}; if (b[key + '_phone_id'] !== undefined) set.phone_id = String(b[key + '_phone_id'] || '').trim().slice(0, 40) || null; if (b[key + '_number'] !== undefined) set.number = String(b[key + '_number'] || '').trim().slice(0, 40) || null;
+    if (b[key + '_brand_id'] !== undefined) set.brand_id = +b[key + '_brand_id'] || null; if (key === 'sales' && b.auto_lead !== undefined) set.auto_lead = !!b.auto_lead;
+    if (!Object.keys(set).length) continue;
+    await q(`INSERT INTO wa_numbers(key,purpose,sort) VALUES($1,$1,$2) ON CONFLICT (key) DO NOTHING`, [key, key === 'sales' ? 1 : 2]);
+    const ks = Object.keys(set); await q(`UPDATE wa_numbers SET ${ks.map((k, i) => `${k}=$${i + 2}`).join(', ')} WHERE key=$1`, [key, ...ks.map(k => set[k])]);
+  }
+  await waCfg(true); Object.keys(WA_TPL).forEach(k => delete WA_TPL[k]);
   res.json({ ok: true });
 }));
-app.post('/api/wa/test', superOnly, wrap(async (req, res) => {   // check the keys with Meta
-  const c = await waCfg(true), out = {};
-  for (const l of WA_LINES) {
-    if (!c[l].phone_id) { out[l] = { ok: false, error: 'Phone number ID missing' }; continue; }
-    try { const r = await graph(`/${c[l].phone_id}?fields=display_phone_number,verified_name,quality_rating,code_verification_status,name_status`); out[l] = { ok: true, ...r }; }
-    catch (e) { out[l] = { ok: false, error: e.message }; }
+// numbers: add / change / switch on-off / remove
+const waNumBody = async (b, old) => {
+  const o = {}, s = (k, max) => { if (b[k] !== undefined) o[k] = String(b[k] || '').trim().slice(0, max) || null; };
+  s('label', 60); s('number', 40); s('waba_id', 40); if (b.phone_id !== undefined) o.phone_id = String(b.phone_id || '').replace(/\D/g, '').slice(0, 30) || null;
+  if (b.token !== undefined && !/^••••/.test(String(b.token))) o.token = String(b.token || '').trim().slice(0, 1200) || null;
+  if (b.purpose !== undefined) o.purpose = b.purpose === 'service' ? 'service' : 'sales';
+  if (b.brand_id !== undefined) o.brand_id = +b.brand_id || null;
+  for (const k of ['enabled', 'auto_lead']) if (b[k] !== undefined) o[k] = !!b[k];
+  if (o.waba_id && !/^\d+$/.test(o.waba_id) && !/^W\d+$/.test(o.waba_id)) return { error: 'WhatsApp Business Account ID is a number' };
+  if (o.phone_id) { const d = (await q('SELECT label, key FROM wa_numbers WHERE phone_id=$1 AND id<>$2', [o.phone_id, old ? old.id : 0])).rows[0]; if (d) return { error: 'This Phone number ID is already added' }; }
+  if (o.brand_id && !(await q('SELECT 1 FROM brands WHERE id=$1', [o.brand_id])).rows.length) return { error: 'Brand not found' };
+  return o;
+};
+app.post('/api/wa/numbers', superOnly, wrap(async (req, res) => {
+  const o = await waNumBody(req.body || {}); if (o.error) return res.status(400).json(o);
+  if (!o.phone_id) return res.status(400).json({ error: 'Enter the Phone number ID from Meta (WhatsApp Manager → Phone numbers)' });
+  const sort = (await q('SELECT COALESCE(MAX(sort),0)+1 n FROM wa_numbers')).rows[0].n, ks = Object.keys(o);
+  const r = (await q(`INSERT INTO wa_numbers(key,sort,${ks.join(',')}) VALUES('new-'||md5(random()::text),$1,${ks.map((k, i) => '$' + (i + 2)).join(',')}) RETURNING id`, [sort, ...ks.map(k => o[k])])).rows[0];
+  await q(`UPDATE wa_numbers SET key='n'||id WHERE id=$1`, [r.id]); await waCfg(true);
+  res.json({ ok: true, id: r.id, key: 'n' + r.id });
+}));
+app.patch('/api/wa/numbers/:id', superOnly, wrap(async (req, res) => {
+  const old = (await q('SELECT * FROM wa_numbers WHERE id=$1', [req.params.id])).rows[0]; if (!old) return res.status(404).json({ error: 'Not found' });
+  const o = await waNumBody(req.body || {}, old); if (o.error) return res.status(400).json(o);
+  const ks = Object.keys(o); if (ks.length) await q(`UPDATE wa_numbers SET ${ks.map((k, i) => `${k}=$${i + 2}`).join(', ')} WHERE id=$1`, [old.id, ...ks.map(k => o[k])]);
+  await waCfg(true); Object.keys(WA_TPL).forEach(k => delete WA_TPL[k]); res.json({ ok: true });
+}));
+app.delete('/api/wa/numbers/:id', superOnly, wrap(async (req, res) => {
+  const old = (await q('SELECT * FROM wa_numbers WHERE id=$1', [req.params.id])).rows[0]; if (!old) return res.status(404).json({ error: 'Not found' });
+  const n = (await q('SELECT COUNT(*)::int n FROM wa_threads WHERE line=$1', [old.key])).rows[0].n;
+  if (n) return res.status(400).json({ error: `This number has ${n} chat${n > 1 ? 's' : ''} — switch it off instead, so the history stays` });
+  await q('DELETE FROM wa_numbers WHERE id=$1', [old.id]); await waCfg(true); res.json({ ok: true });
+}));
+app.post('/api/wa/test', superOnly, wrap(async (req, res) => {   // check every number and account with Meta
+  const c = await waCfg(true), out = { wabas: [] };
+  for (const n of c.numbers) {
+    if (!n.phone_id) { out[n.key] = { ok: false, label: n.label, enabled: n.enabled, error: 'Phone number ID missing' }; continue; }
+    try { const r = await graph(`/${n.phone_id}?fields=display_phone_number,verified_name,quality_rating,code_verification_status,name_status`, { token: n.token }); out[n.key] = { ok: true, label: n.label, enabled: n.enabled, ...r }; }
+    catch (e) { out[n.key] = { ok: false, label: n.label, enabled: n.enabled, error: e.message }; }
   }
-  if (c.waba_id) {   // the WhatsApp account must be subscribed to this app, or Meta sends it no messages — fix it automatically
-    try { let r = await graph(`/${c.waba_id}/subscribed_apps`); let apps = (r.data || []).map(x => (x.whatsapp_business_api_data || x).name || x.id).filter(Boolean);
-      if (!(r.data || []).length) { await graph(`/${c.waba_id}/subscribed_apps`, { method: 'POST' }); r = await graph(`/${c.waba_id}/subscribed_apps`); apps = (r.data || []).map(x => (x.whatsapp_business_api_data || x).name || x.id).filter(Boolean); out.subscribed = { ok: (r.data || []).length > 0, fixed: true, apps }; }
-      else out.subscribed = { ok: true, apps }; }
-    catch (e) { out.subscribed = { ok: false, error: e.message }; } }
-  if (c.waba_id) { try { const r = await graph(`/${c.waba_id}/message_templates?fields=name,status&limit=200`); out.templates = { ok: true, approved: (r.data || []).filter(x => x.status === 'APPROVED').length, total: (r.data || []).length }; } catch (e) { out.templates = { ok: false, error: e.message }; } }
+  // every WhatsApp account must be subscribed to this app, or Meta sends it no messages — fixed automatically
+  const accts = []; const add = (waba, token, label) => { if (!waba) return; let a = accts.find(x => x.waba === waba); if (!a) accts.push(a = { waba, token, numbers: [] }); if (label) a.numbers.push(label); };
+  add(c.waba_id, c.token); c.numbers.forEach(n => add(n.waba_id, n.token, n.label));
+  for (const a of accts) {
+    const o = { waba: a.waba, numbers: a.numbers };
+    try { let r = await graph(`/${a.waba}/subscribed_apps`, { token: a.token }); let apps = (r.data || []).map(x => (x.whatsapp_business_api_data || x).name || x.id).filter(Boolean);
+      if (!(r.data || []).length) { await graph(`/${a.waba}/subscribed_apps`, { method: 'POST', token: a.token }); r = await graph(`/${a.waba}/subscribed_apps`, { token: a.token }); apps = (r.data || []).map(x => (x.whatsapp_business_api_data || x).name || x.id).filter(Boolean); o.subscribed = { ok: (r.data || []).length > 0, fixed: true, apps }; }
+      else o.subscribed = { ok: true, apps }; }
+    catch (e) { o.subscribed = { ok: false, error: e.message }; }
+    try { const r = await graph(`/${a.waba}/message_templates?fields=name,status&limit=200`, { token: a.token }); o.templates = { ok: true, approved: (r.data || []).filter(x => x.status === 'APPROVED').length, total: (r.data || []).length }; } catch (e) { o.templates = { ok: false, error: e.message }; }
+    out.wabas.push(o);
+  }
+  if (out.wabas[0]) { out.subscribed = out.wabas[0].subscribed; out.templates = out.wabas[0].templates; }
   res.json(out);
 }));
 
@@ -3311,6 +3476,319 @@ app.put('/api/settings/gst', superOnly, wrap(async (req, res) => {
   await q(`INSERT INTO settings(k,v) VALUES('gst_api_key',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [k]); GSTKEY = k; res.json({ ok: true, set: !!gstKey() });
 }));
 
+// ===================== ROLES & FEATURES (Super Admin) =====================
+async function initRoles() {
+  await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS job_role TEXT`);
+  const g = async k => { try { return JSON.parse(((await q(`SELECT v FROM settings WHERE k=$1`, [k])).rows[0] || {}).v || 'null'); } catch (e) { return null; } };
+  ROLE_DEF = (await g('role_defaults')) || {}; CUSTOM_ROLES = (await g('roles_custom')) || [];
+}
+const ROLE_BASES = ['Admin', 'Sales Admin', 'Sales', 'Technician', 'Staff'];
+app.get('/api/roles', superOnly, wrap(async (req, res) => {
+  const used = Object.fromEntries((await q(`SELECT job_role, COUNT(*)::int n FROM users WHERE job_role IS NOT NULL AND active GROUP BY 1`)).rows.map(r => [r.job_role, r.n]));
+  const byRole = Object.fromEntries((await q(`SELECT role, COUNT(*)::int n FROM users WHERE active GROUP BY 1`)).rows.map(r => [r.role, r.n]));
+  res.json({ perms: PERMS, bases: ROLE_BASES, keys: Object.fromEntries(ROLE_BASES.map(r => [r, roleKeys(r)])), builtin: ROLE_BASES.map(r => ({ role: r, perms: roleDefaults()[r] || [], factory: DEFAULTS[r], users: byRole[r] || 0, changed: Array.isArray(ROLE_DEF[r]) })),
+    custom: CUSTOM_ROLES.map(c => ({ ...c, users: used[c.name] || 0 })) });
+}));
+app.put('/api/roles', superOnly, wrap(async (req, res) => {
+  const b = req.body || {}, defs = {}, cust = [], seen = new Set();
+  for (const r of ROLE_BASES) if (b.defaults && Array.isArray(b.defaults[r])) defs[r] = [...new Set(b.defaults[r])].filter(k => roleKeys(r).includes(k));
+  for (const c of (Array.isArray(b.custom) ? b.custom : []).slice(0, 40)) {
+    const name = String(c.name || '').trim().slice(0, 40); if (!name) return res.status(400).json({ error: 'Every new role needs a name' });
+    if (ROLES.map(x => x.toLowerCase()).includes(name.toLowerCase()) || seen.has(name.toLowerCase())) return res.status(400).json({ error: `“${name}” is already a role` });
+    if (!ROLE_BASES.includes(c.base)) return res.status(400).json({ error: `Choose what “${name}” works like` });
+    seen.add(name.toLowerCase()); cust.push({ name, base: c.base, perms: [...new Set(Array.isArray(c.perms) ? c.perms : [])].filter(k => roleKeys(c.base).includes(k)), apply: undefined });
+  }
+  // a renamed / removed custom role: people keep their features, the label goes back to the base role
+  const gone = CUSTOM_ROLES.filter(o => !cust.some(n => n.name === o.name)).map(o => o.name);
+  if (gone.length) await q(`UPDATE users SET job_role=NULL WHERE job_role=ANY($1)`, [gone]);
+  for (const c of cust) await q(`UPDATE users SET role=$2 WHERE job_role=$1 AND role<>$2`, [c.name, c.base]).catch(() => {});
+  await q(`INSERT INTO settings(k,v) VALUES('role_defaults',$1) ON CONFLICT (k) DO UPDATE SET v=excluded.v`, [JSON.stringify(defs)]);
+  await q(`INSERT INTO settings(k,v) VALUES('roles_custom',$1) ON CONFLICT (k) DO UPDATE SET v=excluded.v`, [JSON.stringify(cust)]);
+  ROLE_DEF = defs; CUSTOM_ROLES = cust;
+  // optional: give the new features to everyone who already has that role
+  let updated = 0;
+  for (const a of (Array.isArray(b.apply) ? b.apply : [])) {
+    const c = cust.find(x => x.name === a), set = c ? c.perms : defs[a] || (ROLE_BASES.includes(a) ? DEFAULTS[a] : null); if (!set) continue;
+    const r = c ? await q(`UPDATE users SET permissions=$2 WHERE job_role=$1 AND role<>$3`, [a, set, SUPER]) : await q(`UPDATE users SET permissions=$2 WHERE role=$1 AND job_role IS NULL`, [a, set]); updated += r.rowCount;
+  }
+  res.json({ ok: true, updated });
+}));
+
+// ===================== FIELD VISITS: sales staff check in / out at sites, photos, customer, GPS route & km =====================
+const FV_PURPOSE = ['Sales visit', 'Product demo', 'Follow-up', 'Site survey', 'Payment collection', 'Service / support', 'Other'];
+const FV_OUTCOME = ['Interested', 'Quotation needed', 'Order confirmed', 'Follow-up later', 'Not interested', 'Payment collected', 'Other'];
+async function initFV() {
+  await q(`
+  CREATE TABLE IF NOT EXISTS fv_visits (id SERIAL PRIMARY KEY, user_id INT NOT NULL, user_name TEXT, brand_id INT, day DATE NOT NULL, customer_id INT, lead_id INT, is_new BOOLEAN DEFAULT false,
+    cust_name TEXT, cust_company TEXT, cust_phone TEXT, cust_address TEXT, purpose TEXT, notes TEXT, outcome TEXT, follow_up DATE,
+    in_at TIMESTAMPTZ DEFAULT now(), in_lat DOUBLE PRECISION, in_lng DOUBLE PRECISION, in_acc INT, out_at TIMESTAMPTZ, out_lat DOUBLE PRECISION, out_lng DOUBLE PRECISION, out_acc INT,
+    km_before NUMERIC(8,2), km_est BOOLEAN DEFAULT false, created_at TIMESTAMPTZ DEFAULT now());
+  CREATE INDEX IF NOT EXISTS idx_fvv_user ON fv_visits(user_id, day);
+  CREATE INDEX IF NOT EXISTS idx_fvv_cust ON fv_visits(customer_id);
+  CREATE TABLE IF NOT EXISTS fv_media (id SERIAL PRIMARY KEY, visit_id INT REFERENCES fv_visits(id) ON DELETE CASCADE, data BYTEA, mime TEXT, lat DOUBLE PRECISION, lng DOUBLE PRECISION, created_at TIMESTAMPTZ DEFAULT now());
+  CREATE TABLE IF NOT EXISTS fv_track (id BIGSERIAL PRIMARY KEY, user_id INT NOT NULL, day DATE NOT NULL, at TIMESTAMPTZ NOT NULL, lat DOUBLE PRECISION NOT NULL, lng DOUBLE PRECISION NOT NULL, acc INT, kind TEXT DEFAULT 'gps');
+  CREATE INDEX IF NOT EXISTS idx_fvt_user ON fv_track(user_id, day, at);
+  CREATE TABLE IF NOT EXISTS fv_legs (user_id INT NOT NULL, t_from TIMESTAMPTZ NOT NULL, t_to TIMESTAMPTZ NOT NULL, km NUMERIC(9,2), src TEXT, mins INT, created_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY(user_id, t_from, t_to));
+  CREATE TABLE IF NOT EXISTS fv_days (user_id INT NOT NULL, day DATE NOT NULL, started_at TIMESTAMPTZ, start_lat DOUBLE PRECISION, start_lng DOUBLE PRECISION, ended_at TIMESTAMPTZ, end_lat DOUBLE PRECISION, end_lng DOUBLE PRECISION, PRIMARY KEY(user_id, day));`);
+  await q(`ALTER TABLE fv_days ADD COLUMN IF NOT EXISTS rate NUMERIC(8,2)`);
+  if (!(await q(`SELECT 1 FROM settings WHERE k='fv_perm_v1'`)).rows.length) {   // sales people get field visits once
+    await q(`UPDATE users SET permissions = (SELECT ARRAY(SELECT DISTINCT unnest(permissions || ARRAY['field']))) WHERE role='Sales'`);
+    await q(`INSERT INTO settings(k,v) VALUES('fv_perm_v1','1') ON CONFLICT (k) DO NOTHING`);
+  }
+}
+const fvHav = (a, b) => { const R = 6371, r = x => x * Math.PI / 180, dl = r(b.lat - a.lat), dg = r(b.lng - a.lng); const h = Math.sin(dl / 2) ** 2 + Math.cos(r(a.lat)) * Math.cos(r(b.lat)) * Math.sin(dg / 2) ** 2; return 2 * R * Math.asin(Math.sqrt(h)); };
+// distance along GPS points: ignores poor fixes, small jitter and impossible jumps
+const fvKm = pts => {
+  let km = 0, a = null;
+  for (const p of pts) {
+    if (!p || p.lat == null) continue;
+    if ((p.acc || 0) > 150 && p.kind === 'gps') continue;
+    if (!a) { a = p; continue; }
+    const d = fvHav(a, p), hrs = Math.max(1 / 3600, (new Date(p.at) - new Date(a.at)) / 3600e3);
+    if (d * 1000 < Math.max(25, Math.min(p.acc || 0, 80))) continue;       // jitter
+    if (d / hrs > 150 && d > 0.5) continue;                                // a jump no vehicle makes
+    km += d; a = p;
+  }
+  return Math.round(km * 100) / 100;
+};
+const fvSees = (u, uid) => uid === u.id || isSuper(u) || can(u, 'field_team');
+const fvPoint = (b) => { const lat = +b.lat, lng = +b.lng; if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180 || (!lat && !lng)) return null; return { lat, lng, acc: Math.round(+b.acc || 0) || null }; };
+const fvDayPts = async (uid, day) => (await q(`SELECT at, lat, lng, acc, kind FROM fv_track WHERE user_id=$1 AND day=$2 ORDER BY at, id`, [uid, day])).rows;
+// km between two moments of the day: GPS trail if we have it, else straight line × 1.25 (marked as estimated)
+const fvLeg = (pts, from, to, a, b) => {
+  const seg = pts.filter(p => new Date(p.at) >= new Date(from) && new Date(p.at) <= new Date(to));
+  const trail = fvKm(seg), straight = a && b ? fvHav(a, b) : 0;
+  const gps = seg.filter(p => p.kind === 'gps').length;
+  if (gps >= 2 && trail >= straight * 0.8) return { km: trail, est: false };
+  return { km: Math.round(straight * 1.25 * 100) / 100, est: straight > 0.05 };
+};
+// ---- Google Maps road distance + ₹/km rate (Super Admin settings) ----
+const fvCfg = async () => { let c = {}; try { c = JSON.parse(((await q(`SELECT v FROM settings WHERE k='fv_cfg'`)).rows[0] || {}).v || '{}'); } catch (e) {}
+  c.key = c.key || process.env.GOOGLE_MAPS_API_KEY || ''; c.mode = c.mode === 'DRIVE' ? 'DRIVE' : 'TWO_WHEELER'; c.rate = Number(c.rate) || 0; c.rates = c.rates && typeof c.rates === 'object' ? c.rates : {}; return c; };
+const fvRate = (c, uid) => c.rates[uid] !== undefined && c.rates[uid] !== '' && c.rates[uid] !== null ? Number(c.rates[uid]) || 0 : c.rate;
+const GMAPS = () => (process.env.GMAPS_URL || 'https://routes.googleapis.com') + '/directions/v2:computeRoutes';
+// asks Google for the road distance along the path (start, GPS points as "via" points, end)
+const fvGoogle = async (cfg, path) => {
+  const pts = []; for (const p of path) { if (!p || p.lat == null) continue; const l = pts[pts.length - 1]; if (!l || fvHav(l, p) >= 0.2) pts.push(p); }
+  if (pts.length < 2) return { km: 0, mins: 0 };
+  const a = pts[0], b = pts[pts.length - 1], mid = pts.slice(1, -1), K = 23, via = mid.length <= K ? mid : Array.from({ length: K }, (_, i) => mid[Math.round((i + 1) * (mid.length + 1) / (K + 1)) - 1]).filter(Boolean);
+  const ll = p => ({ location: { latLng: { latitude: +p.lat, longitude: +p.lng } } });
+  const r = await fetch(GMAPS(), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': cfg.key, 'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration' },
+    body: JSON.stringify({ origin: ll(a), destination: ll(b), intermediates: via.map(p => ({ via: true, ...ll(p) })), travelMode: cfg.mode, units: 'METRIC' }), signal: AbortSignal.timeout(12000) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.routes || !j.routes[0]) throw new Error((j.error && j.error.message) || 'Google Maps did not return a route (' + r.status + ')');
+  return { km: Math.round((j.routes[0].distanceMeters || 0) / 10) / 100, mins: Math.round(parseInt(j.routes[0].duration || '0') / 60) };
+};
+// one leg of travel: cached Google road km when possible, else GPS trail / straight-line estimate
+const fvLegRoad = async (uid, cfg, pts, from, to, a, b, done) => {
+  const L = fvLeg(pts, from, to, a, b), fb = { km: L.km, est: L.est, src: L.est ? 'approx' : 'gps' };
+  if (!from || !to || !a || !b) return fb;
+  const c = (await q(`SELECT km, src, mins FROM fv_legs WHERE user_id=$1 AND t_from=$2 AND t_to=$3`, [uid, from, to])).rows[0];
+  if (c) return { km: Number(c.km), est: false, src: c.src, mins: c.mins };
+  if (!cfg.key || !done) return fb;
+  const seg = pts.filter(p => p.kind === 'gps' && (p.acc || 0) <= 100 && new Date(p.at) > new Date(from) && new Date(p.at) < new Date(to));
+  try { const g = await fvGoogle(cfg, [a, ...seg, b]);
+    await q(`INSERT INTO fv_legs(user_id,t_from,t_to,km,src,mins) VALUES($1,$2,$3,$4,'google',$5) ON CONFLICT DO NOTHING`, [uid, from, to, g.km, g.mins]);
+    return { km: g.km, est: false, src: 'google', mins: g.mins };
+  } catch (e) { console.error('fv google', e.message); return { ...fb, gerr: e.message }; }
+};
+const fvDay = async (uid, day) => {
+  const cfg = await fvCfg();
+  const visits = (await q(`SELECT v.*, to_char(v.day,'YYYY-MM-DD') AS day, (SELECT COALESCE(json_agg(json_build_object('id',m.id,'at',m.created_at) ORDER BY m.id),'[]') FROM fv_media m WHERE m.visit_id=v.id) photos
+    FROM fv_visits v WHERE v.user_id=$1 AND v.day=$2 ORDER BY v.in_at`, [uid, day])).rows;
+  const d = (await q(`SELECT * FROM fv_days WHERE user_id=$1 AND day=$2`, [uid, day])).rows[0] || null;
+  const pts = await fvDayPts(uid, day);
+  let prevT = d && d.started_at, prevP = d && d.start_lat != null ? { lat: d.start_lat, lng: d.start_lng } : null, total = 0, onSite = 0;
+  let gerr = null;
+  for (const v of visits) {
+    if (prevT) { const L = await fvLegRoad(uid, cfg, pts, prevT, v.in_at, prevP, { lat: v.in_lat, lng: v.in_lng }, true); v.km_before = L.km; v.km_est = L.est; v.km_src = L.src; v.drive_min = L.mins || null; if (L.gerr) gerr = L.gerr; total += L.km; } else { v.km_before = 0; v.km_est = false; v.km_src = null; }
+    if (v.out_at) { onSite += (new Date(v.out_at) - new Date(v.in_at)) / 60e3; prevT = v.out_at; prevP = { lat: v.out_lat ?? v.in_lat, lng: v.out_lng ?? v.in_lng }; }
+    else { onSite += (Date.now() - new Date(v.in_at)) / 60e3; prevT = null; }
+  }
+  let after = 0, afterSrc = null;   // travel after the last check-out (to the office / home)
+  const lastOut = visits.length && visits[visits.length - 1].out_at;
+  if (lastOut) { const ended = d && d.ended_at, endT = ended || new Date().toISOString(), endP = d && d.end_lat != null ? { lat: d.end_lat, lng: d.end_lng } : null;
+    const seg = pts.filter(p => new Date(p.at) >= new Date(lastOut) && new Date(p.at) <= new Date(endT));
+    if (endP || seg.length > 1) { const L = await fvLegRoad(uid, cfg, pts, lastOut, ended || null, prevP, endP || seg[seg.length - 1], !!(ended && endP)); after = ended ? L.km : fvLeg(pts, lastOut, endT, prevP, seg[seg.length - 1] || endP).km; afterSrc = ended ? L.src : 'gps'; if (L.gerr) gerr = L.gerr; }
+    total += after; }
+  const open = visits.find(v => !v.out_at) || null, km = Math.round(total * 100) / 100;
+  const rate = d && d.rate != null ? Number(d.rate) : fvRate(cfg, uid);
+  const srcs = visits.map(v => v.km_src).concat(afterSrc).filter(Boolean);
+  return { day, visits, open, started: d, km, km_after: after, km_after_src: afterSrc, on_site_min: Math.round(onSite), rate, amount: Math.round(km * rate * 100) / 100,
+    google: !!cfg.key, src: srcs.length && srcs.every(x => x === 'google') ? 'google' : srcs.some(x => x === 'google') ? 'mixed' : srcs.length ? 'gps' : null, gerr,
+    route: pts.filter(p => p.kind !== 'gps' || (p.acc || 0) <= 150).map(p => [p.lat, p.lng, p.kind]) };
+};
+const fvUid = (req) => { const want = +req.query.user || +((req.body || {}).user) || req.user.id; return fvSees(req.user, want) ? want : null; };
+app.get('/api/fv/settings', superOnly, wrap(async (req, res) => {
+  const c = await fvCfg(), env = !!process.env.GOOGLE_MAPS_API_KEY && !((await q(`SELECT v FROM settings WHERE k='fv_cfg'`)).rows[0] || {}).v?.includes('"key":"');
+  const staff = (await q(`SELECT id, name FROM users WHERE active AND (role='Sales' OR 'field'=ANY(permissions)) ORDER BY name`)).rows;
+  res.json({ has_key: !!c.key, key_tail: c.key ? '••••' + c.key.slice(-4) : '', from_env: env, mode: c.mode, rate: c.rate, rates: c.rates, staff });
+}));
+app.put('/api/fv/settings', superOnly, wrap(async (req, res) => {
+  const b = req.body || {}, c = await fvCfg(); let saved = {}; try { saved = JSON.parse(((await q(`SELECT v FROM settings WHERE k='fv_cfg'`)).rows[0] || {}).v || '{}'); } catch (e) {}
+  if (b.key !== undefined) { const k = String(b.key || '').trim(); if (k && !/^[\w-]{20,60}$/.test(k)) return res.status(400).json({ error: 'That does not look like a Google API key (starts with AIza…)' }); saved.key = k; }
+  if (b.mode !== undefined) saved.mode = b.mode === 'DRIVE' ? 'DRIVE' : 'TWO_WHEELER';
+  if (b.rate !== undefined) { const r = +b.rate; if (!(r >= 0 && r <= 1000)) return res.status(400).json({ error: 'Enter the rate per km (₹)' }); saved.rate = Math.round(r * 100) / 100; }
+  if (b.rates && typeof b.rates === 'object') { saved.rates = {}; for (const [k, v] of Object.entries(b.rates)) if (+k && v !== '' && v !== null && +v >= 0 && +v <= 1000) saved.rates[+k] = Math.round(+v * 100) / 100; }
+  await q(`INSERT INTO settings(k,v) VALUES('fv_cfg',$1) ON CONFLICT (k) DO UPDATE SET v=excluded.v`, [JSON.stringify(saved)]);
+  res.json({ ok: true });
+}));
+app.post('/api/fv/settings/test', superOnly, wrap(async (req, res) => {   // Trichy Thillai Nagar → Chatram bus stand by road
+  const c = await fvCfg(); if (!c.key) return res.status(400).json({ error: 'Add the Google Maps API key first' });
+  try { const g = await fvGoogle(c, [{ lat: 10.8226, lng: 78.6839 }, { lat: 10.8318, lng: 78.6935 }]); res.json({ ok: true, km: g.km, mins: g.mins }); }
+  catch (e) { res.status(400).json({ error: 'Google Maps: ' + e.message }); }
+}));
+app.post('/api/fv/recalc', superOnly, wrap(async (req, res) => {   // drop stored road km for a day so it is asked again (e.g. after adding the key)
+  const uid = +(req.body || {}).user, day = (req.body || {}).date; if (!uid || !/^\d{4}-\d{2}-\d{2}$/.test(day || '')) return res.status(400).json({ error: 'Choose the person and day' });
+  await q(`DELETE FROM fv_legs WHERE user_id=$1 AND (t_from AT TIME ZONE '${TZ}')::date=$2`, [uid, day]); res.json({ ok: true, ...(await fvDay(uid, day)) });
+}));
+app.get('/api/fv/meta', need('field', 'field_team'), wrap(async (req, res) => {
+  const staff = can(req.user, 'field_team') || isSuper(req.user) ? (await q(`SELECT id, name, role, brand_id FROM users WHERE active AND (role=$1 OR 'field'=ANY(permissions)) ORDER BY name`, [SUPER])).rows.filter(u => u.role !== SUPER || u.id === req.user.id) : [];
+  res.json({ purposes: FV_PURPOSE, outcomes: FV_OUTCOME, staff, today: (await todayIST()), me: req.user.id, team: can(req.user, 'field_team') || isSuper(req.user) });
+}));
+app.get('/api/fv/day', need('field', 'field_team'), wrap(async (req, res) => {
+  const uid = fvUid(req); if (!uid) return res.status(403).json({ error: 'Not allowed' });
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date) ? req.query.date : (await todayIST());
+  const u = (await q('SELECT id, name FROM users WHERE id=$1', [uid])).rows[0];
+  res.json({ user: u, ...(await fvDay(uid, day)) });
+}));
+app.post('/api/fv/start', need('field'), wrap(async (req, res) => {   // start the field day (from home / office)
+  const pt = fvPoint(req.body || {}); if (!pt) return res.status(400).json({ error: 'Location needed — turn on GPS' });
+  const day = (await todayIST());
+  await q(`INSERT INTO fv_days(user_id,day,started_at,start_lat,start_lng) VALUES($1,$2,now(),$3,$4) ON CONFLICT (user_id,day) DO UPDATE SET started_at=COALESCE(fv_days.started_at,now()), start_lat=COALESCE(fv_days.start_lat,$3), start_lng=COALESCE(fv_days.start_lng,$4), ended_at=NULL`, [req.user.id, day, pt.lat, pt.lng]);
+  await q(`INSERT INTO fv_track(user_id,day,at,lat,lng,acc,kind) VALUES($1,$2,now(),$3,$4,$5,'start')`, [req.user.id, day, pt.lat, pt.lng, pt.acc]);
+  res.json({ ok: true });
+}));
+app.post('/api/fv/end', need('field'), wrap(async (req, res) => {
+  const day = (await todayIST()), pt = fvPoint(req.body || {});
+  if ((await q(`SELECT 1 FROM fv_visits WHERE user_id=$1 AND out_at IS NULL`, [req.user.id])).rows.length) return res.status(400).json({ error: 'Check out of the current visit first' });
+  await q(`INSERT INTO fv_days(user_id,day,started_at,ended_at,end_lat,end_lng) VALUES($1,$2,now(),now(),$3,$4) ON CONFLICT (user_id,day) DO UPDATE SET ended_at=now(), end_lat=$3, end_lng=$4`, [req.user.id, day, pt ? pt.lat : null, pt ? pt.lng : null]);
+  await q(`UPDATE fv_days SET rate=$3 WHERE user_id=$1 AND day=$2`, [req.user.id, day, fvRate(await fvCfg(), req.user.id)]);   // the ₹/km on the day it ended stays for that day
+  if (pt) await q(`INSERT INTO fv_track(user_id,day,at,lat,lng,acc,kind) VALUES($1,$2,now(),$3,$4,$5,'end')`, [req.user.id, day, pt.lat, pt.lng, pt.acc]);
+  res.json({ ok: true });
+}));
+app.post('/api/fv/track', need('field'), wrap(async (req, res) => {   // GPS points sent by the phone while travelling
+  const day = (await todayIST()), d = (await q(`SELECT started_at, ended_at FROM fv_days WHERE user_id=$1 AND day=$2`, [req.user.id, day])).rows[0];
+  const onDuty = (d && d.started_at && !d.ended_at) || (await q(`SELECT 1 FROM fv_visits WHERE user_id=$1 AND day=$2 LIMIT 1`, [req.user.id, day])).rows.length;
+  if (!onDuty || (d && d.ended_at)) return res.json({ ok: true, saved: 0, off: true });
+  const last = (await q(`SELECT at FROM fv_track WHERE user_id=$1 AND day=$2 ORDER BY at DESC LIMIT 1`, [req.user.id, day])).rows[0];
+  let lastT = last ? new Date(last.at).getTime() : 0, n = 0;
+  const pts = (Array.isArray((req.body || {}).points) ? req.body.points : []).slice(0, 500).sort((a, b) => (+a.t || 0) - (+b.t || 0));
+  for (const x of pts) { const pt = fvPoint(x), t = +x.t || Date.now(); if (!pt || t < lastT + 20000 || t > Date.now() + 60000 || t < Date.now() - 18 * 3600e3) continue;
+    await q(`INSERT INTO fv_track(user_id,day,at,lat,lng,acc) VALUES($1,$2,to_timestamp($3/1000.0),$4,$5,$6)`, [req.user.id, day, t, pt.lat, pt.lng, pt.acc]); lastT = t; n++; }
+  res.json({ ok: true, saved: n });
+}));
+// customers for the check-in box: name / phone / company, with how many times we visited
+app.get('/api/fv/customers', need('field', 'field_team'), wrap(async (req, res) => {
+  const v = String(req.query.q || '').trim(); if (v.length < 2) return res.json([]);
+  const p = ['%' + v + '%'], dg = digits(v), sc = custScope(req.user, p); let ph = '';
+  if (dg.length >= 4) { p.push('%' + dg.slice(-10) + '%'); ph = ` OR regexp_replace(COALESCE(c.phone,''),'\\D','','g') LIKE $${p.length}`; }
+  const rows = (await q(`SELECT c.id, c.name, c.company, c.phone, c.address, c.city, (SELECT COUNT(*)::int FROM fv_visits f WHERE f.customer_id=c.id) visits, (SELECT to_char(MAX(f.day),'YYYY-MM-DD') FROM fv_visits f WHERE f.customer_id=c.id) last_visit
+    FROM customers c WHERE (c.name ILIKE $1 OR c.company ILIKE $1${ph}) AND ${sc} ORDER BY lower(c.name) LIMIT 12`, p)).rows;
+  res.json(rows);
+}));
+app.get('/api/fv/customer/:id', need('field', 'field_team'), wrap(async (req, res) => {   // old customer: details + earlier visits
+  const p = [+req.params.id], sc = custScope(req.user, p);
+  const c = (await q(`SELECT c.id, c.name, c.company, c.phone, c.address, c.city FROM customers c WHERE c.id=$1 AND ${sc}`, p)).rows[0];
+  if (!c) return res.status(404).json({ error: 'Customer not found' });
+  c.visits = (await q(`SELECT id, to_char(day,'YYYY-MM-DD') AS day, user_name, purpose, outcome, notes FROM fv_visits WHERE customer_id=$1 ORDER BY in_at DESC LIMIT 5`, [c.id])).rows;
+  c.services = (await q(`SELECT COUNT(*)::int n FROM services WHERE customer_id=$1`, [c.id])).rows[0].n;
+  res.json(c);
+}));
+const fvPhoto = async (visitId, b) => {
+  const m = /^data:(image\/[\w+.-]+);base64,(.+)$/.exec(String(b.photo || '')); if (!m) return 'Photo must be an image';
+  const buf = Buffer.from(m[2], 'base64'); if (buf.length > 3e6) return 'Photo is too big';
+  const pt = fvPoint(b) || {}; await q(`INSERT INTO fv_media(visit_id,data,mime,lat,lng) VALUES($1,$2,$3,$4,$5)`, [visitId, buf, m[1], pt.lat ?? null, pt.lng ?? null]); return null;
+};
+app.post('/api/fv/checkin', need('field'), wrap(async (req, res) => {
+  const b = req.body || {}, pt = fvPoint(b); if (!pt) return res.status(400).json({ error: 'Location needed — turn on GPS and allow location' });
+  if ((await q(`SELECT 1 FROM fv_visits WHERE user_id=$1 AND out_at IS NULL`, [req.user.id])).rows.length) return res.status(400).json({ error: 'You are still checked in at another place — check out there first' });
+  let c = null;
+  if (+b.customer_id) { const pp = [+b.customer_id], sc = custScope(req.user, pp); c = (await q(`SELECT c.* FROM customers c WHERE c.id=$1 AND ${sc}`, pp)).rows[0]; if (!c) return res.status(404).json({ error: 'Customer not found' }); }
+  const n = b.cust || {}, t = (k, l = 200) => String(n[k] || '').trim().slice(0, l) || null;
+  if (!c && !t('name') && !t('company')) return res.status(400).json({ error: 'Choose the customer or type the new customer’s name' });
+  if (!c && t('phone') && digits(t('phone')).length >= 7) {   // typed a phone that is already a customer → use that customer
+    const ex = (await q(`SELECT * FROM customers WHERE right(regexp_replace(COALESCE(phone,''),'\\D','','g'),10)=$1 LIMIT 1`, [digits(t('phone')).slice(-10)])).rows[0]; if (ex) c = ex; }
+  const day = (await todayIST());
+  await q(`INSERT INTO fv_days(user_id,day,started_at,start_lat,start_lng) VALUES($1,$2,NULL,NULL,NULL) ON CONFLICT DO NOTHING`, [req.user.id, day]);
+  await q(`UPDATE fv_days SET ended_at=NULL WHERE user_id=$1 AND day=$2`, [req.user.id, day]);
+  const r = (await q(`INSERT INTO fv_visits(user_id,user_name,brand_id,day,customer_id,is_new,cust_name,cust_company,cust_phone,cust_address,purpose,notes,in_lat,in_lng,in_acc)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+  [req.user.id, req.user.name, req.user.brand_id || (c && c.brand_id) || null, day, c ? c.id : null, !c, c ? c.name : t('name') || t('company'), c ? c.company : t('company'), c ? c.phone : t('phone', 30), c ? c.address : t('address', 500),
+    FV_PURPOSE.includes(b.purpose) ? b.purpose : 'Sales visit', String(b.notes || '').slice(0, 4000) || null, pt.lat, pt.lng, pt.acc])).rows[0];
+  await q(`INSERT INTO fv_track(user_id,day,at,lat,lng,acc,kind) VALUES($1,$2,now(),$3,$4,$5,'in')`, [req.user.id, day, pt.lat, pt.lng, pt.acc]);
+  if (b.photo) { const e = await fvPhoto(r.id, b); if (e) return res.status(400).json({ error: e }); }
+  res.json({ ok: true, id: r.id, old_customer: !!c, customer_id: c ? c.id : null });
+}));
+const fvOwn = async (req, res) => {
+  const v = (await q(`SELECT * FROM fv_visits WHERE id=$1`, [+req.params.id])).rows[0];
+  if (!v) { res.status(404).json({ error: 'Visit not found' }); return null; }
+  if (v.user_id !== req.user.id && !isSuper(req.user)) { res.status(403).json({ error: 'Not your visit' }); return null; }
+  return v;
+};
+app.post('/api/fv/:id/photo', need('field'), wrap(async (req, res) => {
+  const v = await fvOwn(req, res); if (!v) return;
+  if ((await q(`SELECT COUNT(*)::int n FROM fv_media WHERE visit_id=$1`, [v.id])).rows[0].n >= 20) return res.status(400).json({ error: 'Up to 20 photos per visit' });
+  const e = await fvPhoto(v.id, req.body || {}); if (e) return res.status(400).json({ error: e }); res.json({ ok: true });
+}));
+app.delete('/api/fv/photo/:pid', need('field'), wrap(async (req, res) => {
+  const m = (await q(`SELECT m.id, v.user_id, v.out_at FROM fv_media m JOIN fv_visits v ON v.id=m.visit_id WHERE m.id=$1`, [+req.params.pid])).rows[0];
+  if (!m || (m.user_id !== req.user.id && !isSuper(req.user))) return res.status(404).json({ error: 'Not found' });
+  await q('DELETE FROM fv_media WHERE id=$1', [m.id]); res.json({ ok: true });
+}));
+app.patch('/api/fv/:id', need('field'), wrap(async (req, res) => {   // notes / purpose / new-customer details while there (or the same day)
+  const v = await fvOwn(req, res); if (!v) return;
+  const b = req.body || {}, o = {};
+  if (b.notes !== undefined) o.notes = String(b.notes || '').slice(0, 4000) || null;
+  if (b.purpose !== undefined && FV_PURPOSE.includes(b.purpose)) o.purpose = b.purpose;
+  if (v.is_new) for (const [k, f] of [['name', 'cust_name'], ['company', 'cust_company'], ['phone', 'cust_phone'], ['address', 'cust_address']]) if (b[k] !== undefined) o[f] = String(b[k] || '').trim().slice(0, 500) || null;
+  const ks = Object.keys(o); if (ks.length) await q(`UPDATE fv_visits SET ${ks.map((k, i) => `${k}=$${i + 2}`).join(',')} WHERE id=$1`, [v.id, ...ks.map(k => o[k])]);
+  res.json({ ok: true });
+}));
+app.post('/api/fv/:id/checkout', need('field'), wrap(async (req, res) => {
+  const v = await fvOwn(req, res); if (!v) return; if (v.out_at) return res.status(400).json({ error: 'Already checked out' });
+  const b = req.body || {}, pt = fvPoint(b); if (!pt) return res.status(400).json({ error: 'Location needed — turn on GPS' });
+  const notes = String(b.notes ?? v.notes ?? '').trim(); if (!notes) return res.status(400).json({ error: 'Write what happened at this visit (description)' });
+  const outcome = FV_OUTCOME.includes(b.outcome) ? b.outcome : null; if (!outcome) return res.status(400).json({ error: 'Choose how the visit went' });
+  const fu = /^\d{4}-\d{2}-\d{2}$/.test(b.follow_up) ? b.follow_up : null;
+  let custId = v.customer_id, leadId = null;
+  if (v.is_new && !custId) {   // save the new customer (and a lead, if asked)
+    const n = { name: String(b.name ?? v.cust_name ?? '').trim() || v.cust_company || 'Customer', company: String(b.company ?? v.cust_company ?? '').trim() || null, phone: String(b.phone ?? v.cust_phone ?? '').trim() || null, address: String(b.address ?? v.cust_address ?? '').trim() || null };
+    const ex = n.phone && digits(n.phone).length >= 7 ? (await q(`SELECT id FROM customers WHERE right(regexp_replace(COALESCE(phone,''),'\\D','','g'),10)=$1 LIMIT 1`, [digits(n.phone).slice(-10)])).rows[0] : null;
+    custId = ex ? ex.id : (await q(`INSERT INTO customers(name,company,phone,address,brand_id) VALUES($1,$2,$3,$4,$5) RETURNING id`, [n.name, n.company, n.phone, n.address, v.brand_id || req.user.brand_id || await blDefBrand(req.user)])).rows[0].id;
+    await q(`UPDATE fv_visits SET cust_name=$2, cust_company=$3, cust_phone=$4, cust_address=$5 WHERE id=$1`, [v.id, n.name, n.company, n.phone, n.address]);
+    if (b.add_lead !== false) {
+      leadId = await insLead({ name: n.name, company: n.company, phone: n.phone, address: n.address, source: 'Field visit', notes, follow_up: fu, assigned_to: req.user.id, stage: 'New Enquiry' }, req.user.id, v.brand_id || req.user.brand_id || await blDefBrand(req.user));
+      await q(`UPDATE leads SET customer_id=$2, lat=$3, lng=$4, location_by=$5, location_on=now() WHERE id=$1`, [leadId, custId, v.in_lat, v.in_lng, req.user.name]);
+      await leadLog(leadId, req.user.name, `📍 Field visit (${v.purpose}) — ${outcome}: ${notes}`);
+    }
+  }
+  await q(`UPDATE fv_visits SET out_at=now(), out_lat=$2, out_lng=$3, out_acc=$4, notes=$5, outcome=$6, follow_up=$7, customer_id=$8, lead_id=COALESCE($9,lead_id) WHERE id=$1`, [v.id, pt.lat, pt.lng, pt.acc, notes.slice(0, 4000), outcome, fu, custId, leadId]);
+  await q(`INSERT INTO fv_track(user_id,day,at,lat,lng,acc,kind) VALUES($1,$2,now(),$3,$4,$5,'out')`, [v.user_id, v.day, pt.lat, pt.lng, pt.acc]);
+  const mins = Math.round((Date.now() - new Date(v.in_at)) / 60e3);
+  res.json({ ok: true, minutes: mins, customer_id: custId, lead_id: leadId });
+}));
+app.get('/api/fv/media/:pid', need('field', 'field_team'), wrap(async (req, res) => {
+  const m = (await q(`SELECT m.data, m.mime, v.user_id FROM fv_media m JOIN fv_visits v ON v.id=m.visit_id WHERE m.id=$1`, [+req.params.pid])).rows[0];
+  if (!m || !fvSees(req.user, m.user_id)) return res.status(404).end();
+  res.setHeader('Content-Type', m.mime || 'image/jpeg'); res.setHeader('Cache-Control', 'private, max-age=86400'); res.end(m.data);
+}));
+// the whole team for one day (or a date range per person)
+app.get('/api/fv/team', need('field_team'), wrap(async (req, res) => {
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date) ? req.query.date : (await todayIST());
+  const users = (await q(`SELECT DISTINCT u.id, u.name, u.photo_v FROM users u WHERE u.active AND (EXISTS (SELECT 1 FROM fv_visits v WHERE v.user_id=u.id AND v.day=$1) OR EXISTS (SELECT 1 FROM fv_days d WHERE d.user_id=u.id AND d.day=$1 AND d.started_at IS NOT NULL)) ORDER BY u.name`, [day])).rows;
+  const out = [];
+  for (const u of users) { const d = await fvDay(u.id, day); out.push({ id: u.id, name: u.name, photo_v: u.photo_v, visits: d.visits.length, km: d.km, rate: d.rate, amount: d.amount, src: d.src, on_site_min: d.on_site_min, first_in: d.visits[0] ? d.visits[0].in_at : null, last_out: d.visits.length ? d.visits[d.visits.length - 1].out_at : null, now: d.open ? 'At ' + (d.open.cust_company || d.open.cust_name) : d.started && d.started.ended_at ? 'Day ended' : 'Travelling', new_customers: d.visits.filter(v => v.is_new).length }); }
+  res.json({ day, staff: out, total_km: Math.round(out.reduce((t, x) => t + x.km, 0) * 100) / 100, total_visits: out.reduce((t, x) => t + x.visits, 0), total_amount: Math.round(out.reduce((t, x) => t + x.amount, 0) * 100) / 100 });
+}));
+app.get('/api/fv/report', need('field', 'field_team'), wrap(async (req, res) => {   // per day km & visits for one person over a range
+  const uid = fvUid(req); if (!uid) return res.status(403).json({ error: 'Not allowed' });
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : (await todayIST()), from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : to.slice(0, 8) + '01';
+  const days = (await q(`SELECT DISTINCT to_char(day,'YYYY-MM-DD') d FROM (SELECT day FROM fv_visits WHERE user_id=$1 AND day BETWEEN $2 AND $3 UNION SELECT day FROM fv_days WHERE user_id=$1 AND day BETWEEN $2 AND $3 AND started_at IS NOT NULL) t ORDER BY 1 DESC`, [uid, from, to])).rows.map(r => r.d);
+  const rows = []; for (const d of days.slice(0, 62)) { const x = await fvDay(uid, d); rows.push({ day: d, visits: x.visits.length, km: x.km, rate: x.rate, amount: x.amount, src: x.src, on_site_min: x.on_site_min, new_customers: x.visits.filter(v => v.is_new).length }); }
+  res.json({ from, to, rows, km: Math.round(rows.reduce((t, r) => t + r.km, 0) * 100) / 100, visits: rows.reduce((t, r) => t + r.visits, 0), amount: Math.round(rows.reduce((t, r) => t + r.amount, 0) * 100) / 100 });
+}));
+
 // ===================== BILLING (Swipe-style): quotations, invoices, proforma, challans, credit notes, purchases, stock, expenses =====================
 const ExcelJS = require('exceljs');
 const BL_STATES = [['01','Jammu and Kashmir'],['02','Himachal Pradesh'],['03','Punjab'],['04','Chandigarh'],['05','Uttarakhand'],['06','Haryana'],['07','Delhi'],['08','Rajasthan'],['09','Uttar Pradesh'],['10','Bihar'],['11','Sikkim'],['12','Arunachal Pradesh'],['13','Nagaland'],['14','Manipur'],['15','Mizoram'],['16','Tripura'],['17','Meghalaya'],['18','Assam'],['19','West Bengal'],['20','Jharkhand'],['21','Odisha'],['22','Chhattisgarh'],['23','Madhya Pradesh'],['24','Gujarat'],['26','Dadra and Nagar Haveli and Daman and Diu'],['27','Maharashtra'],['29','Karnataka'],['30','Goa'],['31','Lakshadweep'],['32','Kerala'],['33','Tamil Nadu'],['34','Puducherry'],['35','Andaman and Nicobar Islands'],['36','Telangana'],['37','Andhra Pradesh'],['38','Ladakh'],['97','Other Territory']];
@@ -3370,7 +3848,16 @@ async function initBL() {
   CREATE TABLE IF NOT EXISTS bl_stock (id SERIAL PRIMARY KEY, product_id INT REFERENCES bl_products(id) ON DELETE CASCADE, qty NUMERIC(14,3) NOT NULL, kind TEXT, doc_id INT, note TEXT, by_name TEXT, created_at TIMESTAMPTZ DEFAULT now());
   CREATE INDEX IF NOT EXISTS idx_bls_prod ON bl_stock(product_id, id DESC);
   CREATE TABLE IF NOT EXISTS bl_expenses (id SERIAL PRIMARY KEY, brand_id INT, category TEXT, amount NUMERIC(14,2) NOT NULL, tax NUMERIC(14,2) DEFAULT 0, exp_date DATE DEFAULT CURRENT_DATE,
-    mode TEXT, paid_to TEXT, note TEXT, by_name TEXT, created_at TIMESTAMPTZ DEFAULT now());`);
+    mode TEXT, paid_to TEXT, note TEXT, by_name TEXT, created_at TIMESTAMPTZ DEFAULT now());
+  ALTER TABLE bl_brand ADD COLUMN IF NOT EXISTS banks JSONB DEFAULT '[]';
+  ALTER TABLE bl_brand ADD COLUMN IF NOT EXISTS seal BYTEA;
+  ALTER TABLE bl_brand ADD COLUMN IF NOT EXISTS seal_mime TEXT;
+  ALTER TABLE bl_brand ADD COLUMN IF NOT EXISTS sign BYTEA;
+  ALTER TABLE bl_brand ADD COLUMN IF NOT EXISTS sign_mime TEXT;
+  ALTER TABLE bl_products ADD COLUMN IF NOT EXISTS purchase_incl BOOLEAN DEFAULT false;
+  ALTER TABLE bl_docs ADD COLUMN IF NOT EXISTS bill_kind TEXT DEFAULT 'regular';
+  ALTER TABLE bl_docs ADD COLUMN IF NOT EXISTS bank JSONB;
+  ALTER TABLE bl_docs ADD COLUMN IF NOT EXISTS show_seal BOOLEAN DEFAULT true;`);
   if (!(await q(`SELECT 1 FROM settings WHERE k='bl_perm_v1'`)).rows.length) {   // whoever had billing also gets purchases once
     await q(`UPDATE users SET permissions = (SELECT ARRAY(SELECT DISTINCT unnest(permissions || ARRAY['purchases']))) WHERE 'billing'=ANY(permissions)`);
     await q(`INSERT INTO settings(k,v) VALUES('bl_perm_v1','1') ON CONFLICT (k) DO NOTHING`);
@@ -3381,18 +3868,24 @@ async function initBL() {
 const blBrand = async id => {
   const b = (await q(`SELECT br.id, br.name, p.legal_name, p.gstin, p.state, p.address, p.phone, p.email, p.website, p.bank_name, p.bank_account, p.bank_ifsc, p.bank_branch, p.upi, p.terms, p.notes,
     COALESCE(p.color,'#1f6f5c') color, COALESCE(p.template,'modern') template, COALESCE(p.default_tax,18) default_tax, COALESCE(p.round_off,true) round_off, COALESCE(p.prefixes,'{}') prefixes, COALESCE(p.next_no,'{}') next_no,
-    p.logo IS NOT NULL has_logo, p.sign_name, extract(epoch from p.updated_at)::bigint v FROM brands br LEFT JOIN bl_brand p ON p.brand_id=br.id WHERE br.id=$1`, [id])).rows[0];
-  if (b) { b.default_tax = Number(b.default_tax); b.prefix = t => (b.prefixes || {})[t] ?? BL_TYPES[t].p; }
+    p.logo IS NOT NULL has_logo, p.seal IS NOT NULL has_seal, p.sign IS NOT NULL has_sign, COALESCE(p.banks,'[]') banks, p.sign_name, extract(epoch from p.updated_at)::bigint v FROM brands br LEFT JOIN bl_brand p ON p.brand_id=br.id WHERE br.id=$1`, [id])).rows[0];
+  if (b) { b.default_tax = Number(b.default_tax); b.prefix = t => (b.prefixes || {})[t] ?? BL_TYPES[t].p;
+    if (!Array.isArray(b.banks)) b.banks = [];
+    if (!b.banks.length && (b.bank_account || b.upi)) b.banks = [{ bank_name: b.bank_name, bank_account: b.bank_account, bank_ifsc: b.bank_ifsc, bank_branch: b.bank_branch, upi: b.upi }]; }
   return b;
 };
+const blBankIn = list => (Array.isArray(list) ? list : []).slice(0, 10).map(x => {
+  const t = k => String((x || {})[k] ?? '').trim().slice(0, 120) || undefined;
+  return { label: t('label'), holder: t('holder'), bank_name: t('bank_name'), bank_account: t('bank_account'), bank_ifsc: (t('bank_ifsc') || '').toUpperCase() || undefined, bank_branch: t('bank_branch'), upi: t('upi') };
+}).filter(x => x.bank_account || x.upi);
 const blUserBrand = (u, want) => u.brand_id && !isSuper(u) ? u.brand_id : (+want || null);
 const blDefBrand = async u => u.brand_id || ((await q('SELECT id FROM brands ORDER BY id LIMIT 1')).rows[0] || {}).id;
 
 app.get('/api/bl/meta', need('billing', 'purchases'), wrap(async (req, res) => {
   const brands = [];
   for (const r of (await q(`SELECT id FROM brands ${req.user.brand_id && !isSuper(req.user) ? 'WHERE id=' + (+req.user.brand_id) : ''} ORDER BY id`)).rows) { const b = await blBrand(r.id); delete b.prefix; b.prefixes = Object.fromEntries(Object.keys(BL_TYPES).map(t => [t, (b.prefixes || {})[t] ?? BL_TYPES[t].p])); brands.push(b); }
-  const cats = (await q(`SELECT DISTINCT category FROM bl_products WHERE category IS NOT NULL AND category<>'' ORDER BY 1`)).rows.map(r => r.category);
-  res.json({ states: BL_STATES.map(s => s[1]), types: Object.fromEntries(Object.entries(BL_TYPES).map(([k, v]) => [k, v.l])), modes: BL_MODES, units: BL_UNITS, taxes: BL_TAXES, exp_cats: BL_EXP_CATS, categories: cats, brands, banks: BANKS, my_brand: req.user.brand_id || null });
+  const cats = await blCats();
+  res.json({ states: BL_STATES.map(s => s[1]), types: Object.fromEntries(Object.entries(BL_TYPES).map(([k, v]) => [k, v.l])), modes: BL_MODES, units: BL_UNITS, taxes: BL_TAXES, exp_cats: await blExpCats(), categories: cats, brands, banks: BANKS, my_brand: req.user.brand_id || null });
 }));
 app.put('/api/bl/brand/:id', superOnly, wrap(async (req, res) => {
   const id = +req.params.id, b = req.body || {};
@@ -3408,6 +3901,19 @@ app.put('/api/bl/brand/:id', superOnly, wrap(async (req, res) => {
     color=$16, template=$17, default_tax=$18, round_off=$19, prefixes=$20, next_no=$21, sign_name=$22, updated_at=now() WHERE brand_id=$1`,
   [id, txt('legal_name'), gst || null, st, txt('address'), txt('phone'), txt('email'), txt('website'), txt('bank_name'), txt('bank_account'), (txt('bank_ifsc') || '').toUpperCase() || null, txt('bank_branch'), txt('upi'), txt('terms'), txt('notes'),
     /^#[0-9a-f]{6}$/i.test(b.color) ? b.color : '#1f6f5c', ['modern', 'classic', 'thermal'].includes(b.template) ? b.template : 'modern', BL_TAXES.includes(+b.default_tax) ? +b.default_tax : 18, b.round_off !== false, pre, nxt, txt('sign_name')]);
+  if (Array.isArray(b.banks)) {   // several bank accounts; the first is the default and is also kept in the old single-bank columns
+    const bk = blBankIn(b.banks);
+    const f = bk[0] || {};
+    await q(`UPDATE bl_brand SET banks=$2, bank_name=$3, bank_account=$4, bank_ifsc=$5, bank_branch=$6, upi=$7 WHERE brand_id=$1`, [id, JSON.stringify(bk), f.bank_name || null, f.bank_account || null, f.bank_ifsc || null, f.bank_branch || null, f.upi || null]);
+  }
+  for (const k of ['seal', 'sign']) {   // round seal and signature images
+    if (b[k] === null) await q(`UPDATE bl_brand SET ${k}=NULL, ${k}_mime=NULL WHERE brand_id=$1`, [id]);
+    else if (typeof b[k] === 'string' && b[k].startsWith('data:image/')) {
+      const m = /^data:(image\/[\w+.-]+);base64,(.+)$/.exec(b[k]); if (!m) return res.status(400).json({ error: 'Seal / signature must be an image' });
+      const buf = Buffer.from(m[2], 'base64'); if (buf.length > 1.5e6) return res.status(400).json({ error: 'Image is too big — use one under 1.5 MB' });
+      await q(`UPDATE bl_brand SET ${k}=$2, ${k}_mime=$3 WHERE brand_id=$1`, [id, buf, m[1]]);
+    }
+  }
   if (b.logo === null) await q(`UPDATE bl_brand SET logo=NULL, logo_mime=NULL WHERE brand_id=$1`, [id]);
   else if (typeof b.logo === 'string' && b.logo.startsWith('data:image/')) {
     const m = /^data:(image\/[\w+.-]+);base64,(.+)$/.exec(b.logo); if (!m) return res.status(400).json({ error: 'Logo must be an image' });
@@ -3422,6 +3928,36 @@ const blLogo = async (req, res) => {
   res.setHeader('Content-Type', r.logo_mime || 'image/png'); res.setHeader('Cache-Control', 'public, max-age=86400'); res.end(r.logo);
 };
 app.get('/bl-logo/:id', wrap(blLogo));   // public: shown on shared invoices
+for (const k of ['seal', 'sign']) app.get(`/bl-${k}/:id`, wrap(async (req, res) => {   // public: seal & signature on shared bills
+  const r = (await q(`SELECT ${k} img, ${k}_mime mime FROM bl_brand WHERE brand_id=$1`, [+req.params.id])).rows[0];
+  if (!r || !r.img) return res.status(404).end();
+  res.setHeader('Content-Type', r.mime || 'image/png'); res.setHeader('Cache-Control', 'public, max-age=86400'); res.end(r.img);
+}));
+// categories: saved list + the ones used on products
+const blCats = async () => {
+  const s = (await q(`SELECT v FROM settings WHERE k='bl_cats'`)).rows[0]; let saved = []; try { saved = JSON.parse(s ? s.v : '[]'); } catch (e) {}
+  const used = (await q(`SELECT DISTINCT category FROM bl_products WHERE category IS NOT NULL AND category<>''`)).rows.map(r => r.category);
+  return [...new Set([...(Array.isArray(saved) ? saved : []), ...used])].sort((a, b) => a.localeCompare(b));
+};
+// expense heads: the standard list + ones added by staff + any used before
+const blExpCats = async () => { let saved = []; try { saved = JSON.parse(((await q(`SELECT v FROM settings WHERE k='bl_exp_cats'`)).rows[0] || {}).v || '[]'); } catch (e) {}
+  const used = (await q(`SELECT DISTINCT category FROM bl_expenses WHERE category IS NOT NULL AND category<>''`)).rows.map(r => r.category);
+  const extra = [...new Set([...(Array.isArray(saved) ? saved : []), ...used])].filter(c => !BL_EXP_CATS.includes(c)).sort((a, b) => a.localeCompare(b));
+  const base = BL_EXP_CATS.filter(c => c !== 'Other'); return [...base, ...extra, 'Other']; };
+app.post('/api/bl/exp-categories', need('purchases'), wrap(async (req, res) => {
+  const name = String((req.body || {}).name || '').trim().slice(0, 60); if (!name) return res.status(400).json({ error: 'Enter the category name' });
+  const all = await blExpCats(), ex = all.find(c => c.toLowerCase() === name.toLowerCase());
+  if (!ex) { let saved = []; try { saved = JSON.parse(((await q(`SELECT v FROM settings WHERE k='bl_exp_cats'`)).rows[0] || {}).v || '[]'); } catch (e) {}
+    saved.push(name); await q(`INSERT INTO settings(k,v) VALUES('bl_exp_cats',$1) ON CONFLICT (k) DO UPDATE SET v=excluded.v`, [JSON.stringify(saved)]); }
+  res.json({ ok: true, name: ex || name, categories: await blExpCats() });
+}));
+app.post('/api/bl/categories', need('billing', 'purchases'), wrap(async (req, res) => {
+  const name = String((req.body || {}).name || '').trim().slice(0, 60); if (!name) return res.status(400).json({ error: 'Enter the category name' });
+  const all = await blCats(); const ex = all.find(c => c.toLowerCase() === name.toLowerCase());
+  if (!ex) { const s = (await q(`SELECT v FROM settings WHERE k='bl_cats'`)).rows[0]; let saved = []; try { saved = JSON.parse(s ? s.v : '[]'); } catch (e) {}
+    saved.push(name); await q(`INSERT INTO settings(k,v) VALUES('bl_cats',$1) ON CONFLICT (k) DO UPDATE SET v=excluded.v`, [JSON.stringify(saved)]); }
+  res.json({ ok: true, name: ex || name, categories: await blCats() });
+}));
 
 // ---------- products ----------
 const blProdIn = (b, old = {}) => {
@@ -3434,6 +3970,7 @@ const blProdIn = (b, old = {}) => {
   if (b.low_stock !== undefined) o.low_stock = Math.max(0, +b.low_stock || 0);
   if (b.tax !== undefined) o.tax = Math.max(0, Math.min(40, +b.tax || 0));
   if (b.price_incl !== undefined) o.price_incl = !!b.price_incl;
+  if (b.purchase_incl !== undefined) o.purchase_incl = !!b.purchase_incl;
   if (b.active !== undefined) o.active = !!b.active;
   return o;
 };
@@ -3451,7 +3988,7 @@ app.get('/api/bl/products', need('billing', 'purchases'), wrap(async (req, res) 
   const lim = Math.min(2000, +req.query.limit || 500);
   const rows = (await q(`SELECT p.*, (SELECT COALESCE(SUM(-s.qty),0) FROM bl_stock s WHERE s.product_id=p.id AND s.kind='Sale' AND s.created_at>now()-interval '30 days') sold30
     FROM bl_products p WHERE ${w.join(' AND ')} ORDER BY p.active DESC, lower(p.name) LIMIT ${lim}`, p)).rows;
-  const tot = (await q(`SELECT COUNT(*)::int n, COUNT(*) FILTER (WHERE kind='product' AND stock<=low_stock AND active)::int low, COALESCE(SUM(CASE WHEN kind='product' AND stock>0 THEN stock*purchase_price END),0) value FROM bl_products WHERE active`)).rows[0];
+  const tot = (await q(`SELECT COUNT(*)::int n, COUNT(*) FILTER (WHERE kind='product' AND stock<=low_stock AND active)::int low, COALESCE(SUM(CASE WHEN kind='product' AND stock>0 THEN stock*(CASE WHEN purchase_incl THEN purchase_price/(1+tax/100) ELSE purchase_price END) END),0) value FROM bl_products WHERE active`)).rows[0];
   res.json({ items: rows, totals: tot });
 }));
 app.post('/api/bl/products', blNeed, wrap(async (req, res) => {
@@ -3483,6 +4020,41 @@ app.post('/api/bl/products/:id/stock', blNeed, wrap(async (req, res) => {    // 
   if (!qty) return res.status(400).json({ error: 'Enter the quantity' });
   await blStockMove(p.id, qty, b.mode === 'set' ? 'Adjust' : qty > 0 ? 'In' : 'Out', null, String(b.note || '').slice(0, 200), req.user.name);
   res.json({ ok: true, stock: Number(p.stock) + qty });
+}));
+
+// ---------- inventory (Swipe-style): stock list with values, bulk stock in / out, timeline ----------
+app.get('/api/bl/inventory', need('billing', 'purchases'), wrap(async (req, res) => {
+  const Q = req.query, p = ['%' + String(Q.q || '').trim() + '%'], w = [`p.active`, `p.kind='product'`, `(p.name ILIKE $1 OR p.sku ILIKE $1 OR p.hsn ILIKE $1)`];
+  if (Q.category) { p.push(Q.category); w.push(`p.category=$${p.length}`); }
+  const ws0 = w.join(' AND '), p0 = p.slice();
+  if (Q.status === 'low') w.push(`p.stock<=p.low_stock`); else if (Q.status === 'in') w.push(`p.stock>p.low_stock`); else if (Q.status === 'out') w.push(`p.stock<=0`);
+  const lim = Math.min(500, +Q.limit || 50), off = Math.max(0, +Q.offset || 0);
+  const sort = { qty: 'p.stock', '-qty': 'p.stock DESC', name: 'lower(p.name)', updated: 'last DESC NULLS LAST' }[Q.sort] || 'last DESC NULLS LAST';
+  const items = (await q(`SELECT p.id, p.name, p.sku, p.unit, p.category, p.stock, p.low_stock, p.price, p.price_incl, p.purchase_price, p.purchase_incl, p.tax,
+    GREATEST(p.updated_at, (SELECT MAX(s.created_at) FROM bl_stock s WHERE s.product_id=p.id)) last
+    FROM bl_products p WHERE ${w.join(' AND ')} ORDER BY ${sort}, lower(p.name) LIMIT ${lim} OFFSET ${off}`, p)).rows;
+  const n = (await q(`SELECT COUNT(*)::int n FROM bl_products p WHERE ${w.join(' AND ')}`, p)).rows[0].n;
+  const t = (await q(`SELECT COUNT(*) FILTER (WHERE stock<=low_stock)::int low_n, COALESCE(SUM(stock) FILTER (WHERE stock<=low_stock),0) low_q,
+    COUNT(*) FILTER (WHERE stock>0)::int pos_n, COALESCE(SUM(stock) FILTER (WHERE stock>0),0) pos_q,
+    COALESCE(SUM(CASE WHEN stock>0 THEN stock*(CASE WHEN price_incl THEN price/(1+tax/100) ELSE price END) END),0) val_sale,
+    COALESCE(SUM(CASE WHEN stock>0 THEN stock*(CASE WHEN purchase_incl THEN purchase_price/(1+tax/100) ELSE purchase_price END) END),0) val_buy
+    FROM bl_products p WHERE ${ws0}`, p0)).rows[0];
+  res.json({ items, n, offset: off, limit: lim, totals: { low_n: t.low_n, low_q: Number(t.low_q), pos_n: t.pos_n, pos_q: Number(t.pos_q), val_sale: br2(t.val_sale), val_buy: br2(t.val_buy) } });
+}));
+app.post('/api/bl/stock/bulk', blNeed, wrap(async (req, res) => {   // many items in / out at once
+  const b = req.body || {}, out = b.mode === 'out', rows = (Array.isArray(b.rows) ? b.rows : []).slice(0, 300).filter(r => +r.pid && +r.qty > 0);
+  if (!rows.length) return res.status(400).json({ error: 'Add at least one item with a quantity' });
+  const note = String(b.note || '').slice(0, 200) || (out ? 'Bulk stock out' : 'Bulk stock in');
+  let done = 0; for (const r of rows) { const pr = (await q(`SELECT kind FROM bl_products WHERE id=$1`, [+r.pid])).rows[0]; if (!pr || pr.kind === 'service') continue;
+    await blStockMove(+r.pid, (out ? -1 : 1) * Math.abs(+r.qty), out ? 'Out' : 'In', null, note, req.user.name); done++; }
+  res.json({ ok: true, done });
+}));
+app.get('/api/bl/stock-log', need('billing', 'purchases'), wrap(async (req, res) => {   // timeline of every stock move
+  const p = [], w = ['true'];
+  if (req.query.q) { p.push('%' + req.query.q + '%'); w.push(`p.name ILIKE $${p.length}`); }
+  if (req.query.kind) { p.push(req.query.kind); w.push(`s.kind=$${p.length}`); }
+  res.json((await q(`SELECT s.id, s.qty, s.kind, s.note, s.by_name, s.created_at, p.name, p.unit, d.no doc_no, d.type doc_type, d.id doc_id FROM bl_stock s JOIN bl_products p ON p.id=s.product_id LEFT JOIN bl_docs d ON d.id=s.doc_id
+    WHERE ${w.join(' AND ')} ORDER BY s.id DESC LIMIT ${Math.min(500, +req.query.limit || 100)}`, p)).rows);
 }));
 
 // ---------- customers (billing fields) & vendors ----------
@@ -3518,11 +4090,12 @@ app.patch('/api/bl/customers/:id', need('billing', 'customer_edit'), wrap(async 
 }));
 // customers with billing balances (receivable)
 app.get('/api/bl/customers', need('billing'), wrap(async (req, res) => {
-  const p = ['%' + String(req.query.q || '').trim() + '%'], sc = custScope(req.user, p);
+  const p = ['%' + String(req.query.q || '').trim() + '%'];
+  let sc = custScope(req.user, p); if (+req.query.brand) { p.push(+req.query.brand); sc += ` AND c.brand_id=$${p.length}`; }
   const rows = (await q(`SELECT c.id, c.name, c.company, c.phone, c.email, c.gstin, c.state, c.city, c.address, c.pincode, c.ship_address, c.ship_name, c.ship_phone, c.ship_city, c.ship_pincode, c.ship_state, COALESCE(c.opening_bal,0) opening_bal, c.brand_id, b.name brand,
-    COALESCE((SELECT SUM(d.total-d.paid-d.credited) FROM bl_docs d WHERE d.customer_id=c.id AND d.type='invoice' AND d.status<>'Cancelled'),0) inv_due,
-    COALESCE((SELECT SUM(d.total) FROM bl_docs d WHERE d.customer_id=c.id AND d.type='invoice' AND d.status<>'Cancelled'),0) sales,
-    COALESCE((SELECT SUM(d.total) FROM bl_docs d WHERE d.customer_id=c.id AND d.type='credit_note' AND d.against_id IS NULL AND d.status<>'Cancelled'),0) free_credit,
+    COALESCE((SELECT SUM(d.total-d.paid-d.credited) FROM bl_docs d WHERE d.customer_id=c.id AND d.type='invoice' AND d.status NOT IN ('Cancelled','Draft')),0) inv_due,
+    COALESCE((SELECT SUM(d.total) FROM bl_docs d WHERE d.customer_id=c.id AND d.type='invoice' AND d.status NOT IN ('Cancelled','Draft')),0) sales,
+    COALESCE((SELECT SUM(d.total) FROM bl_docs d WHERE d.customer_id=c.id AND d.type='credit_note' AND d.against_id IS NULL AND d.status NOT IN ('Cancelled','Draft')),0) free_credit,
     (SELECT MAX(d.doc_date) FROM bl_docs d WHERE d.customer_id=c.id) last_doc
     FROM customers c LEFT JOIN brands b ON b.id=c.brand_id WHERE (c.name ILIKE $1 OR c.phone ILIKE $1 OR c.company ILIKE $1 OR c.gstin ILIKE $1) AND ${sc}
     ORDER BY ${req.query.sort === 'due' ? 'inv_due DESC,' : ''} lower(c.name) LIMIT ${Math.min(2000, +req.query.limit || 300)}`, p)).rows;
@@ -3530,8 +4103,8 @@ app.get('/api/bl/customers', need('billing'), wrap(async (req, res) => {
   res.json(req.query.due === '1' ? rows.filter(r => r.balance > 0.5) : rows);
 }));
 app.get('/api/bl/vendors', blBuy, wrap(async (req, res) => {
-  const rows = (await q(`SELECT v.*, COALESCE((SELECT SUM(d.total-d.paid) FROM bl_docs d WHERE d.vendor_id=v.id AND d.type='purchase' AND d.status<>'Cancelled'),0)+COALESCE(v.opening_bal,0) balance,
-    COALESCE((SELECT SUM(d.total) FROM bl_docs d WHERE d.vendor_id=v.id AND d.type='purchase' AND d.status<>'Cancelled'),0) purchases
+  const rows = (await q(`SELECT v.*, COALESCE((SELECT SUM(d.total-d.paid) FROM bl_docs d WHERE d.vendor_id=v.id AND d.type='purchase' AND d.status NOT IN ('Cancelled','Draft')),0)+COALESCE(v.opening_bal,0) balance,
+    COALESCE((SELECT SUM(d.total) FROM bl_docs d WHERE d.vendor_id=v.id AND d.type='purchase' AND d.status NOT IN ('Cancelled','Draft')),0) purchases
     FROM bl_vendors v WHERE v.name ILIKE $1 OR v.phone ILIKE $1 OR v.company ILIKE $1 OR v.gstin ILIKE $1 ORDER BY lower(v.name) LIMIT 1000`, ['%' + String(req.query.q || '').trim() + '%'])).rows;
   res.json(rows);
 }));
@@ -3560,7 +4133,7 @@ app.get('/api/bl/ledger/:kind/:id', need('billing', 'purchases'), wrap(async (re
   if (vend) party = (await q('SELECT * FROM bl_vendors WHERE id=$1', [id])).rows[0];
   else { const p = [id], sc = custScope(req.user, p); party = (await q(`SELECT c.* FROM customers c WHERE c.id=$1 AND ${sc}`, p)).rows[0]; }
   if (!party) return res.status(404).json({ error: 'Not found' });
-  const docs = (await q(`SELECT id, type, no, to_char(doc_date,'YYYY-MM-DD') d, total, paid, credited, status, against_id FROM bl_docs WHERE ${vend ? 'vendor_id' : 'customer_id'}=$1 AND type=ANY($2) AND status<>'Cancelled' ORDER BY doc_date, id`, [id, vend ? ['purchase'] : ['invoice', 'credit_note']])).rows;
+  const docs = (await q(`SELECT id, type, no, to_char(doc_date,'YYYY-MM-DD') d, total, paid, credited, status, against_id FROM bl_docs WHERE ${vend ? 'vendor_id' : 'customer_id'}=$1 AND type=ANY($2) AND status NOT IN ('Cancelled','Draft') ORDER BY doc_date, id`, [id, vend ? ['purchase'] : ['invoice', 'credit_note']])).rows;
   const pays = docs.length ? (await q(`SELECT p.*, to_char(p.pay_date,'YYYY-MM-DD') d, d.no FROM bl_payments p JOIN bl_docs d ON d.id=p.doc_id WHERE p.doc_id=ANY($1) ORDER BY p.pay_date, p.id`, [docs.map(d => d.id)])).rows : [];
   const ev = [];
   docs.forEach(d => ev.push({ d: d.d, doc_id: d.id, what: (BL_TYPES[d.type] || {}).l + ' ' + d.no, debit: d.type === 'credit_note' ? 0 : Number(d.total), credit: d.type === 'credit_note' ? Number(d.total) : 0 }));
@@ -3572,20 +4145,24 @@ app.get('/api/bl/ledger/:kind/:id', need('billing', 'purchases'), wrap(async (re
 }));
 
 // ---------- documents ----------
-const blCalc = (items, inter, extraDisc, charges, roundOn) => {
+const blCalc = (items, inter, extraDisc, charges, roundOn, supply) => {
   const lines = (Array.isArray(items) ? items : []).slice(0, 200).map(i => {
-    const qty = Math.max(0, +i.qty || 0), rate = Math.max(0, +i.rate || 0), dp = Math.max(0, Math.min(100, +i.disc || 0)), tax = Math.max(0, Math.min(40, +i.tax || 0)), incl = !!i.incl;
-    const gross = qty * rate, disc = gross * dp / 100, net = gross - disc, taxable = incl ? net / (1 + tax / 100) : net, tx = taxable * tax / 100;
+    const qty = Math.max(0, +i.qty || 0), rate = Math.max(0, +i.rate || 0), dp = Math.max(0, Math.min(100, +i.disc || 0)), tax = supply ? 0 : Math.max(0, Math.min(40, +i.tax || 0)), incl = !supply && !!i.incl;
+    const amtD = i.dtype === 'amt', gross = qty * rate, disc = amtD ? Math.min(gross, Math.max(0, +i.dval || 0)) : gross * dp / 100, net = gross - disc, taxable = incl ? net / (1 + tax / 100) : net, tx = taxable * tax / 100;
     return { pid: +i.pid || null, name: String(i.name || '').trim().slice(0, 300), desc: String(i.desc || '').trim().slice(0, 1000) || undefined, hsn: String(i.hsn || '').trim().slice(0, 12) || undefined,
-      unit: String(i.unit || '').slice(0, 20) || undefined, qty, rate: br2(rate), disc: dp || undefined, tax, incl: incl || undefined, taxable: br2(taxable), tax_amt: br2(tx), amount: br2(taxable + tx), disc_amt: br2(disc) || undefined };
+      unit: String(i.unit || '').slice(0, 20) || undefined, cat: String(i.cat || '').trim().slice(0, 60) || undefined, qty, rate: br2(rate), disc: amtD ? (gross ? br2(disc / gross * 100) : 0) || undefined : dp || undefined, dtype: amtD && disc ? 'amt' : undefined, dval: amtD && disc ? br2(disc) : undefined, tax, incl: incl || undefined, taxable: br2(taxable), tax_amt: br2(tx), amount: br2(taxable + tx), disc_amt: br2(disc) || undefined };
   }).filter(l => l.name && l.qty > 0);
   const sub = br2(lines.reduce((t, l) => t + l.taxable, 0)), taxT = br2(lines.reduce((t, l) => t + l.tax_amt, 0)), ld = br2(lines.reduce((t, l) => t + (l.disc_amt || 0), 0));
   const ed = br2(Math.max(0, +extraDisc || 0)), ch = br2(Math.max(0, +charges || 0)), raw = sub + taxT + ch - ed, tot = roundOn ? Math.round(raw) : br2(raw);
   const half = br2(taxT / 2);
   return { lines, sub, line_disc: ld, tax_total: taxT, cgst: inter ? 0 : half, sgst: inter ? 0 : br2(taxT - half), igst: inter ? taxT : 0, charges: ch, extra_disc: ed, round_off: br2(tot - raw), total: br2(Math.max(0, tot)) };
 };
+// status tabs on the lists (old exact statuses like 'Paid' still work too)
+const BL_GROUPS = { open: `d.status IN ('Open','Unpaid')`, closed: `d.status IN ('Paid','Converted','Accepted','Issued')`, partial: `d.status='Partial'`, due: `d.status IN ('Unpaid','Partial')`,
+  overdue: `d.status IN ('Unpaid','Partial') AND d.due_date<CURRENT_DATE`, lost: `d.status='Declined'`, cancelled: `d.status='Cancelled'`, draft: `d.status='Draft'` };
 const blStatus = d => {
   if (d.status === 'Cancelled') return 'Cancelled';
+  if (d.status === 'Draft') return 'Draft';
   if (d.type === 'invoice' || d.type === 'purchase') { const due = br2(d.total - d.paid - (d.credited || 0)); return d.total > 0 && due <= 0.009 ? 'Paid' : (d.paid > 0 || d.credited > 0) ? 'Partial' : 'Unpaid'; }
   if (d.type === 'credit_note') return 'Issued';
   return ['Converted', 'Accepted', 'Declined'].includes(d.status) ? d.status : 'Open';
@@ -3607,7 +4184,7 @@ const blNextNo = async (brandId, type) => {
 };
 // stock effect of a document: invoice & challan take stock out (an invoice made from a challan doesn't take it twice), credit note & purchase bring it in
 const blStockSign = async d => {
-  if (d.status === 'Cancelled') return 0;
+  if (d.status === 'Cancelled' || d.status === 'Draft') return 0;
   if (d.type === 'invoice') { if (d.ref_id) { const r = (await q('SELECT type FROM bl_docs WHERE id=$1', [d.ref_id])).rows[0]; if (r && r.type === 'challan') return 0; } return -1; }
   return { challan: -1, credit_note: 1, purchase: 1 }[d.type] || 0;
 };
@@ -3646,6 +4223,17 @@ const blParty = async (u, type, b) => {      // resolves / creates the customer 
   const pick = (k) => o[k] !== undefined && o[k] !== null ? o[k] : c[k];
   return { customer_id: c.id, party: { name: o.name || c.name, company: pick('company'), phone: pick('phone'), email: pick('email'), gstin: pick('gstin'), state: pick('state'), address: pick('address'), city: pick('city'), pincode: pick('pincode'), ship_address: pick('ship_address') , ship_name: pick('ship_name'), ship_phone: pick('ship_phone'), ship_city: pick('ship_city'), ship_pincode: pick('ship_pincode'), ship_state: pick('ship_state') } };
 };
+const BL_KINDABLE = ['invoice', 'quotation', 'proforma', 'challan', 'purchase', 'credit_note'];   // Regular (GST) or Bill of Supply (no GST)
+const BL_DRAFTABLE = ['invoice', 'quotation', 'proforma', 'challan', 'purchase', 'credit_note'];
+// bank shown on a bill: index into the brand's accounts, 'none' to hide, or keep what the bill had
+const blDocBank = (brand, want, old) => {
+  const list = brand.banks || [];
+  if (want === 'none' || want === -1) return { none: true };
+  if (want && typeof want === 'object') return want.none ? { none: true } : blBankIn([want])[0] || { none: true };
+  if (want !== undefined && want !== null && want !== '' && list[+want]) return list[+want];
+  if (old && old.bank) return old.bank;
+  return list[0] || null;
+};
 const blSave = async (req, res, old) => {
   const b = req.body || {}, type = old ? old.type : b.type;
   if (!BL_TYPES[type]) return res.status(400).json({ error: 'Unknown document type' });
@@ -3654,38 +4242,54 @@ const blSave = async (req, res, old) => {
   const brandId = old ? old.brand_id : (blUserBrand(req.user, b.brand_id) || await blDefBrand(req.user));
   const brand = await blBrand(brandId); if (!brand) return res.status(400).json({ error: 'Choose the brand' });
   b.brand_id = brandId;
-  const pr = await blParty(req.user, type, b); if (pr.error) return res.status(400).json({ error: pr.error });
+  const draft = BL_DRAFTABLE.includes(type) && !!b.draft && (!old || old.status === 'Draft');
+  let pr = await blParty(req.user, type, b); if (pr.error) { if (!draft) return res.status(400).json({ error: pr.error }); pr = { party: {} }; }   // a draft may be saved before the customer is chosen
   const pos = blState(b.pos) || (pr.party.ship_address && pr.party.ship_state) || pr.party.state || brand.state || null;   // goods: place of supply = where they are delivered
   const inter = !!(brand.state && pos && pos !== brand.state);
   const pids = [...new Set((Array.isArray(b.items) ? b.items : []).map(i => +i.pid).filter(Boolean))];   // fill HSN / unit from the product when missing
   if (pids.length) { const pm = Object.fromEntries((await q('SELECT id, hsn, unit FROM bl_products WHERE id=ANY($1)', [pids])).rows.map(r => [r.id, r]));
     b.items = b.items.map(i => { const p = pm[+i.pid]; return p ? { ...i, hsn: i.hsn || p.hsn, unit: i.unit || p.unit } : i; }); }
-  const c = blCalc(b.items, inter, b.extra_disc, b.charges, b.round_off !== undefined ? !!b.round_off : brand.round_off);
-  if (!c.lines.length) return res.status(400).json({ error: 'Add at least one item with a quantity' });
+  const kind = BL_KINDABLE.includes(type) && b.bill_kind === 'supply' ? 'supply' : 'regular';
+  const c = blCalc(b.items, inter, b.extra_disc, b.charges, b.round_off !== undefined ? !!b.round_off : brand.round_off, kind === 'supply');
+  if (!c.lines.length && !draft) return res.status(400).json({ error: 'Add at least one item with a quantity' });
   if (old && (type === 'invoice' || type === 'purchase') && c.total + 0.009 < old.paid + old.credited) return res.status(400).json({ error: `₹${old.paid + old.credited} is already received / credited — the total can’t be less than that` });
   const dd = /^\d{4}-\d{2}-\d{2}$/.test(b.doc_date) ? b.doc_date : null, due = /^\d{4}-\d{2}-\d{2}$/.test(b.due_date) ? b.due_date : null;
   let against = null;
-  if (type === 'credit_note' && b.against_id) { const a = (await q(`SELECT * FROM bl_docs WHERE id=$1 AND type='invoice' AND status<>'Cancelled'`, [+b.against_id])).rows[0];
+  if (type === 'credit_note' && b.against_id) { const a = (await q(`SELECT * FROM bl_docs WHERE id=$1 AND type='invoice' AND status NOT IN ('Cancelled','Draft')`, [+b.against_id])).rows[0];
     if (a) { const room = br2(Number(a.total) - Number(a.paid) - Number(a.credited) + (old && old.against_id === a.id ? old.total : 0)); if (c.total > room + 0.009) return res.status(400).json({ error: `This credit note (₹${c.total}) is more than what’s still due on ${a.no} (₹${room}). Record a refund for the rest.` }); against = a.id; } }
   const vals = { brand_id: brandId, customer_id: pr.customer_id || null, vendor_id: pr.vendor_id || null, party: JSON.stringify(pr.party), pos, inter, items: JSON.stringify(c.lines),
     sub: c.sub, line_disc: c.line_disc, tax_total: c.tax_total, cgst: c.cgst, sgst: c.sgst, igst: c.igst, charges: c.charges, charges_label: String(b.charges_label || '').slice(0, 60) || null,
     extra_disc: c.extra_disc, round_off: c.round_off, total: c.total, notes: String(b.notes ?? '').slice(0, 4000) || null, terms: String(b.terms ?? '').slice(0, 4000) || null,
-    ref_no: String(b.ref_no || '').slice(0, 60) || null, template: ['modern', 'classic', 'thermal'].includes(b.template) ? b.template : null, due_date: due };
+    ref_no: String(b.ref_no || '').slice(0, 60) || null, template: ['modern', 'classic', 'thermal'].includes(b.template) ? b.template : null, due_date: due,
+    bill_kind: kind, show_seal: b.show_seal !== false, bank: JSON.stringify(blDocBank(brand, b.bank, old)) };
   if (dd) vals.doc_date = dd;
+  const draftAgainst = draft ? against : null; if (draft) against = null;   // a draft credits nothing until it is saved for real
+  const pickNo = async () => {   // number for a new document or a draft being finalised
+    let nn = await blNextNo(brandId, type);
+    if (b.no && String(b.no).trim() && String(b.no).trim() !== 'Draft') { const want = String(b.no).trim().slice(0, 40); if ((await q('SELECT 1 FROM bl_docs WHERE brand_id IS NOT DISTINCT FROM $1 AND type=$2 AND no=$3 AND id<>$4', [brandId, type, want, old ? old.id : 0])).rows.length) return { error: `${want} is already used` }; nn = { no: want, seq: +(/(\d+)\s*$/.exec(want) || [])[1] || nn.seq }; }
+    return nn;
+  };
+  const afterMade = async (no, v) => {
+    if (v.ref_id) await q(`UPDATE bl_docs SET status='Converted', updated_at=now() WHERE id=$1 AND type IN ('quotation','proforma','challan')`, [v.ref_id]);
+    if (v.lead_id) await q('INSERT INTO lead_activity(lead_id,by_name,text) VALUES($1,$2,$3)', [v.lead_id, req.user.name, `🧾 ${BL_TYPES[type].l} ${no} made · ₹${c.total}`]).catch(() => {});
+    if (v.service_id) await log(v.service_id, req.user.name, `🧾 ${BL_TYPES[type].l} ${no} made · ₹${c.total}`);
+  };
+  const openSt = type === 'quotation' || type === 'proforma' || type === 'challan' ? 'Open' : null;
   let id;
   if (old) {
-    if (old.against_id) await q('UPDATE bl_docs SET credited=GREATEST(0,credited-$2) WHERE id=$1', [old.against_id, old.total]);
-    const ks = Object.keys(vals); await q(`UPDATE bl_docs SET ${ks.map((k, i) => `${k}=$${i + 2}`).join(',')}, against_id=$${ks.length + 2}, updated_at=now() WHERE id=$1`, [old.id, ...ks.map(k => vals[k]), against]);
+    if (old.against_id && old.status !== 'Draft') await q('UPDATE bl_docs SET credited=GREATEST(0,credited-$2) WHERE id=$1', [old.against_id, old.total]);
+    const finalise = old.status === 'Draft' && !draft;
+    if (finalise) { const nn = await pickNo(); if (nn.error) return res.status(409).json({ error: nn.error }); Object.assign(vals, { no: nn.no, seq: nn.seq, status: openSt }); }
+    else if (draft) vals.status = 'Draft';
+    const ks = Object.keys(vals); await q(`UPDATE bl_docs SET ${ks.map((k, i) => `${k}=$${i + 2}`).join(',')}, against_id=$${ks.length + 2}, updated_at=now() WHERE id=$1`, [old.id, ...ks.map(k => vals[k]), draft ? draftAgainst : against]);
     id = old.id;
+    if (finalise) await afterMade(vals.no, { ref_id: old.ref_id, lead_id: old.lead_id, service_id: old.service_id });
   } else {
-    let nn = await blNextNo(brandId, type);
-    if (b.no && String(b.no).trim()) { const want = String(b.no).trim().slice(0, 40); if ((await q('SELECT 1 FROM bl_docs WHERE brand_id IS NOT DISTINCT FROM $1 AND type=$2 AND no=$3', [brandId, type, want])).rows.length) return res.status(409).json({ error: `${want} is already used` }); nn = { no: want, seq: +(/(\d+)\s*$/.exec(want) || [])[1] || nn.seq }; }
-    Object.assign(vals, { type, no: nn.no, seq: nn.seq, against_id: against, ref_id: +b.ref_id || null, lead_id: +b.lead_id || null, service_id: +b.service_id || null, status: type === 'quotation' || type === 'proforma' || type === 'challan' ? 'Open' : null,
+    const nn = draft ? { no: 'Draft', seq: null } : await pickNo(); if (nn.error) return res.status(409).json({ error: nn.error });
+    Object.assign(vals, { type, no: nn.no, seq: nn.seq, against_id: draft ? draftAgainst : against, ref_id: +b.ref_id || null, lead_id: +b.lead_id || null, service_id: +b.service_id || null, status: draft ? 'Draft' : openSt,
       created_by: req.user.id, created_by_name: req.user.name, share_token: crypto.randomBytes(12).toString('base64url') });
     const ks = Object.keys(vals); id = (await q(`INSERT INTO bl_docs(${ks.join(',')}) VALUES(${ks.map((_, i) => '$' + (i + 1)).join(',')}) RETURNING id`, ks.map(k => vals[k]))).rows[0].id;
-    if (vals.ref_id) await q(`UPDATE bl_docs SET status='Converted', updated_at=now() WHERE id=$1 AND type IN ('quotation','proforma','challan')`, [vals.ref_id]);
-    if (vals.lead_id) await q('INSERT INTO lead_activity(lead_id,by_name,text) VALUES($1,$2,$3)', [vals.lead_id, req.user.name, `🧾 ${BL_TYPES[type].l} ${nn.no} made · ₹${c.total}`]).catch(() => {});
-    if (vals.service_id) await log(vals.service_id, req.user.name, `🧾 ${BL_TYPES[type].l} ${nn.no} made · ₹${c.total}`);
+    if (!draft) await afterMade(nn.no, vals);
   }
   if (against) await q('UPDATE bl_docs SET credited=credited+$2 WHERE id=$1', [against, c.total]);
   const d = await blLoad(req, res, id); if (!d) return;
@@ -3706,15 +4310,18 @@ app.get('/api/bl/docs', need('billing', 'purchases'), wrap(async (req, res) => {
   if (Q.lead_id) add('d.lead_id=?', +Q.lead_id);
   if (Q.service_id) add('d.service_id=?', +Q.service_id);
   if (Q.from) add('d.doc_date>=?', Q.from); if (Q.to) add('d.doc_date<=?', Q.to);
-  if (Q.status) { if (Q.status === 'due') w.push(`d.status IN ('Unpaid','Partial')`); else if (Q.status === 'overdue') w.push(`d.status IN ('Unpaid','Partial') AND d.due_date<CURRENT_DATE`); else add('d.status=?', Q.status); }
   if (Q.q) { p.push('%' + Q.q + '%'); const n = '$' + p.length; w.push(`(d.no ILIKE ${n} OR d.party->>'name' ILIKE ${n} OR d.party->>'company' ILIKE ${n} OR d.party->>'phone' ILIKE ${n} OR d.ref_no ILIKE ${n})`); }
+  const wsAll = w.join(' AND '), pAll = p.slice();   // everything except the status tab → used for the tab counts
+  if (Q.status) { const g = BL_GROUPS[Q.status]; if (g) w.push(g); else add('d.status=?', Q.status); }
   const ws = w.join(' AND ');
+  const lim = Math.min(1000, +Q.limit || 300), off = Math.max(0, +Q.offset || 0);
   const items = (await q(`SELECT d.id, d.type, d.no, to_char(d.doc_date,'YYYY-MM-DD') doc_date, to_char(d.due_date,'YYYY-MM-DD') due_date, d.party->>'name' party, d.party->>'company' company, d.party->>'phone' phone,
-    d.total, d.paid, d.credited, d.status, d.brand_id, b.name brand, d.customer_id, d.vendor_id, d.lead_id, d.service_id, d.ref_no, d.share_token, d.created_by_name, jsonb_array_length(d.items) lines
-    FROM bl_docs d LEFT JOIN brands b ON b.id=d.brand_id WHERE ${ws} ORDER BY d.doc_date DESC, d.id DESC LIMIT ${Math.min(1000, +Q.limit || 300)}`, p)).rows;
-  const t = (await q(`SELECT COUNT(*)::int n, COALESCE(SUM(total) FILTER (WHERE status<>'Cancelled'),0) total, COALESCE(SUM(paid) FILTER (WHERE status<>'Cancelled'),0) paid,
-    COALESCE(SUM(total-paid-credited) FILTER (WHERE status IN ('Unpaid','Partial')),0) due FROM bl_docs d WHERE ${ws}`, p)).rows[0];
-  res.json({ items, totals: t });
+    d.total, d.paid, d.credited, d.status, d.brand_id, b.name brand, d.customer_id, d.vendor_id, d.lead_id, d.service_id, d.ref_no, d.share_token, d.created_by_name, d.created_at, d.bill_kind, jsonb_array_length(d.items) lines
+    FROM bl_docs d LEFT JOIN brands b ON b.id=d.brand_id WHERE ${ws} ORDER BY d.doc_date DESC, d.id DESC LIMIT ${lim} OFFSET ${off}`, p)).rows;
+  const t = (await q(`SELECT COUNT(*)::int n, COALESCE(SUM(total) FILTER (WHERE status NOT IN ('Cancelled','Draft')),0) total, COALESCE(SUM(paid) FILTER (WHERE status NOT IN ('Cancelled','Draft')),0) paid,
+    COALESCE(SUM(total-paid-credited) FILTER (WHERE status IN ('Unpaid','Partial')),0) due, COALESCE(SUM(total) FILTER (WHERE ${BL_GROUPS.closed.replace(/d\./g, '')}),0) closed FROM bl_docs d WHERE ${ws}`, p)).rows[0];
+  const cr = (await q(`SELECT COUNT(*)::int "all", ${Object.entries(BL_GROUPS).map(([k, v]) => `COUNT(*) FILTER (WHERE ${v})::int "${k}"`).join(', ')} FROM bl_docs d WHERE ${wsAll}`, pAll)).rows[0];
+  res.json({ items, totals: t, counts: cr, offset: off, limit: lim });
 }));
 app.get('/api/bl/docs/:id', need('billing', 'purchases'), wrap(async (req, res) => {
   const d = await blLoad(req, res, +req.params.id); if (!d) return;
@@ -3726,10 +4333,12 @@ app.get('/api/bl/docs/:id', need('billing', 'purchases'), wrap(async (req, res) 
 app.post('/api/bl/docs/:id/convert', need('billing'), wrap(async (req, res) => {   // quotation / proforma / challan → invoice (or quotation → proforma / challan)
   const d = await blLoad(req, res, +req.params.id); if (!d) return;
   const to = (req.body || {}).to;
-  const ok = { quotation: ['invoice', 'proforma', 'challan'], proforma: ['invoice'], challan: ['invoice'] }[d.type] || [];
+  const ok = { quotation: ['invoice', 'proforma', 'challan'], proforma: ['invoice', 'challan'], challan: ['invoice'] }[d.type] || [];
   if (!ok.includes(to)) return res.status(400).json({ error: 'This can’t be converted to that' });
   if (d.status === 'Cancelled') return res.status(400).json({ error: 'This document is cancelled' });
-  req.body = { type: to, brand_id: d.brand_id, customer_id: d.customer_id, party: d.party, pos: d.pos, items: d.items, extra_disc: d.extra_disc, charges: d.charges, charges_label: d.charges_label, notes: d.notes, terms: d.terms, ref_id: d.id, lead_id: d.lead_id, service_id: d.service_id, template: d.template };
+  if (d.status === 'Draft') return res.status(400).json({ error: 'Save this draft first' });
+  req.body = { type: to, brand_id: d.brand_id, customer_id: d.customer_id, party: d.party, pos: d.pos, items: d.items, extra_disc: d.extra_disc, charges: d.charges, charges_label: d.charges_label, notes: d.notes, terms: d.terms, ref_id: d.id, lead_id: d.lead_id, service_id: d.service_id, template: d.template,
+    bill_kind: d.bill_kind, show_seal: d.show_seal, bank: d.bank || undefined };
   await blSave(req, res, null);
 }));
 app.post('/api/bl/docs/:id/status', need('billing', 'purchases'), wrap(async (req, res) => {   // quotation accepted / declined / reopened, or cancel any document
@@ -3738,20 +4347,26 @@ app.post('/api/bl/docs/:id/status', need('billing', 'purchases'), wrap(async (re
   if (st === 'Cancelled') {
     if (d.status === 'Cancelled') return res.json({ ok: true });
     if (d.paid > 0) return res.status(400).json({ error: 'Delete the payments on this first' });
-    if ((await q(`SELECT 1 FROM bl_docs WHERE against_id=$1 AND status<>'Cancelled'`, [d.id])).rows.length) return res.status(400).json({ error: 'Cancel the credit notes made against this first' });
+    if ((await q(`SELECT 1 FROM bl_docs WHERE against_id=$1 AND status NOT IN ('Cancelled','Draft')`, [d.id])).rows.length) return res.status(400).json({ error: 'Cancel the credit notes made against this first' });
     await q(`UPDATE bl_docs SET status='Cancelled', updated_at=now() WHERE id=$1`, [d.id]);
     if (d.against_id) { await q('UPDATE bl_docs SET credited=GREATEST(0,credited-$2) WHERE id=$1', [d.against_id, d.total]); const a = await blLoad(req, res, d.against_id); if (a) await q('UPDATE bl_docs SET status=$2 WHERE id=$1', [a.id, blStatus(a)]); }
     if (d.ref_id) await q(`UPDATE bl_docs SET status='Open' WHERE id=$1 AND status='Converted' AND NOT EXISTS (SELECT 1 FROM bl_docs x WHERE x.ref_id=$1 AND x.status<>'Cancelled')`, [d.ref_id]);
     d.status = 'Cancelled'; await blApplyStock(d, req.user.name);
     return res.json({ ok: true });
   }
-  if (!['quotation', 'proforma', 'challan'].includes(d.type) || !['Open', 'Accepted', 'Declined'].includes(st)) return res.status(400).json({ error: 'Not possible' });
+  if (d.status === 'Draft' || !['quotation', 'proforma', 'challan'].includes(d.type) || !['Open', 'Accepted', 'Declined'].includes(st)) return res.status(400).json({ error: 'Not possible' });
   await q('UPDATE bl_docs SET status=$2, updated_at=now() WHERE id=$1', [d.id, st]); res.json({ ok: true });
+}));
+app.delete('/api/bl/docs/:id', need('billing', 'purchases'), wrap(async (req, res) => {   // only drafts can be deleted
+  const d = await blLoad(req, res, +req.params.id); if (!d) return;
+  if (d.status !== 'Draft') return res.status(400).json({ error: 'Only drafts can be deleted — cancel it instead' });
+  await q('DELETE FROM bl_docs WHERE id=$1', [d.id]); res.json({ ok: true });
 }));
 app.post('/api/bl/docs/:id/payments', need('billing', 'purchases'), wrap(async (req, res) => {
   const d = await blLoad(req, res, +req.params.id); if (!d) return;
   if (!['invoice', 'purchase'].includes(d.type)) return res.status(400).json({ error: 'Payments are recorded on invoices and purchases' });
   if (d.status === 'Cancelled') return res.status(400).json({ error: 'This document is cancelled' });
+  if (d.status === 'Draft') return res.status(400).json({ error: 'Save this draft first' });
   const b = req.body || {}, amt = br2(+b.amount || 0), due = br2(d.total - d.paid - d.credited);
   if (amt <= 0) return res.status(400).json({ error: 'Enter the amount' });
   if (amt > due + 0.009) return res.status(400).json({ error: `Only ₹${due} is due on this` });
@@ -3795,13 +4410,16 @@ const binr = v => Number(v || 0).toLocaleString('en-IN', { minimumFractionDigits
 const bdIN = s => s ? new Date(s + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
 const blHTML = (d, b, opts = {}) => {
   const tpl = opts.template || d.template || b.template || 'modern', col = b.color || '#1f6f5c', P = d.party || {}, vend = d.type === 'purchase';
-  const title = d.type === 'invoice' && !Number(d.tax_total) && !b.gstin ? 'Invoice' : BL_TYPES[d.type].l;
-  const hasDisc = (d.items || []).some(l => l.disc), hasHsn = (d.items || []).some(l => l.hsn);
+  const supply = d.bill_kind === 'supply';
+  const title = d.type === 'invoice' ? (supply ? 'Bill of Supply' : !Number(d.tax_total) && !b.gstin ? 'Invoice' : BL_TYPES[d.type].l) : BL_TYPES[d.type].l;
+  const hasDisc = (d.items || []).some(l => l.disc), hasHsn = (d.items || []).some(l => l.hsn), hasCat = (d.items || []).some(l => l.cat);
+  const nCols = 5 + (hasHsn ? 1 : 0) + (hasDisc ? 1 : 0) + (supply ? 0 : 2);
+  let prevCat = null; const catRow = l => { if (!hasCat || (l.cat || '') === prevCat) return ''; prevCat = l.cat || ''; return l.cat ? `<tr class="cat"><td colspan="${thermal ? 3 : nCols}">${bhe(l.cat)}</td></tr>` : ''; };
   const rateRows = {}; (d.items || []).forEach(l => { const k = l.tax; rateRows[k] = rateRows[k] || { taxable: 0, tax: 0 }; rateRows[k].taxable += l.taxable; rateRows[k].tax += l.tax_amt; });
   const thermal = tpl === 'thermal';
-  const rows = (d.items || []).map((l, i) => thermal
-    ? `<tr><td colspan="3"><b>${bhe(l.name)}</b></td></tr><tr class="sm"><td>${l.qty} ${bhe(l.unit || '')} × ${binr(l.rate)}${l.disc ? ` −${l.disc}%` : ''}</td><td>${l.tax}%</td><td class="r">${binr(l.amount)}</td></tr>`
-    : `<tr><td class="c">${i + 1}</td><td><b>${bhe(l.name)}</b>${l.desc ? `<div class="ds">${bhe(l.desc).replace(/\n/g, '<br>')}</div>` : ''}</td>${hasHsn ? `<td class="c">${bhe(l.hsn || '')}</td>` : ''}<td class="r">${l.qty} ${bhe(l.unit || '')}</td><td class="r">${binr(l.rate)}${l.incl ? '<div class="ds">incl. tax</div>' : ''}</td>${hasDisc ? `<td class="r">${l.disc ? l.disc + '%' : '—'}</td>` : ''}<td class="r">${binr(l.taxable)}</td><td class="r">${l.tax}%<div class="ds">${binr(l.tax_amt)}</div></td><td class="r"><b>${binr(l.amount)}</b></td></tr>`).join('');
+  const rows = (d.items || []).map((l, i) => catRow(l) + (thermal
+    ? `<tr><td colspan="3"><b>${bhe(l.name)}</b></td></tr><tr class="sm"><td>${l.qty} ${bhe(l.unit || '')} × ${binr(l.rate)}${l.disc ? ` −${l.disc}%` : ''}</td><td>${supply ? '' : l.tax + '%'}</td><td class="r">${binr(l.amount)}</td></tr>`
+    : `<tr><td class="c">${i + 1}</td><td><b>${bhe(l.name)}</b>${l.desc ? `<div class="ds">${bhe(l.desc).replace(/\n/g, '<br>')}</div>` : ''}</td>${hasHsn ? `<td class="c">${bhe(l.hsn || '')}</td>` : ''}<td class="r">${l.qty} ${bhe(l.unit || '')}</td><td class="r">${binr(l.rate)}${l.incl ? '<div class="ds">incl. tax</div>' : ''}</td>${hasDisc ? `<td class="r">${l.dtype === 'amt' ? '₹' + binr(l.dval) : l.disc ? l.disc + '%' : '—'}</td>` : ''}${supply ? '' : `<td class="r hm">${binr(l.taxable)}</td><td class="r">${l.tax}%<div class="ds">${binr(l.tax_amt)}</div></td>`}<td class="r"><b>${binr(l.amount)}</b></td></tr>`)).join('');
   const taxLines = d.inter ? (Number(d.igst) ? `<tr><td>IGST</td><td class="r">${binr(d.igst)}</td></tr>` : '') : (Number(d.cgst) ? `<tr><td>CGST</td><td class="r">${binr(d.cgst)}</td></tr><tr><td>SGST</td><td class="r">${binr(d.sgst)}</td></tr>` : '');
   const due = br2(d.total - d.paid - d.credited);
   const logo = b.has_logo ? `<img class="logo" src="${opts.base || ''}/bl-logo/${b.id}?v=${b.v || 0}" alt="">` : '';
@@ -3811,9 +4429,13 @@ const blHTML = (d, b, opts = {}) => {
   const ship = vend ? '' : shipOn ? `<div><div class="lbl">Ship to</div><div class="fromn">${bhe(P.ship_name || P.company || P.name || '')}</div><div>${bhe(P.ship_address || '').replace(/\n/g, '<br>')}${P.ship_city ? ', ' + bhe(P.ship_city) : ''}${P.ship_pincode ? ' - ' + bhe(P.ship_pincode) : ''}</div>${P.ship_state ? `<div>State: ${bhe(P.ship_state)} (${blStateCode(P.ship_state)})</div>` : ''}${P.ship_phone ? `<div>📞 ${bhe(P.ship_phone)}</div>` : ''}</div>`
     : `<div><div class="lbl">Ship to</div><div class="fromn">${bhe(P.company || P.name || '')}</div><div>${bhe(P.address || '').replace(/\n/g, '<br>')}${P.city ? ', ' + bhe(P.city) : ''}${P.pincode ? ' - ' + bhe(P.pincode) : ''}</div>${P.state ? `<div>State: ${bhe(P.state)} (${blStateCode(P.state)})</div>` : ''}<div class="ds">Same as billing address</div></div>`;
   const meta = `<table class="meta"><tr><td>${title} #</td><td><b>${bhe(d.no)}</b></td></tr><tr><td>Date</td><td>${bdIN(d.doc_date)}</td></tr>${d.due_date ? `<tr><td>${d.type === 'quotation' ? 'Valid till' : 'Due date'}</td><td>${bdIN(d.due_date)}</td></tr>` : ''}${d.ref_no ? `<tr><td>${vend ? 'Vendor bill #' : 'Reference'}</td><td>${bhe(d.ref_no)}</td></tr>` : ''}</table>`;
-  const tot = `<table class="tot"><tr><td>Taxable amount</td><td class="r">${binr(d.sub)}</td></tr>${taxLines}${Number(d.charges) ? `<tr><td>${bhe(d.charges_label || 'Other charges')}</td><td class="r">${binr(d.charges)}</td></tr>` : ''}${Number(d.extra_disc) ? `<tr><td>Discount</td><td class="r">− ${binr(d.extra_disc)}</td></tr>` : ''}${Number(d.round_off) ? `<tr><td>Round off</td><td class="r">${d.round_off > 0 ? '' : '− '}${binr(Math.abs(d.round_off))}</td></tr>` : ''}<tr class="grand"><td>Total</td><td class="r">₹ ${binr(d.total)}</td></tr>${(d.type === 'invoice' || vend) && (d.paid || d.credited) ? `<tr><td>${vend ? 'Paid' : 'Received'}</td><td class="r">${binr(d.paid)}</td></tr>${d.credited ? `<tr><td>Credit notes</td><td class="r">${binr(d.credited)}</td></tr>` : ''}<tr class="due"><td>Balance due</td><td class="r">₹ ${binr(due)}</td></tr>` : ''}</table>`;
+  const tot = `<table class="tot"><tr><td>${supply ? 'Sub total' : 'Taxable amount'}</td><td class="r">${binr(d.sub)}</td></tr>${taxLines}${Number(d.charges) ? `<tr><td>${bhe(d.charges_label || 'Other charges')}</td><td class="r">${binr(d.charges)}</td></tr>` : ''}${Number(d.extra_disc) ? `<tr><td>Discount</td><td class="r">− ${binr(d.extra_disc)}</td></tr>` : ''}${Number(d.round_off) ? `<tr><td>Round off</td><td class="r">${d.round_off > 0 ? '' : '− '}${binr(Math.abs(d.round_off))}</td></tr>` : ''}<tr class="grand"><td>Total</td><td class="r">₹ ${binr(d.total)}</td></tr>${(d.type === 'invoice' || vend) && (d.paid || d.credited) ? `<tr><td>${vend ? 'Paid' : 'Received'}</td><td class="r">${binr(d.paid)}</td></tr>${d.credited ? `<tr><td>Credit notes</td><td class="r">${binr(d.credited)}</td></tr>` : ''}<tr class="due"><td>Balance due</td><td class="r">₹ ${binr(due)}</td></tr>` : ''}</table>`;
   const gstTab = !thermal && Number(d.tax_total) ? `<table class="gst"><tr><th>Tax rate</th><th class="r">Taxable</th>${d.inter ? '<th class="r">IGST</th>' : '<th class="r">CGST</th><th class="r">SGST</th>'}<th class="r">Total tax</th></tr>${Object.entries(rateRows).filter(([k]) => +k > 0).map(([k, v]) => `<tr><td>${k}%</td><td class="r">${binr(v.taxable)}</td>${d.inter ? `<td class="r">${binr(v.tax)}</td>` : `<td class="r">${binr(v.tax / 2)}</td><td class="r">${binr(v.tax / 2)}</td>`}<td class="r">${binr(v.tax)}</td></tr>`).join('')}</table>` : '';
-  const bank = !vend && (b.bank_account || b.upi) ? `<div class="bank"><div class="lbl">Payment details</div>${b.bank_name ? `<div>Bank: <b>${bhe(b.bank_name)}</b></div>` : ''}${b.bank_account ? `<div>A/c no: <b>${bhe(b.bank_account)}</b></div>` : ''}${b.bank_ifsc ? `<div>IFSC: <b>${bhe(b.bank_ifsc)}</b>${b.bank_branch ? ' · ' + bhe(b.bank_branch) : ''}</div>` : ''}${b.upi ? `<div>UPI: <b>${bhe(b.upi)}</b></div>` : ''}${opts.pay && b.upi && due > 0 && d.type === 'invoice' ? `<a class="paybtn noprint" href="upi://pay?pa=${encodeURIComponent(b.upi)}&pn=${encodeURIComponent(b.legal_name || b.name)}&am=${due.toFixed(2)}&cu=INR&tn=${encodeURIComponent(d.no)}">Pay ₹${binr(due)} by UPI</a>` : ''}</div>` : '';
+  const bk = d.bank && typeof d.bank === 'object' ? d.bank : ((b.banks || [])[0] || {});   // the account chosen on this bill (older bills: the brand's first account)
+  const bank = !vend && !bk.none && (bk.bank_account || bk.upi) ? `<div class="bank"><div class="lbl">Bank details</div>${bk.holder ? `<div>A/c name: <b>${bhe(bk.holder)}</b></div>` : ''}${bk.bank_name ? `<div>Bank: <b>${bhe(bk.bank_name)}</b></div>` : ''}${bk.bank_account ? `<div>A/c no: <b>${bhe(bk.bank_account)}</b></div>` : ''}${bk.bank_ifsc ? `<div>IFSC: <b>${bhe(bk.bank_ifsc)}</b>${bk.bank_branch ? ' · ' + bhe(bk.bank_branch) : ''}</div>` : ''}${bk.upi ? `<div>UPI: <b>${bhe(bk.upi)}</b></div>` : ''}${opts.pay && bk.upi && due > 0 && d.type === 'invoice' ? `<a class="paybtn noprint" href="upi://pay?pa=${encodeURIComponent(bk.upi)}&pn=${encodeURIComponent(b.legal_name || b.name)}&am=${due.toFixed(2)}&cu=INR&tn=${encodeURIComponent(d.no)}">Pay ₹${binr(due)} by UPI</a>` : ''}</div>` : '';
+  const sealOn = d.show_seal !== false && !vend;
+  const sealImg = sealOn && b.has_seal ? `<img class="seal" src="${opts.base || ''}/bl-seal/${b.id}?v=${b.v || 0}" alt="Seal">` : '';
+  const signImg = sealOn && b.has_sign ? `<img class="signi" src="${opts.base || ''}/bl-sign/${b.id}?v=${b.v || 0}" alt="Signature">` : '';
   const notes = [d.notes && `<div class="lbl">Notes</div><div>${bhe(d.notes).replace(/\n/g, '<br>')}</div>`, (d.terms || (!vend && b.terms)) && `<div class="lbl">Terms & conditions</div><div>${bhe(d.terms || b.terms).replace(/\n/g, '<br>')}</div>`].filter(Boolean).join('');
   const css = `*{box-sizing:border-box}body{margin:0;background:#f2f2f2;font:13px/1.45 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1d1d1f}.pg{max-width:820px;margin:16px auto;background:#fff;padding:34px 36px;box-shadow:0 2px 14px rgba(0,0,0,.08)}
   .hd{display:flex;gap:18px;align-items:flex-start;justify-content:space-between}.logo{max-height:64px;max-width:180px;object-fit:contain;margin-bottom:6px}.fromn{font-weight:700;font-size:15px}.ttl{font-size:22px;font-weight:800;letter-spacing:.5px;color:${col};text-transform:uppercase;text-align:right}
@@ -3822,26 +4444,30 @@ const blHTML = (d, b, opts = {}) => {
   .r{text-align:right}.c{text-align:center}.ds{color:#777;font-size:11.5px;white-space:normal}.foot{display:flex;gap:24px;margin-top:16px}.foot>div{flex:1}.tot td{padding:4px 0}.tot .grand td{font-size:16px;font-weight:800;border-top:2px solid #222;padding-top:8px}.tot .due td{font-weight:700;color:#c0392b}
   .words{margin-top:8px;font-style:italic;color:#444}.gst{margin-top:14px;font-size:11.5px}.gst th,.gst td{border:1px solid #ddd;padding:4px 6px;text-align:left}.bank{margin-top:12px}.sig{text-align:right;margin-top:40px}.sig div{display:inline-block;border-top:1px solid #333;padding-top:4px;min-width:180px;text-align:center}
   .paybtn{display:inline-block;margin-top:8px;background:${col};color:#fff;border-radius:999px;padding:9px 16px;text-decoration:none;font-weight:700}.bar{max-width:820px;margin:12px auto 0;display:flex;gap:8px;justify-content:flex-end;padding:0 12px}.bar button,.bar a{background:#111;color:#fff;border:0;border-radius:999px;padding:9px 16px;font:600 13px inherit;text-decoration:none;cursor:pointer}
+  .it tr.cat td{background:#f4f4f5;font-weight:800;font-size:11.5px;text-transform:uppercase;letter-spacing:.6px;color:#333;padding:6px}
+  .sig.hasimg{margin-top:16px}.sig .sigimgs{display:flex;justify-content:flex-end;align-items:flex-end;gap:4px;margin-bottom:-10px;position:relative;z-index:1;border-top:0;padding-top:0;min-width:0}.sigimgs .seal{width:92px;height:92px;object-fit:contain;opacity:.95}.sigimgs .signi{max-height:56px;max-width:160px;object-fit:contain;margin-bottom:8px}
+  .supply{font-size:11px;color:#777;text-align:right}
   .stamp{display:inline-block;border:2px solid #c0392b;color:#c0392b;font-weight:800;padding:2px 10px;border-radius:6px;transform:rotate(-6deg);margin-top:6px}.stamp.ok{border-color:#1f9255;color:#1f9255}
   ${thermal ? `.pg{max-width:320px;padding:14px;font-size:12px}.hd{display:block;text-align:center}.ttl{text-align:center;font-size:15px}.parties{display:block;margin:8px 0;padding:8px 0}.foot{display:block}.it td{padding:3px 2px;border:0}.it .sm td{border-bottom:1px dashed #bbb;padding-bottom:5px}.meta td{text-align:left;padding-left:0}` : ''}
-  @media (max-width:640px){.pg{margin:0;padding:18px 14px;box-shadow:none}.parties,.foot{flex-direction:column;gap:10px}.it{font-size:11.5px}.hd{flex-direction:column}.ttl{text-align:left}}
+  .itw{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  @media (max-width:640px){.pg{margin:0;padding:18px 12px;box-shadow:none}.parties,.foot{flex-direction:column;gap:10px}.it{font-size:11px}.it th{font-size:9.5px;letter-spacing:0;padding:6px 3px}.it td{padding:6px 3px}.it .hm{display:none}.hd{flex-direction:column}.ttl{text-align:left}.foot>div{max-width:none!important}}
   @media print{body{background:#fff}.pg{box-shadow:none;margin:0;max-width:none;padding:10mm}.noprint,.bar{display:none!important}@page{size:${thermal ? '80mm auto' : 'A4'};margin:${thermal ? '2mm' : '8mm'}}}`;
-  const stamp = d.status === 'Cancelled' ? '<div class="stamp">CANCELLED</div>' : (d.type === 'invoice' && d.status === 'Paid') ? '<div class="stamp ok">PAID</div>' : '';
+  const stamp = d.status === 'Draft' ? '<div class="stamp">DRAFT</div>' : d.status === 'Cancelled' ? '<div class="stamp">CANCELLED</div>' : (d.type === 'invoice' && d.status === 'Paid') ? '<div class="stamp ok">PAID</div>' : '';
   const head = thermal
     ? `<div class="hd">${logo}<div>${from}</div><div class="ttl" style="margin-top:8px">${title}</div>${meta}${stamp}</div>`
-    : `<div class="hd"><div>${logo}${from}</div><div><div class="ttl">${title}</div>${meta}${stamp}</div></div>`;
-  const itHead = thermal ? '<tr><th colspan="2">Item</th><th class="r">Amount</th></tr>' : `<tr><th class="c">#</th><th>Item</th>${hasHsn ? '<th class="c">HSN/SAC</th>' : ''}<th class="r">Qty</th><th class="r">Rate</th>${hasDisc ? '<th class="r">Disc</th>' : ''}<th class="r">Taxable</th><th class="r">GST</th><th class="r">Amount</th></tr>`;
+    : `<div class="hd"><div>${logo}${from}</div><div><div class="ttl">${title}</div>${supply && d.type !== 'invoice' ? '<div class="supply">Bill of Supply · without GST</div>' : ''}${meta}${stamp}</div></div>`;
+  const itHead = thermal ? '<tr><th colspan="2">Item</th><th class="r">Amount</th></tr>' : `<tr><th class="c">#</th><th>Item</th>${hasHsn ? '<th class="c">HSN/SAC</th>' : ''}<th class="r">Qty</th><th class="r">Rate</th>${hasDisc ? '<th class="r">Disc</th>' : ''}${supply ? '' : '<th class="r hm">Taxable</th><th class="r">GST</th>'}<th class="r">Amount</th></tr>`;
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${bhe(title + ' ' + d.no)}</title><style>${css}</style></head><body>
-  ${opts.bar ? `<div class="bar noprint"><button onclick="print()">🖨 Print / Save PDF</button></div>` : ''}
+  ${opts.bar && !opts.embed ? `<div class="bar noprint"><button onclick="print()">🖨 Print / Save PDF</button></div>` : ''}${opts.embed ? '<style>body{background:#fff}.pg{margin:0 auto;box-shadow:none}</style>' : ''}
   <div class="pg">${head}<div class="parties"><div>${to}</div>${ship}</div>
-  <table class="it">${itHead}${rows}</table>
-  <div class="foot"><div>${gstTab}<div class="words">${blWords(Number(d.total))}</div>${bank}${notes ? `<div style="margin-top:10px">${notes}</div>` : ''}</div><div style="max-width:${thermal ? 'none' : '300px'}">${tot}<div class="sig"><div>For ${bhe(b.legal_name || b.name)}${b.sign_name ? `<br><small>${bhe(b.sign_name)}</small>` : ''}<br><small>Authorised signatory</small></div></div></div></div>
+  <div class="itw"><table class="it">${itHead}${rows}</table></div>
+  <div class="foot"><div>${gstTab}<div class="words">${blWords(Number(d.total))}</div>${bank}${notes ? `<div style="margin-top:10px">${notes}</div>` : ''}</div><div style="max-width:${thermal ? 'none' : '300px'}">${tot}<div class="sig${sealImg || signImg ? ' hasimg' : ''}">${sealImg || signImg ? `<div class="sigimgs">${sealImg}${signImg}</div>` : ''}<div>For ${bhe(b.legal_name || b.name)}${b.sign_name ? `<br><small>${bhe(b.sign_name)}</small>` : ''}<br><small>Authorised signatory</small></div></div></div></div>
   </div>${opts.auto ? '<script>setTimeout(()=>print(),400)</script>' : ''}</body></html>`;
 };
 app.get('/api/bl/docs/:id/print', need('billing', 'purchases'), wrap(async (req, res) => {
   const d = await blLoad(req, res, +req.params.id); if (!d) return;
   const b = await blBrand(d.brand_id) || { name: '', id: 0 };
-  res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.end(blHTML(d, b, { template: req.query.t, bar: true, auto: req.query.auto === '1' }));
+  res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.end(blHTML(d, b, { template: req.query.t, bar: true, auto: req.query.auto === '1', embed: req.query.embed === '1' }));
 }));
 app.get('/d/:token', wrap(async (req, res) => {     // the link sent to the customer (no login)
   const d = (await q(`SELECT d.*, to_char(d.doc_date,'YYYY-MM-DD') doc_date, to_char(d.due_date,'YYYY-MM-DD') due_date FROM bl_docs d WHERE share_token=$1 AND type<>'purchase'`, [String(req.params.token)])).rows[0];
@@ -3855,6 +4481,7 @@ app.get('/d/:token', wrap(async (req, res) => {     // the link sent to the cust
 app.get('/api/bl/expenses', blBuy, wrap(async (req, res) => {
   const p = [], w = ['true'], add = (s, v) => { p.push(v); w.push(s.replace('?', '$' + p.length)); };
   if (req.user.brand_id && !isSuper(req.user)) add('e.brand_id=?', req.user.brand_id);
+  else if (+req.query.brand) add('e.brand_id=?', +req.query.brand);
   if (req.query.from) add('e.exp_date>=?', req.query.from); if (req.query.to) add('e.exp_date<=?', req.query.to);
   if (req.query.category) add('e.category=?', req.query.category);
   const items = (await q(`SELECT e.*, to_char(e.exp_date,'YYYY-MM-DD') exp_date, b.name brand FROM bl_expenses e LEFT JOIN brands b ON b.id=e.brand_id WHERE ${w.join(' AND ')} ORDER BY e.exp_date DESC, e.id DESC LIMIT 500`, p)).rows;
@@ -3872,17 +4499,113 @@ app.delete('/api/bl/expenses/:id', blBuy, wrap(async (req, res) => { await q('DE
 const blRange = Q => { const t = new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10); return { from: /^\d{4}-\d{2}-\d{2}$/.test(Q.from) ? Q.from : t.slice(0, 8) + '01', to: /^\d{4}-\d{2}-\d{2}$/.test(Q.to) ? Q.to : t }; };
 const blBrandW = (u, Q, p, alias = 'd') => { const b = u.brand_id && !isSuper(u) ? u.brand_id : +Q.brand || 0; if (!b) return 'true'; p.push(b); return `${alias}.brand_id=$${p.length}`; };
 app.get('/api/bl/counts', need('billing', 'purchases'), wrap(async (req, res) => {
-  const u = req.user, out = {}, p = [], w = [`d.status<>'Cancelled'`]; blScopeDocs(u, p, w);
+  const u = req.user, out = {}, p = [], w = [`d.status NOT IN ('Cancelled','Draft')`]; blScopeDocs(u, p, w);
   if (req.query.brand) { p.push(+req.query.brand); w.push(`d.brand_id=$${p.length}`); }
   for (const r of (await q(`SELECT d.type, COUNT(*)::int n FROM bl_docs d WHERE ${w.join(' AND ')} GROUP BY d.type`, p)).rows) if (can(u, blTypeNeed(r.type))) out[r.type] = r.n;
   out.products = (await q(`SELECT COUNT(*)::int n FROM bl_products WHERE active`)).rows[0].n;
-  if (can(u, 'billing')) { const cp = [], sc = custScope(u, cp); out.bcust = (await q(`SELECT COUNT(*)::int n FROM customers c WHERE ${sc}`, cp)).rows[0].n; }
+  out.inventory = (await q(`SELECT COUNT(*)::int n FROM bl_products WHERE active AND kind='product'`)).rows[0].n;
+  if (can(u, 'billing')) { const cp = []; let sc = custScope(u, cp); if (+req.query.brand) { cp.push(+req.query.brand); sc += ` AND c.brand_id=$${cp.length}`; } out.bcust = (await q(`SELECT COUNT(*)::int n FROM customers c WHERE ${sc}`, cp)).rows[0].n; }
   if (can(u, 'purchases')) {
     out.vendors = (await q(`SELECT COUNT(*)::int n FROM bl_vendors`)).rows[0].n;
-    const ep = [], ew = [`e.exp_date>=date_trunc('month',CURRENT_DATE)`]; if (u.brand_id && !isSuper(u)) { ep.push(u.brand_id); ew.push(`e.brand_id=$1`); }
+    const ep = [], ew = [`e.exp_date>=date_trunc('month',CURRENT_DATE)`]; if (u.brand_id && !isSuper(u)) { ep.push(u.brand_id); ew.push(`e.brand_id=$1`); } else if (+req.query.brand) { ep.push(+req.query.brand); ew.push(`e.brand_id=$1`); }
     out.expenses = (await q(`SELECT COUNT(*)::int n FROM bl_expenses e WHERE ${ew.join(' AND ')}`, ep)).rows[0].n;
   }
   res.json(out);
+}));
+// ---------- insights (Swipe-style analytics for a date range, compared with the period just before) ----------
+const blDay = (d, n) => { const x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
+app.get('/api/bl/insights', need('billing', 'purchases'), wrap(async (req, res) => {
+  const u = req.user, Q = req.query, today = new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10), ok = x => /^\d{4}-\d{2}-\d{2}$/.test(x);
+  const to = ok(Q.to) ? Q.to : today, from = ok(Q.from) ? Q.from : blDay(to, -29);
+  const days = Math.max(1, Math.round((new Date(to) - new Date(from)) / 864e5) + 1), pto = blDay(from, -1), pfrom = blDay(from, -days);
+  const buy = can(u, 'purchases'), sell = can(u, 'billing');
+  const B = (p, a = 'd') => blBrandW(u, Q, p, a);
+  const N = v => Number(v || 0), LIVE = `d.status NOT IN ('Cancelled','Draft')`;
+  // 1. daily sales / purchases / expenses for both periods
+  let p = [pfrom, to]; let bw = B(p);
+  const dd = (await q(`SELECT to_char(doc_date,'YYYY-MM-DD') d, COALESCE(SUM(total) FILTER (WHERE type='invoice'),0) s, COALESCE(SUM(total) FILTER (WHERE type='credit_note'),0) cn, COALESCE(SUM(total) FILTER (WHERE type='purchase'),0) pu
+    FROM bl_docs d WHERE ${LIVE} AND doc_date BETWEEN $1 AND $2 AND ${bw} GROUP BY 1`, p)).rows;
+  p = [pfrom, to]; bw = B(p, 'e');
+  const ed = buy ? (await q(`SELECT to_char(exp_date,'YYYY-MM-DD') d, SUM(amount) x FROM bl_expenses e WHERE exp_date BETWEEN $1 AND $2 AND ${bw} GROUP BY 1`, p)).rows : [];
+  const day = {}; dd.forEach(r => day[r.d] = { s: N(r.s) - N(r.cn), pu: N(r.pu), x: 0 }); ed.forEach(r => (day[r.d] = day[r.d] || { s: 0, pu: 0, x: 0 }).x = N(r.x));
+  const step = days <= 45 ? 1 : days <= 200 ? 7 : 30, buckets = [];
+  for (let i = 0; i < days; i += step) {
+    const b = { from: blDay(from, i), to: blDay(from, Math.min(days - 1, i + step - 1)), s: 0, pu: 0, x: 0, ps: 0, ppu: 0, px: 0 };
+    for (let k = i; k < Math.min(days, i + step); k++) { const c = day[blDay(from, k)], pv = day[blDay(pfrom, k)]; if (c) { b.s += c.s; b.pu += c.pu; b.x += c.x; } if (pv) { b.ps += pv.s; b.ppu += pv.pu; b.px += pv.x; } }
+    buckets.push(b);
+  }
+  const sum = (k, a, z) => br2(Object.entries(day).filter(([d]) => d >= a && d <= z).reduce((t, [, v]) => t + v[k], 0));
+  const overview = { sales: sum('s', from, to), purchases: buy ? sum('pu', from, to) : 0, expenses: buy ? sum('x', from, to) : 0, prev: { sales: sum('s', pfrom, pto), purchases: buy ? sum('pu', pfrom, pto) : 0, expenses: buy ? sum('x', pfrom, pto) : 0 } };
+  overview.net = br2(overview.sales - overview.purchases - overview.expenses);
+  // 2. receivables / payables with aging
+  const owed = async type => {
+    const pp = [type, today]; const w = B(pp);
+    const r = (await q(`SELECT COALESCE(SUM(total-paid-credited),0) amt, COUNT(*) FILTER (WHERE due_date<$2)::int overdue, COUNT(DISTINCT ${type === 'purchase' ? 'vendor_id' : 'customer_id'})::int parties, COALESCE(MAX($2::date-doc_date),0)::int oldest,
+      COALESCE(SUM(total-paid-credited) FILTER (WHERE $2::date-doc_date<=5),0) a0, COALESCE(SUM(total-paid-credited) FILTER (WHERE $2::date-doc_date BETWEEN 6 AND 10),0) a1,
+      COALESCE(SUM(total-paid-credited) FILTER (WHERE $2::date-doc_date BETWEEN 11 AND 20),0) a2, COALESCE(SUM(total-paid-credited) FILTER (WHERE $2::date-doc_date>20),0) a3
+      FROM bl_docs d WHERE type=$1 AND status IN ('Unpaid','Partial') AND ${w}`, pp)).rows[0];
+    return { amount: N(r.amt), overdue: r.overdue, parties: r.parties, oldest: r.oldest, aging: [['0–5 days', N(r.a0)], ['6–10 days', N(r.a1)], ['11–20 days', N(r.a2)], ['20+ days', N(r.a3)]] };
+  };
+  const receivables = sell ? await owed('invoice') : null, payables = buy ? await owed('purchase') : null;
+  // 3. cash flow: money received on invoices vs paid on purchases + expenses
+  const flow = async (a, z) => {
+    const pp = [a, z]; const w = B(pp);
+    const rows = (await q(`SELECT d.type, COALESCE(pm.mode,'Other') mode, COALESCE(NULLIF(pm.account,''),CASE WHEN pm.mode='Cash' THEN 'Cash in hand' ELSE 'Not set' END) acc, SUM(pm.amount) amt
+      FROM bl_payments pm JOIN bl_docs d ON d.id=pm.doc_id WHERE pm.pay_date BETWEEN $1 AND $2 AND ${w} GROUP BY 1,2,3`, pp)).rows;
+    const ep = [a, z]; const ew = B(ep, 'e');
+    const ex = buy ? N((await q(`SELECT COALESCE(SUM(amount),0) x FROM bl_expenses e WHERE exp_date BETWEEN $1 AND $2 AND ${ew}`, ep)).rows[0].x) : 0;
+    const inR = rows.filter(r => r.type === 'invoice'), outR = rows.filter(r => r.type === 'purchase');
+    const grp = (L, k) => Object.entries(L.reduce((m, r) => (m[r[k]] = (m[r[k]] || 0) + N(r.amt), m), {})).sort((x, y) => y[1] - x[1]);
+    const inflow = br2(inR.reduce((t, r) => t + N(r.amt), 0)), outflow = br2(outR.reduce((t, r) => t + N(r.amt), 0) + ex);
+    return { inflow, outflow, net: br2(inflow - outflow), by_mode: grp(inR, 'mode'), by_bank: grp(inR, 'acc') };
+  };
+  const cash = await flow(from, to), cashPrev = await flow(pfrom, pto);
+  cash.prev = { inflow: cashPrev.inflow, outflow: cashPrev.outflow, net: cashPrev.net };
+  // 4. expenses by category
+  let expenses = null;
+  if (buy) { const ep = [from, to]; const ew = B(ep, 'e');
+    const cats = (await q(`SELECT COALESCE(category,'Other') c, SUM(amount) x FROM bl_expenses e WHERE exp_date BETWEEN $1 AND $2 AND ${ew} GROUP BY 1 ORDER BY 2 DESC`, ep)).rows.map(r => [r.c, N(r.x)]);
+    expenses = { total: overview.expenses, prev: overview.prev.expenses, top: cats }; }
+  // 5. customers
+  let customers = null;
+  if (sell) {
+    const cp = []; let sc = custScope(u, cp); const bb = u.brand_id && !isSuper(u) ? 0 : +Q.brand || 0; if (bb) { cp.push(bb); sc += ` AND c.brand_id=$${cp.length}`; }
+    const total = (await q(`SELECT COUNT(*)::int n FROM customers c WHERE ${sc}`, cp)).rows[0].n;
+    const act = async (a, z) => { const pp = [a, z]; const w = B(pp); return (await q(`SELECT COUNT(DISTINCT customer_id)::int active, COUNT(*) FILTER (WHERE k>1)::int rep FROM (SELECT customer_id, COUNT(*) k FROM bl_docs d WHERE type='invoice' AND ${LIVE} AND doc_date BETWEEN $1 AND $2 AND ${w} GROUP BY customer_id) t`, pp)).rows[0]; };
+    const c1 = await act(from, to), c0 = await act(pfrom, pto);
+    const pp = [from, to]; const w = B(pp);
+    const top = (await q(`SELECT d.customer_id id, COALESCE(MAX(d.party->>'company'),MAX(d.party->>'name')) name, COUNT(*)::int orders, SUM(d.total) amt FROM bl_docs d WHERE type='invoice' AND ${LIVE} AND doc_date BETWEEN $1 AND $2 AND ${w} GROUP BY d.customer_id ORDER BY amt DESC LIMIT 10`, pp)).rows.map(r => ({ id: r.id, name: r.name, orders: r.orders, amount: N(r.amt) }));
+    customers = { total, active: c1.active, prev_active: c0.active, repeat: c1.rep, prev_repeat: c0.rep, with_dues: receivables.parties, top };
+  }
+  // 6. vendors
+  let vendors = null;
+  if (buy) {
+    const total = (await q(`SELECT COUNT(*)::int n FROM bl_vendors`)).rows[0].n;
+    const act = async (a, z) => { const pp = [a, z]; const w = B(pp); return (await q(`SELECT COUNT(DISTINCT vendor_id)::int n FROM bl_docs d WHERE type='purchase' AND ${LIVE} AND doc_date BETWEEN $1 AND $2 AND ${w}`, pp)).rows[0].n; };
+    const pp = [from, to]; const w = B(pp);
+    const top = (await q(`SELECT d.vendor_id id, COALESCE(MAX(d.party->>'company'),MAX(d.party->>'name')) name, COUNT(*)::int orders, SUM(d.total) amt FROM bl_docs d WHERE type='purchase' AND ${LIVE} AND doc_date BETWEEN $1 AND $2 AND ${w} GROUP BY d.vendor_id ORDER BY amt DESC LIMIT 10`, pp)).rows.map(r => ({ id: r.id, name: r.name, orders: r.orders, amount: N(r.amt) }));
+    vendors = { total, active: await act(from, to), prev_active: await act(pfrom, pto), with_dues: payables.parties, top };
+  }
+  // 7. products & categories from invoice lines (credit notes taken off)
+  let products = null, categories = null;
+  if (sell) {
+    const lines = async (a, z) => { const pp = [a, z]; const w = B(pp);
+      return (await q(`SELECT d.id doc, d.type, (l->>'pid')::int pid, l->>'name' name, COALESCE(NULLIF(l->>'cat',''), p.category, 'No category') cat, (l->>'qty')::numeric qty, (l->>'taxable')::numeric amt
+        FROM bl_docs d CROSS JOIN LATERAL jsonb_array_elements(d.items) l LEFT JOIN bl_products p ON p.id=(l->>'pid')::int
+        WHERE d.type IN ('invoice','credit_note') AND ${LIVE} AND d.doc_date BETWEEN $1 AND $2 AND ${w}`, pp)).rows; };
+    const L1 = await lines(from, to), L0 = await lines(pfrom, pto), sg = r => r.type === 'credit_note' ? -1 : 1;
+    const units = L => br2(L.reduce((t, r) => t + sg(r) * N(r.qty), 0));
+    const pm = {}; L1.forEach(r => { const k = r.pid ? 'p' + r.pid : 'n' + String(r.name).toLowerCase(); const x = pm[k] = pm[k] || { name: r.name, units: 0, amount: 0 }; x.units += sg(r) * N(r.qty); x.amount += sg(r) * N(r.amt); });
+    const act = (await q(`SELECT COUNT(*)::int n FROM bl_products WHERE active`)).rows[0].n;
+    products = { active: act, units: units(L1), prev_units: units(L0), top: Object.values(pm).sort((x, y) => y.amount - x.amount).slice(0, 10).map(x => ({ ...x, units: br2(x.units), amount: br2(x.amount) })) };
+    const cm = {}; L1.forEach(r => { const x = cm[r.cat] = cm[r.cat] || { name: r.cat, units: 0, amount: 0, docs: new Set() }; x.units += sg(r) * N(r.qty); x.amount += sg(r) * N(r.amt); if (sg(r) > 0) x.docs.add(r.doc); });
+    const cl = Object.values(cm).map(x => ({ name: x.name, units: br2(x.units), amount: br2(x.amount), orders: x.docs.size })).sort((x, y) => y.amount - x.amount);
+    const tot = cl.reduce((t, x) => t + Math.max(0, x.amount), 0);
+    categories = { active: cl.filter(x => x.amount > 0).length, top_share: tot && cl[0] ? Math.round(cl[0].amount / tot * 100) : 0, avg: cl.length ? br2(tot / cl.length) : 0, list: cl.slice(0, 15) };
+  }
+  // 8. inventory health
+  const inv = (await q(`SELECT COUNT(*) FILTER (WHERE stock<=0)::int out, COUNT(*) FILTER (WHERE stock>0 AND stock<=low_stock)::int low, COUNT(*) FILTER (WHERE stock>low_stock AND stock>0)::int ok FROM bl_products WHERE active AND kind='product'`)).rows[0];
+  res.json({ from, to, pfrom, pto, days, step, buckets, overview, receivables, payables, cash, expenses, customers, vendors, products, categories, inventory: inv });
 }));
 app.get('/api/bl/summary', need('billing', 'purchases'), wrap(async (req, res) => {
   const { from, to } = blRange(req.query), p = [from, to], bw = blBrandW(req.user, req.query, p);
@@ -3890,7 +4613,7 @@ app.get('/api/bl/summary', need('billing', 'purchases'), wrap(async (req, res) =
     COALESCE(SUM(total) FILTER (WHERE type='invoice'),0) sales, COUNT(*) FILTER (WHERE type='invoice')::int invoices,
     COALESCE(SUM(total) FILTER (WHERE type='credit_note'),0) returns, COALESCE(SUM(total) FILTER (WHERE type='purchase'),0) purchases,
     COALESCE(SUM(total) FILTER (WHERE type='quotation'),0) quoted, COUNT(*) FILTER (WHERE type='quotation')::int quotes, COUNT(*) FILTER (WHERE type='quotation' AND status IN ('Converted','Accepted'))::int quotes_won
-    FROM bl_docs d WHERE status<>'Cancelled' AND doc_date BETWEEN $1 AND $2 AND ${bw}`, p)).rows[0];
+    FROM bl_docs d WHERE status NOT IN ('Cancelled','Draft') AND doc_date BETWEEN $1 AND $2 AND ${bw}`, p)).rows[0];
   const p2 = [from, to], bw2 = blBrandW(req.user, req.query, p2);
   const rc = (await q(`SELECT COALESCE(SUM(pm.amount) FILTER (WHERE d.type='invoice'),0) received, COALESCE(SUM(pm.amount) FILTER (WHERE d.type='purchase'),0) paid_out FROM bl_payments pm JOIN bl_docs d ON d.id=pm.doc_id WHERE pm.pay_date BETWEEN $1 AND $2 AND ${bw2}`, p2)).rows[0];
   const p3 = [], bw3 = blBrandW(req.user, req.query, p3);
@@ -3900,7 +4623,7 @@ app.get('/api/bl/summary', need('billing', 'purchases'), wrap(async (req, res) =
   const ex = (await q(`SELECT COALESCE(SUM(amount),0) expenses FROM bl_expenses e WHERE exp_date BETWEEN $1 AND $2 AND ${bw4}`, p4)).rows[0];
   const p5 = [], bw5 = blBrandW(req.user, req.query, p5);
   const trend = (await q(`SELECT to_char(date_trunc('month',doc_date),'YYYY-MM') m, COALESCE(SUM(total) FILTER (WHERE type='invoice'),0) sales, COALESCE(SUM(total) FILTER (WHERE type='purchase'),0) purchases
-    FROM bl_docs d WHERE status<>'Cancelled' AND doc_date>=date_trunc('month',CURRENT_DATE)-interval '5 months' AND ${bw5} GROUP BY 1 ORDER BY 1`, p5)).rows;
+    FROM bl_docs d WHERE status NOT IN ('Cancelled','Draft') AND doc_date>=date_trunc('month',CURRENT_DATE)-interval '5 months' AND ${bw5} GROUP BY 1 ORDER BY 1`, p5)).rows;
   const low = (await q(`SELECT id, name, stock, low_stock, unit FROM bl_products WHERE active AND kind='product' AND stock<=low_stock ORDER BY stock LIMIT 8`)).rows;
   const p6 = [], bw6 = blBrandW(req.user, req.query, p6);
   const top = (await q(`SELECT d.customer_id id, MAX(d.party->>'name') name, MAX(d.party->>'phone') phone, SUM(d.total-d.paid-d.credited) due, MIN(d.due_date) oldest FROM bl_docs d WHERE d.type='invoice' AND d.status IN ('Unpaid','Partial') AND ${bw6} GROUP BY d.customer_id ORDER BY due DESC LIMIT 6`, p6)).rows;
@@ -3914,27 +4637,27 @@ app.get('/api/bl/reports/:kind', need('billing', 'purchases'), wrap(async (req, 
   let cols, rows;
   if (k === 'sales' || k === 'purchases') {
     cols = [['doc_date', 'Date'], ['no', 'No'], ['party', k === 'sales' ? 'Customer' : 'Vendor'], ['gstin', 'GSTIN'], ['sub', 'Taxable', 'n'], ['cgst', 'CGST', 'n'], ['sgst', 'SGST', 'n'], ['igst', 'IGST', 'n'], ['total', 'Total', 'n'], ['paid', 'Paid', 'n'], ['due', 'Due', 'n'], ['status', 'Status']];
-    rows = (await q(`SELECT to_char(doc_date,'YYYY-MM-DD') doc_date, no, COALESCE(party->>'company',party->>'name') party, party->>'gstin' gstin, sub, cgst, sgst, igst, total, paid, total-paid-credited due, status, id FROM bl_docs d WHERE type=$${p.length + 1} AND status<>'Cancelled' AND doc_date BETWEEN $1 AND $2 AND ${bw} ORDER BY doc_date, id`, [...p, k === 'sales' ? 'invoice' : 'purchase'])).rows;
+    rows = (await q(`SELECT to_char(doc_date,'YYYY-MM-DD') doc_date, no, COALESCE(party->>'company',party->>'name') party, party->>'gstin' gstin, sub, cgst, sgst, igst, total, paid, total-paid-credited due, status, id FROM bl_docs d WHERE type=$${p.length + 1} AND status NOT IN ('Cancelled','Draft') AND doc_date BETWEEN $1 AND $2 AND ${bw} ORDER BY doc_date, id`, [...p, k === 'sales' ? 'invoice' : 'purchase'])).rows;
   } else if (k === 'gst_sales' || k === 'gst_purchase') {   // GST summary by tax rate (GSTR-1 / 3B helper)
     cols = [['rate', 'GST rate'], ['taxable', 'Taxable', 'n'], ['cgst', 'CGST', 'n'], ['sgst', 'SGST', 'n'], ['igst', 'IGST', 'n'], ['tax', 'Total tax', 'n'], ['b2b', 'B2B invoices'], ['b2c', 'B2C invoices']];
-    const docs = (await q(`SELECT d.inter, d.items, d.type, d.party->>'gstin' gstin FROM bl_docs d WHERE type=ANY($${p.length + 1}) AND status<>'Cancelled' AND doc_date BETWEEN $1 AND $2 AND ${bw}`, [...p, k === 'gst_sales' ? ['invoice', 'credit_note'] : ['purchase']])).rows;
+    const docs = (await q(`SELECT d.inter, d.items, d.type, d.party->>'gstin' gstin FROM bl_docs d WHERE type=ANY($${p.length + 1}) AND status NOT IN ('Cancelled','Draft') AND doc_date BETWEEN $1 AND $2 AND ${bw}`, [...p, k === 'gst_sales' ? ['invoice', 'credit_note'] : ['purchase']])).rows;
     const m = {}; docs.forEach(d => { const sg = d.type === 'credit_note' ? -1 : 1, b2b = !!d.gstin; (d.items || []).forEach(l => { const x = m[l.tax] = m[l.tax] || { rate: l.tax + '%', taxable: 0, cgst: 0, sgst: 0, igst: 0, tax: 0, b2b: 0, b2c: 0, _r: +l.tax };
       x.taxable += sg * l.taxable; x.tax += sg * l.tax_amt; if (d.inter) x.igst += sg * l.tax_amt; else { x.cgst += sg * l.tax_amt / 2; x.sgst += sg * l.tax_amt / 2; } }); const rs = new Set((d.items || []).map(l => l.tax)); rs.forEach(r => { m[r][b2b ? 'b2b' : 'b2c']++; }); });
     rows = Object.values(m).sort((a, b) => a._r - b._r).map(x => { ['taxable', 'cgst', 'sgst', 'igst', 'tax'].forEach(kk => x[kk] = br2(x[kk])); delete x._r; return x; });
   } else if (k === 'hsn') {
     cols = [['hsn', 'HSN/SAC'], ['name', 'Description'], ['qty', 'Qty', 'n'], ['taxable', 'Taxable', 'n'], ['tax', 'Tax', 'n'], ['amount', 'Total', 'n']];
-    const docs = (await q(`SELECT d.items, d.type FROM bl_docs d WHERE type IN ('invoice','credit_note') AND status<>'Cancelled' AND doc_date BETWEEN $1 AND $2 AND ${bw}`, p)).rows, m = {};
+    const docs = (await q(`SELECT d.items, d.type FROM bl_docs d WHERE type IN ('invoice','credit_note') AND status NOT IN ('Cancelled','Draft') AND doc_date BETWEEN $1 AND $2 AND ${bw}`, p)).rows, m = {};
     docs.forEach(d => (d.items || []).forEach(l => { const sg = d.type === 'credit_note' ? -1 : 1, key = (l.hsn || '—') + '|' + l.tax, x = m[key] = m[key] || { hsn: (l.hsn || '—') + ` @${l.tax}%`, name: l.name, qty: 0, taxable: 0, tax: 0, amount: 0 }; x.qty += sg * l.qty; x.taxable += sg * l.taxable; x.tax += sg * l.tax_amt; x.amount += sg * l.amount; }));
     rows = Object.values(m).map(x => ({ ...x, qty: br2(x.qty), taxable: br2(x.taxable), tax: br2(x.tax), amount: br2(x.amount) }));
   } else if (k === 'items') {   // item-wise sales with profit (selling taxable − purchase price)
     cols = [['name', 'Item'], ['qty', 'Qty sold', 'n'], ['taxable', 'Sales (taxable)', 'n'], ['cost', 'Cost', 'n'], ['profit', 'Profit', 'n']];
-    const docs = (await q(`SELECT d.items, d.type FROM bl_docs d WHERE type IN ('invoice','credit_note') AND status<>'Cancelled' AND doc_date BETWEEN $1 AND $2 AND ${bw}`, p)).rows, m = {};
+    const docs = (await q(`SELECT d.items, d.type FROM bl_docs d WHERE type IN ('invoice','credit_note') AND status NOT IN ('Cancelled','Draft') AND doc_date BETWEEN $1 AND $2 AND ${bw}`, p)).rows, m = {};
     const pp = Object.fromEntries((await q('SELECT id, purchase_price FROM bl_products')).rows.map(r => [r.id, Number(r.purchase_price)]));
     docs.forEach(d => (d.items || []).forEach(l => { const sg = d.type === 'credit_note' ? -1 : 1, key = l.pid || l.name, x = m[key] = m[key] || { name: l.name, qty: 0, taxable: 0, cost: 0 }; x.qty += sg * l.qty; x.taxable += sg * l.taxable; x.cost += sg * l.qty * (pp[l.pid] || 0); }));
     rows = Object.values(m).map(x => ({ name: x.name, qty: br2(x.qty), taxable: br2(x.taxable), cost: br2(x.cost), profit: br2(x.taxable - x.cost) })).sort((a, b) => b.taxable - a.taxable);
   } else if (k === 'parties') {
     cols = [['name', 'Customer'], ['phone', 'Phone'], ['invoices', 'Invoices', 'n'], ['total', 'Billed', 'n'], ['paid', 'Received', 'n'], ['due', 'Due', 'n']];
-    rows = (await q(`SELECT COALESCE(MAX(party->>'company'),MAX(party->>'name')) name, MAX(party->>'phone') phone, COUNT(*)::int invoices, SUM(total) total, SUM(paid) paid, SUM(total-paid-credited) due, customer_id id FROM bl_docs d WHERE type='invoice' AND status<>'Cancelled' AND doc_date BETWEEN $1 AND $2 AND ${bw} GROUP BY customer_id ORDER BY total DESC`, p)).rows;
+    rows = (await q(`SELECT COALESCE(MAX(party->>'company'),MAX(party->>'name')) name, MAX(party->>'phone') phone, COUNT(*)::int invoices, SUM(total) total, SUM(paid) paid, SUM(total-paid-credited) due, customer_id id FROM bl_docs d WHERE type='invoice' AND status NOT IN ('Cancelled','Draft') AND doc_date BETWEEN $1 AND $2 AND ${bw} GROUP BY customer_id ORDER BY total DESC`, p)).rows;
   } else if (k === 'payments') {
     cols = [['pay_date', 'Date'], ['no', 'Document'], ['party', 'Party'], ['kind', 'Type'], ['mode', 'Mode'], ['account', 'Account'], ['amount', 'Amount', 'n'], ['by_name', 'By']];
     rows = (await q(`SELECT to_char(pm.pay_date,'YYYY-MM-DD') pay_date, d.no, COALESCE(d.party->>'company',d.party->>'name') party, CASE WHEN d.type='purchase' THEN 'Paid out' ELSE 'Received' END kind, pm.mode, pm.account, pm.amount, pm.by_name, d.id FROM bl_payments pm JOIN bl_docs d ON d.id=pm.doc_id WHERE pm.pay_date BETWEEN $1 AND $2 AND ${bw} ${can(req.user, 'purchases') ? '' : "AND d.type<>'purchase'"} ORDER BY pm.pay_date, pm.id`, p)).rows;
@@ -3947,7 +4670,7 @@ app.get('/api/bl/reports/:kind', need('billing', 'purchases'), wrap(async (req, 
     rows = (await q(`SELECT category, COUNT(*)::int count, SUM(amount) amount FROM bl_expenses e WHERE exp_date BETWEEN $1 AND $2 AND ${bwe} GROUP BY category ORDER BY amount DESC`, pe)).rows;
   } else if (k === 'pnl') {
     cols = [['line', 'Item'], ['amount', 'Amount', 'n']];
-    const s = (await q(`SELECT COALESCE(SUM(sub) FILTER (WHERE type='invoice'),0) sales, COALESCE(SUM(sub) FILTER (WHERE type='credit_note'),0) ret, COALESCE(SUM(sub) FILTER (WHERE type='purchase'),0) pur FROM bl_docs d WHERE status<>'Cancelled' AND doc_date BETWEEN $1 AND $2 AND ${bw}`, p)).rows[0];
+    const s = (await q(`SELECT COALESCE(SUM(sub) FILTER (WHERE type='invoice'),0) sales, COALESCE(SUM(sub) FILTER (WHERE type='credit_note'),0) ret, COALESCE(SUM(sub) FILTER (WHERE type='purchase'),0) pur FROM bl_docs d WHERE status NOT IN ('Cancelled','Draft') AND doc_date BETWEEN $1 AND $2 AND ${bw}`, p)).rows[0];
     const pe = [from, to], bwe = blBrandW(req.user, req.query, pe, 'e');
     const ex = Number((await q(`SELECT COALESCE(SUM(amount-tax),0) e FROM bl_expenses e WHERE exp_date BETWEEN $1 AND $2 AND ${bwe}`, pe)).rows[0].e);
     const net = br2(+s.sales - +s.ret), gp = br2(net - +s.pur);
@@ -4101,5 +4824,5 @@ app.get('/api/bl/export/:what', need('billing', 'purchases'), wrap(async (req, r
   await wb.xlsx.write(res); res.end();
 }));
 
-init().then(initGST).then(initChat).then(initProjects).then(initWA).then(initBL).then(initWC).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
+init().then(initGST).then(initChat).then(initProjects).then(initWA).then(initBL).then(initWC).then(initRoles).then(initFV).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
   .catch(e => { console.error('DB init failed', e.message); process.exit(1); });

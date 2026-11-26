@@ -234,3 +234,144 @@ A full GST billing section inside the CRM: **Billing** in the menu. It needs the
   - **Caching:** each GSTIN result is kept for 30 days, so repeat lookups are free.
 - **Ticket photos (report book, work photos)** now open inside the app with ⟲ / ⟳ Rotate and Save, instead of a new browser tab.
 - Env (optional): `GSTIN_API_KEY`, `GSTIN_API_URL` (default `https://www.gstinapi.in`).
+
+## Version 20 — Free service engineers
+- **Services → "Free engineers" tile**, right next to *Not assigned*. It shows how many service engineers have no job right now.
+- Tap the tile to see every engineer, in four groups: **Free now**, **Busy**, **Away today** and **All engineers**.
+  - **Free** means no job in *Assigned*, *On-Process* or *Pending*.
+  - **Busy** engineers show each open job: ticket no, status and customer. Tap a job to open it.
+  - **Away** means leave, a week off, a holiday or permission time.
+  - Each engineer shows today's attendance (checked in / checked out / not checked in) and when they finished their last job.
+- **Assign** on an engineer lists all *Not assigned* tickets; tap one to give it to that engineer. The free and not-assigned counts update straight away.
+- Technicians don't see this list. Office staff need the create, assign or edit services permission.
+
+## Version 21 — Brand-wise WhatsApp numbers and templates
+- **Any number of WhatsApp numbers**, each with a **brand** and a **use** (Sales or Service). For example: Heaven Sales, Heaven Service, G Media Sales, G Media Service, Rago Infotech Sales and Rago Infotech Service.
+  - Add them in Profile → WhatsApp setup → **📱 Numbers → ＋ Add number**.
+  - Your existing Sales and Service numbers carry over with all their chats.
+- **Switch on / off** each number. A switched-off number is hidden from staff and can't send. Messages that arrive on it are still saved.
+- **Brand access:**
+  - Staff of a brand see only that brand's numbers and chats. A number set to *All brands* is shared.
+  - Super Admin sees every number.
+  - Push alerts go only to people who can see the number.
+- **Inbox:** one tab per number plus *All chats*, with an unread count on each. In *All chats*, every chat shows which number it is on.
+- **＋ Chat** starts a chat with any mobile number from the number you pick.
+- **Which number is used:** from a lead, ticket or bill, the app picks the brand's Sales number (for leads) or Service number (for tickets). When more than one number could fit, it asks **"Send from which WhatsApp number?"**
+- **Sales numbers:** unknown numbers that message a Sales number become a lead of that number's brand. You can turn this off per number.
+- **Different company accounts:** a number can have its own WhatsApp Business Account ID and its own token, for a company in another Meta business portfolio.
+  - **Test connection** checks every number and every account.
+  - It switches each account's messages to the CRM on.
+- **Templates (to message a customer more than 24 hours after their last message):**
+  - **📋 Templates** lists every template with Meta's review status (approved, pending, rejected with the reason).
+  - **➕ New template** offers ready-made texts for each brand: greeting, enquiry follow-up, quotation sent, reconnect, service update, engineer visit, service done and payment reminder. Review and send them to Meta for approval from inside the CRM.
+  - Templates are named after the brand (`heaven_…`, `gmedia_…`, `rago_…`). Staff see only their own brand's templates and shared ones.
+- Monthly usage is shown per number.
+
+## Version 22 — Billing: brand choice, Bill of Supply, drafts, seal & signature, bank accounts
+- **Choose the brand at the top of the Billing Desk** (All brands · Heaven · G Media · …). Invoices, quotations, customers, expenses, the overview, the counts and the reports then show only that brand. The app remembers your choice. New bills are made for the chosen brand. Products and vendors are shared by all brands.
+- **Bill type on every bill: Regular (GST) or Bill of Supply.** A Bill of Supply adds no GST, hides the GST columns and prints with the title "Bill of Supply".
+- **Purchase price with GST or without GST:** set this on each product. When the product is used on a purchase, its rate follows that setting.
+- **Categories right inside the quotation / invoice:**
+  - Tap a category to see its products and add them with one tap.
+  - Tap **＋ Add category** to make a new one on the spot. You can also make one from the product form.
+  - Items are tagged with their category, and the printed bill groups the items under category headings.
+- **GST 18% by default.** The items header has a **GST** box with **Apply to all**, which sets the same GST on every item. It also has a **Rates: Without GST / With GST** switch for all items.
+- **＋ Add description** under an item now opens only a description box. HSN and unit still come from the product.
+- **Several bank accounts per brand** (Billing → Settings → Bank accounts; the first one is the default). While creating a quotation or invoice, choose which account to print, or choose "Don't show bank details".
+- **Round seal and signature:** upload them in Billing → Settings. The white paper background is removed automatically. They print above "Authorised signatory" on quotations and invoices. You can switch them off on any bill.
+- **Drafts:** closing a quotation or invoice you are creating asks you to **Save**, **Save as draft**, **Discard** or **Keep editing**. This happens with ✕, the Esc key or a tap outside. There is also a **📝 Save as draft** button.
+  - A draft has no number yet. It does not touch stock, totals or balances.
+  - Find drafts under the **📝 Drafts** filter. Open one with **Continue editing**. Saving it for real gives it the next number. A draft can also be deleted.
+- **Full view:** opening a quotation or invoice now shows the complete bill, exactly as it prints, with logo, items, GST table, bank, seal and signature. **☰ Summary** shows the short view. The printed / shared bill also fits better on phones.
+
+## Version 23 — Billing works like Swipe: table lists, row menus, full-page create, Convert at the top
+- **Lists as a table** for invoices, quotations, proforma invoices, challans, credit notes and purchases. Columns: Amount · Status · Bill # (with who made it) · Customer (with phone and a WhatsApp dot) · Date (with "an hour ago" / "Yesterday, 3:05 PM").
+  - **Status tabs with counts:** All · Open · Closed · Lost · Cancelled · Drafts. Invoices and purchases have All · Unpaid · Partial · Paid · Overdue · Cancelled · Drafts.
+  - A **period** box: This year (April to March) · This month · Last month · Last year · All time. There is also a search box and a **＋ Create** button.
+  - **Footer:** Total and Closed (for invoices: Received and Due), and pages of 50 with ‹ 1 / N ›.
+  - On phones every bill shows as a card.
+- **Buttons on each row:** ₹ (record a payment on an unpaid invoice), 👁 View, ➤ Send, and **•••**. The ••• menu has:
+  - Edit, Download PDF / Print, Thermal print, Duplicate, Send / share and Payment received
+  - Mark accepted / Mark lost, Credit note
+  - **Convert to** Invoice / Proforma invoice / Delivery challan
+  - Cancel
+  - Drafts have Continue editing and Delete draft instead.
+- **Create / edit opens as a full page** with a back arrow, the number box (prefix + automatic number) and Save at the top.
+  - Type (Regular · GST or Bill of Supply) and brand.
+  - A Select-customer panel and a Date / Validity / Reference panel.
+  - **Products & Services:** search a product, type the **Qty**, tap **＋ Add to Bill**. Or type any name and press Enter to add a one-time line. "⊕ Add new product" is right there, along with the category chips.
+  - Item table: Product name · Qty · **Unit price** · **Price with GST** (type either one and the other fills itself) · **Discount in % or ₹** (tap the % / ₹ button) · GST · Total.
+  - **Apply discount (%) to all items**, the GST Apply to all box, and an Items / Qty count.
+  - **Bottom bar:** Save as draft · Save and print · Save.
+- **Quotation view has its actions at the top:** Edit · Download PDF / Print · Send · ₹ Payment received · **Convert ▾** (to Invoice, Proforma invoice, Delivery challan) · ••• More (Thermal print, Duplicate, Mark accepted / lost, Credit note, Cancel). A proforma invoice can now also become a delivery challan.
+- **📊 Insights** (new Billing tile). It greets you ("Hi, name 👋") and shows any period: last 30 days, this month, last month, last 3 months, this year, last year or custom dates. Every number is compared with the period just before it.
+  - **Business overview:** a bar chart of Sales / Purchases / Expenses per day (per week or month for long periods), with the previous period in grey and an average line. Hover a bar to see its values; a Table view is also there. Next to it: Sales +, Purchases −, Expenses − and **Net**.
+  - **Receivables** and **Payables:** amount outstanding, overdue count, number of customers / vendors and the oldest bill. Aging breakdown: 0–5, 6–10, 11–20 and 20+ days.
+  - **Cash flow:** money in, money out (vendor payments + expenses) and net, with ↗ / ↘ %. Inflow **by mode** or **by bank**.
+  - **Expenses** with the top expense categories.
+  - **Customers:** active, repeat and with dues, plus top customers by revenue. **Vendors:** active and with dues, plus top vendors by spend.
+  - **Products:** units sold and top selling products. **Top categories** by revenue, units or orders. **Inventory health:** out of stock, low stock, healthy.
+  - Follows the brand chosen at the top.
+- **📦 Inventory** (new Billing tile):
+  - Four boxes: **Low stock** (items and qty), **Positive stock**, **Stock value at sale price** and **Stock value at purchase price**. Tap a box to filter.
+  - Search, category and status filters.
+  - Table: Item · Qty · Status (In stock / Low / Out) · Purchase price (incl. / excl. tax) · Sale price · Last updated · **Stock in / Stock out** buttons on every row.
+  - **⬇ Bulk stock in / ⬆ Bulk stock out:** pick many items, type each quantity and add a note, then save once.
+  - **🕘 Timeline:** every stock move (sales, purchases, returns, manual and bulk) with the bill number, who did it and the note.
+
+## Version 24 — Field Visits (sales staff check in / out at sites, photos, customers, GPS route and km)
+- New menu item **📍 Field Visits** for anyone with the new permission **"Field visits"**. Sales staff get it automatically; switch it on for others in Team. A second permission, **"See everyone's field visits, routes & kilometres"**, is for managers. Super Admin and Admins have both.
+- **▶ Start day:** tap it when leaving home or the office. Kilometres are counted from there.
+- **📍 Check in here:**
+  - The phone's GPS location is saved, with its accuracy shown.
+  - **Old customer:** search by name, company or phone. It shows ✅ *Old customer* with their details, service tickets and **earlier visits** (date, who went, result and notes).
+  - **New customer:** name, company / shop, phone and address. If the phone number already belongs to a customer, the app offers to use that customer.
+  - **Purpose:** Sales visit · Product demo · Follow-up · Site survey · Payment collection · Service / support · Other.
+  - **Photos** straight from the camera, plus an optional note.
+- **While on site:** a card shows the customer, the check-in time and how long you have been there. Add more photos (up to 20) and write the **description**; it saves by itself.
+- **✓ Check out:**
+  - The description is required, and so is **how it went**: Interested · Quotation needed · Order confirmed · Follow-up later · Not interested · Payment collected · Other.
+  - Next follow-up date (optional). The check-out GPS location is saved.
+  - A **new customer is saved to Customers**, and also **added as a lead** (source "Field visit", assigned to the sales person, with the site location and the visit note) unless you switch that off.
+- Then travel to the next place and check in / check out again. **🏁 End day** when finished. You can still check in later if needed.
+- **Route & kilometres:**
+  - While the day is on and the app is open, the phone's GPS position is recorded every 30 seconds or more.
+  - Poor GPS fixes and impossible jumps are ignored.
+  - The km between each place is the distance along the recorded route.
+  - If the app was closed while travelling (iPhone and Android don't let web apps track in the background), it uses the straight-line distance + 25% and marks it **"approx."**. Keep the app open while travelling for exact km.
+- **Day view:**
+  - Tiles: Visits · Km travelled · Time on site · New customers.
+  - A **map** of the route with numbered stops (start point in green) and **Open route in Google Maps**.
+  - A timeline of every stop: check-in / check-out times, time spent, km from the previous place, purpose, result, follow-up, phone, address, description, photos (tap to enlarge), check-in and check-out places on Google Maps, and links to the lead and customer.
+  - Pick any date to see past days.
+- **Team** (managers): every person on the road that day, with visits, km, time on site, first check-in, last check-out and where they are now ("At Murugan Traders" / "Travelling" / "Day ended"). Tap a person to see their day, map and photos.
+- **Month report:** km and visits per day for any person and month. Tap a day to open it.
+- The map library is now inside the app (`public/vendor/leaflet`), so maps don't depend on another website. Map tiles come from OpenStreetMap.
+
+## Version 25 — Real Google Maps road km, ₹/km travel allowance, product move up / down, expense categories
+- **Kilometres now come from Google Maps road distance** (Google Routes API):
+  - Each leg is measured by road: start of day → first visit, visit → next visit, last visit → end of day.
+  - **This works even when the app was closed while travelling**, because Google gives the road distance between the check-out point and the next check-in point.
+  - When the app was open, the GPS points are sent to Google as "via" points, so detours are counted too.
+  - Each leg shows "12.4 km by road (Google Maps · ~25 min)". Results are stored, so Google is asked only once per leg.
+  - Without a key (or if Google fails), it falls back to the GPS route / straight-line estimate as before. Super Admin sees Google's error message and a **↻ Recalculate km with Google** button.
+- **Super Admin → Field Visits → ⚙ Km & rate:**
+  - Google Maps API key (stored safely, shown only as ••••1234) with a **🧪 Test Google key** button.
+  - Vehicle: Two-wheeler or Car (Google measures the road route for that vehicle).
+  - **Rate per km (₹)** for everyone, plus an optional **different rate per person**.
+- **Travel allowance = km × rate**, shown on the day view (tile "Travel allowance ₹… @ ₹x/km"), in the Team view (per person and total) and in the Month report (per day and total). When a person taps **End day**, that day's rate is fixed, so later rate changes don't alter past days.
+- **Quotation / invoice items can be re-ordered:** **▲ / ▼** buttons under each item (big on phones), and on a computer you can drag the **⋮⋮** handle. Items save and print in that order.
+- **Expense categories:** **＋ New category** in the expense form and **＋ Add category** in the Expenses list. New categories appear with the standard ones, and "Other" stays last.
+- **New role "Sales admin"** (made by Super Admin or an Admin with Team access). It manages the sales team:
+  - sees **all leads of their brand** (new feature "See all leads of the brand")
+  - sees **everyone's field visits** with routes, km and allowance
+  - billing and team attendance
+- **🎭 Roles & features** (Super Admin, Team page):
+  - **Add your own roles** (e.g. "Marketing Executive"). Each one "works like" Admin, Sales admin, Sales, Technician or Support staff and has its own feature switches.
+  - **Change the standard features** of each built-in role, or **Reset to standard**.
+  - Optional: **give the new features to people who already have that role**.
+  - When adding a member, the new roles appear in the Role list with their features ticked automatically. You can still switch any feature on / off for that one person.
+  - Removing a role keeps the people's features; their label goes back to the base role.
+  - Support staff can now also be given Field visits.
+- **Desktop sidebar:** shows icons only. **Move the mouse over it and it opens with the names** (over the page, so nothing jumps). It closes when the mouse leaves.
+- **Smoother on phones:** faster taps (no tap delay or grey flash), a small press effect on buttons, and pages / pop-ups don't drag the whole app when scrolled to the end.
