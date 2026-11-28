@@ -567,6 +567,11 @@ iPhone: keep using Safari → Share → Add to Home Screen. Call leads are not p
   - **Pause / Activate** (a paused company cannot log in).
 - Next steps: modules + free plan (Attendance free up to 5 users), then signup with Razorpay.
 
+## Version 43 — Staff detail report, top-only branch filter, smarter Rago Help
+
+- **Rago Help** is smarter: many more topics with numbered steps, understands spelling mistakes and short words (bill, quote, salary, bus tiket…), suggests topics for the screen you are on, **👉 Show me** opens the screen and highlights the button, and **📊 Today summary / This month summary / Who is late today** answer with live numbers.
+- Staff report one-person detail, money collected, and the single top branch filter (see below).
+
 ## Version 42 — Yellow & ash again, new logo, Staff report, Bike / Bus travel, two packages
 
 **Look** — back to the first Rago **yellow and ash** look everywhere (CRM, sign-up page, Console, invoices, emails). The glass designs are removed. The **logo** is now a yellow feather with an ash "Rago" (app icon, login, website).
@@ -583,6 +588,10 @@ iPhone: keep using Safari → Share → Add to Home Screen. Call leads are not p
 - **End day**: enter the **km noted on the bike meter** (optional) and, if going back by bus, the return ticket.
 - The day shows **map km vs km noted by hand**; a difference of **5 km or more is flagged ⚠**. Admins can correct the noted km (＋ Add km).
 - Field month report and Staff report show petrol, bus fare and total travel.
+
+**Staff report — one person in detail** — pick a person in the **Staff** box (or tap **Details ›**): days present / late / leave, services done (and amount billed), **money collected** (cash and other), invoices and quotations (count, ₹ and the full list), leads, follow-ups, calls, field visits, km and travel claim — with lists of services, money collected, bills, attendance days and field days. **🖨 Print** prints all of it with a signature line. The team table also shows **Collected ₹**.
+
+**One branch filter — only at the top** — the 🏢 branch button at the top now controls the whole CRM: dashboard, customers, leads, services, billing, payments, payroll, attendance (MD overview, board, report), team, calls, field sales, warranty and the staff report all show only the chosen branch. The branch tiles / selectors inside the screens are removed. (Holidays are the same for all branches.)
 
 **Two packages from the same code**
 - **rago-crm-heaven** — for Heaven Automation & G Media (your existing data). `SAAS=0`: no sign-up page, no Console/Companies, no plans; everything is on. `COMPANY_NAME=Heaven Automation`, `BRANCHES=Heaven,G Media` (only used on a brand-new database — existing data is never changed).

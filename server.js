@@ -156,6 +156,8 @@ const isSuper = u => u.role === SUPER;
 const canDel = u => isSuper(u) || (u.permissions || []).includes('delete');   // Super Admin always; others only when given "Delete records"
 const delNeed = (req, res, next) => canDel(req.user) ? next() : res.status(403).json({ error: 'You don’t have permission to delete. Ask the Super Admin.' });
 const isBoss = u => u.role === SUPER || u.role === 'Admin';
+const brQ = req => +req.query.brand || 0;   // branch chosen at the top (X-Branch) or by a screen
+const brUserSQL = (req, alias = 'u') => brQ(req) ? ` AND (${alias}.brand_id=${brQ(req)} OR ${alias}.pay_brand_id=${brQ(req)})` : '';
 const can = (u, k) => (isSuper(u) && !u._superPerms) || (u.permissions || []).includes(k);   // a client company's Super Admin gets only what its plan includes
 const isTech = u => u.role === 'Technician';
 const need = (...ks) => (req, res, next) => ks.some(k => can(req.user, k)) ? next() : res.status(403).json({ error: 'Not allowed' });
@@ -176,7 +178,7 @@ const auth = wrap(async (req, res, next) => {
   const u = d && (await q('SELECT u.id,u.name,u.email,u.phone,u.role,u.job_role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at, b.name brand_name FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.id=$1 AND u.active', [d.id])).rows[0];
   if (!u) return res.status(401).json({ error: 'Login required' });
   req.user = u; await planApply(req); seen(req);
-  if (req.method === 'GET' && !u.brand_id && +req.headers['x-branch'] && req.query.brand === undefined) req.query.brand = String(+req.headers['x-branch']);   // top branch switcher
+  if (req.method === 'GET' && !u.brand_id && +req.headers['x-branch'] && !+req.query.brand) req.query.brand = String(+req.headers['x-branch']);   // top branch switcher
   next();
 });
 const me = u => { const pl = planOf(CO_CACHE.get(coId())); return { id: u.id, name: u.name, role: u.role, username: u.username, brand_id: u.brand_id || null, brand: u.brand_name || null, photo_v: u.photo_v || 0,
@@ -704,7 +706,7 @@ const payFields = (me, b, cur) => {
   if (b.att_rules && typeof b.att_rules === 'object') { const c = cleanRules(b.att_rules, cur && cur.att_rules); if (c.error) o.error = c.error; else o.att_rules = c.rules; }
   return o;
 };
-app.get('/api/users', need('team'), wrap(async (req, res) => res.json((await q(`SELECT u.id,u.name,u.email,u.phone,u.role,u.job_role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at,u.pay_brand_id,to_char(u.join_date,'YYYY-MM-DD') join_date,${isSuper(req.user) ? 'u.salary, u.att_rules' : 'NULL salary'}, COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id ORDER BY u.active DESC, u.role, u.name`)).rows.map(pub).map(fvRateAdd(req.user, await fvCfg())))));
+app.get('/api/users', need('team'), wrap(async (req, res) => res.json((await q(`SELECT u.id,u.name,u.email,u.phone,u.role,u.job_role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at,u.pay_brand_id,to_char(u.join_date,'YYYY-MM-DD') join_date,${isSuper(req.user) ? 'u.salary, u.att_rules' : 'NULL salary'}, COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id WHERE true${brUserSQL(req)} ORDER BY u.active DESC, u.role, u.name`)).rows.map(pub).map(fvRateAdd(req.user, await fvCfg())))));
 app.post('/api/users', need('team'), wrap(async (req, res) => {
   const b = req.body || {};
   if (!b.name || !b.email || !b.phone) return res.status(400).json({ error: 'Name, email and phone are required' });
@@ -864,7 +866,7 @@ app.get('/api/customers/:id/full', need('customers', 'service_create'), wrap(asy
 app.get('/api/customers', need('customers', 'service_create'), wrap(async (req, res) => {
   const p = ['%' + (req.query.q || '') + '%'], sc = custScope(req.user, p);
   res.json((await q(`SELECT c.*, b.name brand, (SELECT COUNT(*)::int FROM services s WHERE s.customer_id=c.id) tickets FROM customers c LEFT JOIN brands b ON b.id=c.brand_id
-    WHERE (c.name ILIKE $1 OR c.phone ILIKE $1 OR c.company ILIKE $1) AND ${sc} ORDER BY c.name LIMIT 100`, p)).rows);
+    WHERE (c.name ILIKE $1 OR c.phone ILIKE $1 OR c.company ILIKE $1) AND ${sc}${brQ(req) ? ` AND c.brand_id=${brQ(req)}` : ''} ORDER BY c.name LIMIT 100`, p)).rows);
 }));
 // customer picker for attendance requests (everyone): technicians see customers of their jobs (open jobs first)
 app.get('/api/customers/pick', wrap(async (req, res) => {
@@ -1952,7 +1954,7 @@ app.get('/api/attendance/month', wrap(async (req, res) => {
 }));
 app.get('/api/attendance/report', attNeed, wrap(async (req, res) => {
   const today = await todayIST(), m = isMonth(req.query.month) ? req.query.month : today.slice(0, 7), start = await attStart(), off = await office();
-  const users = (await q(`SELECT u.id,u.name,u.role,u.created_at,to_char(u.join_date,'YYYY-MM-DD') join_date,u.photo_v,COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id WHERE u.active AND u.role<>$1 ORDER BY u.role, u.name`, [SUPER])).rows;
+  const users = (await q(`SELECT u.id,u.name,u.role,u.created_at,to_char(u.join_date,'YYYY-MM-DD') join_date,u.photo_v,COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id WHERE u.active AND u.role<>$1${brUserSQL(req)} ORDER BY u.role, u.name`, [SUPER])).rows;
   const rows = [];
   for (const u of users) {
     const x = await monthFor(u, m, today, start, off), td = x.days.find(d => d.d === today);
@@ -1963,7 +1965,7 @@ app.get('/api/attendance/report', attNeed, wrap(async (req, res) => {
 // dashboard: who is on leave / permission today, who is in, what is waiting for approval
 app.get('/api/attendance/board', attNeed, wrap(async (req, res) => {
   const today = await todayIST(), off = await office();
-  const staff = (await q(`SELECT u.id,u.name,u.role,u.photo_v,u.att_rules,COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id WHERE u.active AND u.role<>$1 ORDER BY u.name`, [SUPER])).rows;
+  const staff = (await q(`SELECT u.id,u.name,u.role,u.photo_v,u.att_rules,COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id WHERE u.active AND u.role<>$1${brUserSQL(req)} ORDER BY u.name`, [SUPER])).rows;
   const att = {}; (await q(`SELECT * FROM attendance WHERE day=$1`, [today])).rows.forEach(r => { att[r.user_id] = r; });
   const tr = (await q(`${LSELR} WHERE r.status='Approved' AND r.kind IN ('Leave','Permission') AND r.from_date<=$1 AND r.to_date>=$1 ORDER BY r.kind, r.session, u.name`, [today])).rows;
   const pending = (await q(`${LSELR} WHERE r.status='Pending' ORDER BY r.created_at LIMIT 20`)).rows;
@@ -1979,7 +1981,7 @@ app.get('/api/attendance/board', attNeed, wrap(async (req, res) => {
 // MD (Super Admin) overview: everything about the team's attendance on one screen
 app.get('/api/attendance/md', superOnly, wrap(async (req, res) => {
   const today = await todayIST(), m = isMonth(req.query.month) ? req.query.month : today.slice(0, 7), start = await attStart(), off = await office();
-  const users = (await q(`SELECT u.id,u.name,u.role,u.created_at,to_char(u.join_date,'YYYY-MM-DD') join_date,u.photo_v,COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id WHERE u.active AND u.role<>$1 ORDER BY u.name`, [SUPER])).rows;
+  const users = (await q(`SELECT u.id,u.name,u.role,u.created_at,to_char(u.join_date,'YYYY-MM-DD') join_date,u.photo_v,COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id WHERE u.active AND u.role<>$1${brUserSQL(req)} ORDER BY u.name`, [SUPER])).rows;
   const days = daysOf(m), daily = Object.fromEntries(days.map(d => [d, { d, present: 0, late: 0, leave: 0, perm: 0, absent: 0, staff: 0 }]));
   const rows = [], todayList = [];
   for (const u of users) {
@@ -2228,7 +2230,7 @@ app.get('/api/chats', need('chat'), wrap(async (req, res) => {
 }));
 // people you can chat with / tag
 app.get('/api/chat/people', wrap(async (req, res) => {
-  res.json({ items: (await q(`SELECT u.id, u.name, u.role, u.photo_v, COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id WHERE u.active ORDER BY u.name`)).rows });
+  res.json({ items: (await q(`SELECT u.id, u.name, u.role, u.photo_v, COALESCE(b.name, pb.name) brand FROM users u LEFT JOIN brands b ON b.id=u.brand_id LEFT JOIN brands pb ON pb.id=u.pay_brand_id WHERE u.active${brUserSQL(req)} ORDER BY u.name`)).rows });
 }));
 app.post('/api/chats/dm', need('chat'), wrap(async (req, res) => {
   const other = +(req.body || {}).user_id, me = req.user.id;
@@ -3858,7 +3860,7 @@ app.get('/api/fv/dashboard', need('field_team'), wrap(async (req, res) => {
   const today = await todayIST(), ok = x => /^\d{4}-\d{2}-\d{2}$/.test(x || '');
   const to = ok(req.query.to) ? req.query.to : today, from = ok(req.query.from) ? req.query.from : today.slice(0, 8) + '01';
   const bp = [], bw = req.user.brand_id && !isSuper(req.user) ? (bp.push(req.user.brand_id), `AND (u.brand_id IS NULL OR u.brand_id=$${bp.length})`) : '';
-  const staff = (await q(`SELECT u.id, u.name, u.photo_v, u.job_role, u.role FROM users u WHERE u.active AND 'field'=ANY(u.permissions) AND u.role<>'${SUPER}' ${bw} ORDER BY u.name`, bp)).rows;
+  const staff = (await q(`SELECT u.id, u.name, u.photo_v, u.job_role, u.role FROM users u WHERE u.active AND 'field'=ANY(u.permissions) AND u.role<>'${SUPER}' ${bw}${brUserSQL(req)} ORDER BY u.name`, bp)).rows;
   const ids = staff.map(u => u.id), cfg = await fvCfg();
   const days = ids.length ? (await q(`SELECT DISTINCT user_id, to_char(day,'YYYY-MM-DD') AS d FROM (SELECT user_id, day FROM fv_visits WHERE day BETWEEN $1 AND $2 UNION SELECT user_id, day FROM fv_days WHERE day BETWEEN $1 AND $2 AND started_at IS NOT NULL) t WHERE user_id=ANY($3) ORDER BY 2`, [from, to, ids])).rows : [];
   const per = Object.fromEntries(staff.map(u => [u.id, { id: u.id, name: u.name, photo_v: u.photo_v, role: u.job_role || u.role, rate: fvRate(cfg, u.id), days: 0, visits: 0, km: 0, amount: 0, new_customers: 0, orders: 0, on_site_min: 0, planned: 0, overdue: 0, now: 'Not started', last: null }]));
@@ -4090,6 +4092,9 @@ app.get('/api/staff-report', wrap(async (req, res) => {
   const svc = by(await one(`SELECT technician_id uid, COUNT(*) FILTER (WHERE status IN ('Resolved','Awaiting Payment'))::int done, COUNT(*) FILTER (WHERE status NOT IN ('Resolved','Awaiting Payment','Cancelled'))::int open FROM services WHERE technician_id IS NOT NULL AND (${bw('COALESCE(work_done_on,submitted_on)')} OR status NOT IN ('Resolved','Awaiting Payment','Cancelled')) GROUP BY 1`, [from, to]));
   const svcNew = by(await one(`SELECT u.id uid, COUNT(*)::int n FROM service_history h JOIN users u ON u.name=h.done_by WHERE (h.changes ILIKE 'Ticket created%' OR h.changes ILIKE 'Job created%' OR h.changes ILIKE 'Created from%') AND ${bw('h.created_at')} GROUP BY 1`, [from, to]));
   const att = by(await one(`SELECT user_id uid, COUNT(*) FILTER (WHERE status IN ('Present','Late','Half Day','On Duty'))::int present, COUNT(*) FILTER (WHERE status='Late')::int late, COUNT(*) FILTER (WHERE status ILIKE '%leave%' OR status='Absent')::int absent FROM attendance WHERE day BETWEEN $1 AND $2 GROUP BY 1`, [from, to]));
+  const col = {};
+  for (const r of await one(`SELECT received_by nm, COALESCE(SUM(amount),0)::float amt, COALESCE(SUM(amount) FILTER (WHERE COALESCE(mode,'Cash') ILIKE 'cash'),0)::float cash FROM payments WHERE paid_on BETWEEN $1 AND $2 AND received_by IS NOT NULL GROUP BY 1`, [from, to])) { const c = col[r.nm] = col[r.nm] || { amt: 0, cash: 0 }; c.amt += r.amt; c.cash += r.cash; }
+  for (const r of await one(`SELECT p.by_name nm, COALESCE(SUM(p.amount),0)::float amt, COALESCE(SUM(p.amount) FILTER (WHERE COALESCE(p.mode,'Cash') ILIKE 'cash'),0)::float cash FROM bl_payments p JOIN bl_docs d ON d.id=p.doc_id WHERE d.type<>'purchase' AND p.pay_date BETWEEN $1 AND $2 AND p.by_name IS NOT NULL GROUP BY 1`, [from, to])) { const c = col[r.nm] = col[r.nm] || { amt: 0, cash: 0 }; c.amt += r.amt; c.cash += r.cash; }
   const fvv = by(await one(`SELECT user_id uid, COUNT(*)::int visits, COUNT(DISTINCT day)::int days, COALESCE(SUM(fare),0)::float fares FROM fv_visits WHERE day BETWEEN $1 AND $2 GROUP BY 1`, [from, to]));
   const rows = [];
   for (const u of users) {
@@ -4099,11 +4104,34 @@ app.get('/api/staff-report', wrap(async (req, res) => {
     const L = leads[u.id] || {}, D = docs[u.id] || {}, C = calls[u.id] || {}, S = svc[u.id] || {}, A = att[u.id] || {};
     rows.push({ id: u.id, name: u.name, role: u.role, leads: L.n || 0, won: L.won || 0, followups: (acts[u.id] || {}).n || 0, quotes: D.quotes || 0, quote_amt: D.quote_amt || 0, invoices: D.invoices || 0, invoice_amt: D.invoice_amt || 0,
       calls: C.n || 0, call_min: Math.round((C.secs || 0) / 60), services_done: S.done || 0, services_open: S.open || 0, services_new: (svcNew[u.id] || {}).n || 0,
-      visits: f.visits || 0, field_days: f.days || 0, km: Math.round(km * 10) / 10, petrol: Math.round(petrol), fares: Math.round(fares), travel: Math.round(petrol + fares), present: A.present || 0, late: A.late || 0, absent: A.absent || 0 });
+      visits: f.visits || 0, field_days: f.days || 0, collected: Math.round((col[u.name] || {}).amt || 0), cash: Math.round((col[u.name] || {}).cash || 0), km: Math.round(km * 10) / 10, petrol: Math.round(petrol), fares: Math.round(fares), travel: Math.round(petrol + fares), present: A.present || 0, late: A.late || 0, absent: A.absent || 0 });
   }
-  const T = k => rows.reduce((t, r) => t + (Number(r[k]) || 0), 0), sc = r => r.leads + r.followups + r.quotes + r.invoices + r.calls + r.services_done + r.services_new + r.visits + r.present;
+  const T = k => rows.reduce((t, r) => t + (Number(r[k]) || 0), 0), sc = r => r.leads + r.followups + r.quotes + r.invoices + r.calls + r.services_done + r.services_new + r.visits + r.present + (r.collected ? 1 : 0);
   rows.sort((a, b) => sc(b) - sc(a));
-  res.json({ from, to, rows, totals: Object.fromEntries(['leads', 'won', 'followups', 'quotes', 'quote_amt', 'invoices', 'invoice_amt', 'calls', 'call_min', 'services_done', 'services_open', 'services_new', 'visits', 'km', 'petrol', 'fares', 'travel', 'present', 'late', 'absent'].map(k => [k, Math.round(T(k) * 10) / 10])) });
+  res.json({ from, to, rows, totals: Object.fromEntries(['leads', 'won', 'followups', 'quotes', 'quote_amt', 'invoices', 'invoice_amt', 'calls', 'call_min', 'services_done', 'services_open', 'services_new', 'visits', 'km', 'petrol', 'fares', 'travel', 'present', 'late', 'absent', 'collected', 'cash'].map(k => [k, Math.round(T(k) * 10) / 10])) });
+}));
+app.get('/api/staff-report/:id/detail', wrap(async (req, res) => {   // one person: summary + lists (bills, services, money collected, attendance, field days)
+  if (!(isBoss(req.user) || can(req.user, 'dashboard') || can(req.user, 'att_team') || +req.params.id === req.user.id)) return res.status(403).json({ error: 'Not allowed' });
+  const u = (await q('SELECT id, name, role, phone, email FROM users WHERE id=$1', [+req.params.id])).rows[0]; if (!u) return res.status(404).json({ error: 'Not found' });
+  const today = await todayIST(), to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : today, from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : to.slice(0, 8) + '01';
+  const one = async (sql, pp) => { try { return (await q(sql, pp)).rows; } catch (e) { return []; } }, bw = c => `(${c} AT TIME ZONE '${TZ}')::date BETWEEN $2 AND $3`;
+  const docs = await one(`SELECT type, no, to_char(doc_date,'YYYY-MM-DD') date, COALESCE(party->>'company',party->>'name','') party, total::float, paid::float, status FROM bl_docs WHERE created_by=$1 AND status NOT IN ('Draft','Cancelled') AND type IN ('quotation','invoice','proforma','challan','credit_note') AND doc_date BETWEEN $2 AND $3 ORDER BY doc_date, id`, [u.id, from, to]);
+  const services = await one(`SELECT s.ticket_no, s.status, COALESCE(c.company,c.name,'') customer, COALESCE(s.product,s.service_type,'') what, to_char(COALESCE(s.work_done_on,s.submitted_on) AT TIME ZONE '${TZ}','YYYY-MM-DD') date, COALESCE(s.charges_applied,0)::float amount, (s.technician_id=$1) tech FROM services s LEFT JOIN customers c ON c.id=s.customer_id
+    WHERE (s.technician_id=$1 OR s.helper_id=$1) AND (${bw('COALESCE(s.work_done_on,s.submitted_on)')} OR s.status NOT IN ('Resolved','Awaiting Payment','Cancelled')) ORDER BY 5`, [u.id, from, to]);
+  const money = [...await one(`SELECT to_char(p.paid_on,'YYYY-MM-DD') date, p.amount::float, COALESCE(p.mode,'Cash') mode, 'Ticket #' || s.ticket_no || COALESCE(' · ' || c.name,'') what FROM payments p JOIN services s ON s.id=p.service_id LEFT JOIN customers c ON c.id=s.customer_id WHERE p.received_by=$1 AND p.paid_on BETWEEN $2 AND $3`, [u.name, from, to]),
+    ...await one(`SELECT to_char(p.pay_date,'YYYY-MM-DD') date, p.amount::float, COALESCE(p.mode,'Cash') mode, d.no || ' · ' || COALESCE(d.party->>'company',d.party->>'name','') what FROM bl_payments p JOIN bl_docs d ON d.id=p.doc_id WHERE d.type<>'purchase' AND p.by_name=$1 AND p.pay_date BETWEEN $2 AND $3`, [u.name, from, to])].sort((a, b) => a.date < b.date ? -1 : 1);
+  const att = await one(`SELECT to_char(day,'YYYY-MM-DD') day, status, to_char(check_in AT TIME ZONE '${TZ}','HH12:MI AM') cin, to_char(check_out AT TIME ZONE '${TZ}','HH12:MI AM') cout FROM attendance WHERE user_id=$1 AND day BETWEEN $2 AND $3 ORDER BY day`, [u.id, from, to]);
+  const calls = (await one(`SELECT COUNT(*)::int n, COALESCE(SUM(duration),0)::int secs FROM calls WHERE user_id=$1 AND ${bw('started_at')}`, [u.id, from, to]))[0] || { n: 0, secs: 0 };
+  const leads = (await one(`SELECT COUNT(*)::int n, COUNT(*) FILTER (WHERE stage='Closed Won')::int won FROM leads WHERE created_by=$1 AND ${bw('created_at')}`, [u.id, from, to]))[0] || { n: 0, won: 0 };
+  const follow = (await one(`SELECT COUNT(*)::int n FROM lead_activity WHERE by_name=$1 AND ${bw('created_at')}`, [u.name, from, to]))[0] || { n: 0 };
+  const field = []; for (const d of await one(`SELECT DISTINCT to_char(day,'YYYY-MM-DD') d FROM fv_visits WHERE user_id=$1 AND day BETWEEN $2 AND $3 ORDER BY 1 LIMIT 62`, [u.id, from, to])) { try { const x = await fvDay(u.id, d.d); field.push({ day: d.d, visits: x.visits.length, km: x.km, manual_km: x.manual_km, km_flag: x.km_flag, petrol: x.petrol, fares: x.fares, amount: x.amount }); } catch (e) {} }
+  const S = (L, k, f) => Math.round(L.filter(f || (() => true)).reduce((t, x) => t + (Number(x[k]) || 0), 0));
+  const summary = { leads: leads.n, won: leads.won, followups: follow.n, quotes: docs.filter(d => d.type === 'quotation').length, quote_amt: S(docs, 'total', d => d.type === 'quotation'), invoices: docs.filter(d => d.type === 'invoice').length, invoice_amt: S(docs, 'total', d => d.type === 'invoice'),
+    calls: calls.n, call_min: Math.round(calls.secs / 60), services_done: services.filter(x => ['Resolved', 'Awaiting Payment'].includes(x.status)).length, services_open: services.filter(x => !['Resolved', 'Awaiting Payment', 'Cancelled'].includes(x.status)).length,
+    service_amt: S(services, 'amount', x => ['Resolved', 'Awaiting Payment'].includes(x.status)), collected: S(money, 'amount'), cash: S(money, 'amount', m => /cash/i.test(m.mode)), other: S(money, 'amount', m => !/cash/i.test(m.mode)),
+    present: att.filter(a => /present|late|half|duty/i.test(a.status)).length, late: att.filter(a => /late/i.test(a.status)).length, absent: att.filter(a => /leave|absent/i.test(a.status)).length,
+    visits: S(field, 'visits'), km: Math.round(field.reduce((t, x) => t + x.km, 0) * 10) / 10, petrol: S(field, 'petrol'), fares: S(field, 'fares'), travel: S(field, 'amount') };
+  res.json({ user: u, from, to, summary, docs, services, money, att, field });
 }));
 app.get('/api/staff-report/:id/history', wrap(async (req, res) => {   // one person's activity, newest first
   if (!(isBoss(req.user) || can(req.user, 'dashboard') || can(req.user, 'att_team') || +req.params.id === req.user.id)) return res.status(403).json({ error: 'Not allowed' });
@@ -5346,7 +5374,7 @@ app.post('/api/calls/device/sync', wrap(async (req, res) => {    // calls from t
 }));
 app.get('/api/calls', need('calls'), wrap(async (req, res) => {
   const p = [], st = ['pending', 'accepted', 'ignored', 'existing'].includes(req.query.status) ? req.query.status : 'pending';
-  let sc = callSee(req.user, p); if (+req.query.user) { p.push(+req.query.user); sc += ` AND c.user_id=$${p.length}`; }
+  let sc = callSee(req.user, p); if (+req.query.user) { p.push(+req.query.user); sc += ` AND c.user_id=$${p.length}`; } if (brQ(req)) sc += ` AND c.brand_id=${brQ(req)}`;
   const p2 = p.slice(), sc2 = sc; p.push(st);
   const items = (await q(`SELECT c.*, l.name lead_name FROM calls c LEFT JOIN leads l ON l.id=c.lead_id WHERE ${sc} AND c.status=$${p.length} ORDER BY c.started_at DESC LIMIT 300`, p)).rows;
   const cnt = (await q(`SELECT status, COUNT(*)::int n FROM calls c WHERE ${sc2} GROUP BY status`, p2)).rows.reduce((o, r) => (o[r.status] = r.n, o), {});
