@@ -14,6 +14,12 @@ services:
         value: Admin123
       - key: NODE_VERSION
         value: 20
+      - key: SAAS
+        value: "0"
+      - key: COMPANY_NAME
+        value: Heaven Automation
+      - key: BRANCHES
+        value: Heaven,G Media
 databases:
   - name: rago-crm-db
     plan: free

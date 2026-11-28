@@ -10,20 +10,37 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL && !/localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL) ? { rejectUnauthorized: false } : false,
 });
 pool.on('connect', c => { c.query("SET TIME ZONE 'Asia/Kolkata'").catch(() => {}); });   // eslint-disable-line   // dates & 'this month' in India time
-const q = (sql, p) => pool.query(sql, p);
+// Company accounts: each company has its own Postgres schema with the same tables. Company #1 (the original) is "public".
+const { AsyncLocalStorage } = require('async_hooks');
+const CTX = new AsyncLocalStorage();
+const coSchema = () => (CTX.getStore() || {}).s || 'public';
+const coId = () => (CTX.getStore() || {}).c || 1;
+const q = async (sql, p) => {
+  const sch = coSchema(), c = await pool.connect();
+  try { if (c._sp !== sch) { await c.query(`SET search_path TO "${sch}"`); c._sp = sch; } return await c.query(sql, p); }
+  finally { c.release(); }
+};
+const P = (sql, p) => pool.query(sql, p);   // platform tables (schema "platform"), same for every company
+const inCo = (co, fn) => CTX.run({ s: co.schema || 'public', c: co.id || 1 }, fn);
+const coPrefix = () => coId() === 1 ? '' : `k${coId()}x`;   // added in front of links / tokens that work without login
+const coQS = (sep = '&') => coId() === 1 ? '' : `${sep}co=${coId()}`;
+let CO_CACHE = new Map();
+const coById = async id => { id = +id || 1; if (CO_CACHE.has(id)) return CO_CACHE.get(id); const r = (await P("SELECT *, to_char(trial_until,'YYYY-MM-DD') trial_until, to_char(paid_until,'YYYY-MM-DD') paid_until FROM platform.companies WHERE id=$1", [id])).rows[0] || null; if (r) CO_CACHE.set(id, r); return r; };
+const coFromTok = t => { const m = /^k(\d+)x/.exec(String(t || '')); return m ? +m[1] : 1; };
 const SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const app = express();
 app.set('trust proxy', 1);
+app.use((req, res, next) => CTX.run({ s: 'public', c: 1 }, next));
 app.use(express.json({ limit: '24mb', verify: (req, res, buf) => { if (req.originalUrl.startsWith('/webhook/')) req.rawBody = buf; } }));
 // ---------- protection: security headers, compact app code, no internal details in errors ----------
 const fs = require('fs');
 app.disable('x-powered-by');
-const CSP = ["default-src 'self'", "script-src 'self' 'unsafe-inline'", "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com", "font-src 'self' data: https://fonts.gstatic.com",
-  "img-src 'self' data: blob: https://*.tile.openstreetmap.org", "media-src 'self' data: blob:", "connect-src 'self'", "frame-src 'self' https://maps.google.com https://www.google.com",
+const CSP = ["default-src 'self'", "script-src 'self' 'unsafe-inline' https://checkout.razorpay.com", "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com", "font-src 'self' data: https://fonts.gstatic.com",
+  "img-src 'self' data: blob: https://*.tile.openstreetmap.org https://*.razorpay.com", "media-src 'self' data: blob:", "connect-src 'self' https://api.razorpay.com https://lumberjack.razorpay.com", "frame-src 'self' https://maps.google.com https://www.google.com https://api.razorpay.com https://checkout.razorpay.com",
   "worker-src 'self'", "manifest-src 'self'", "object-src 'none'", "base-uri 'self'", "form-action 'self'", "frame-ancestors 'self'"].join('; ');
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('X-Frame-Options', 'SAMEORIGIN'); res.setHeader('Referrer-Policy', 'same-origin');
-  res.setHeader('Permissions-Policy', 'geolocation=(self), camera=(self), microphone=(self), payment=(), usb=()');
+  res.setHeader('Permissions-Policy', 'geolocation=(self), camera=(self), microphone=(self), payment=(self "https://api.razorpay.com"), usb=()');
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin'); res.setHeader('Content-Security-Policy', CSP);
   if (req.secure) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store');
@@ -67,12 +84,13 @@ const VISIT_TYPES = ['Onsite', 'Offsite'];
 const LEAD_STAGES = ['New Enquiry', 'Contacted', 'Site Visit', 'Quotation', 'Negotiation', 'Closed Won', 'Closed Lost'];
 const LEAD_PRIORITIES = ['Hot', 'Warm', 'Cold'];
 const LEAD_SOURCES_DEF = ['Call', 'WhatsApp', 'Walk-in', 'Website', 'Instagram', 'Referral', 'Other'];
-const LEAD_SOURCES = [...LEAD_SOURCES_DEF], LEAD_INTERESTS = [];
 const LEAD_INTERESTS_DEF = ['CCTV Cameras', 'Home Automation', 'Smart Lock / Access', 'Intercom', 'Alarm / Security', 'Networking / Wi-Fi', 'Other'];
-LEAD_INTERESTS.push(...LEAD_INTERESTS_DEF);
 const STATUSES = ['New Ticket', 'Work Not Started', 'On-Process', 'Work Pending', 'Billing', 'Awaiting Payment', 'Resolved', 'Cancelled'];
 const APPROVALS = ['Pending', 'Approved', 'Rejected'];
-const BANKS = ['HDFC BANK LTD - 50200080113661', 'HDFC BANK LTD - 50200090005267', 'SERVICE PETTY CASH', 'SALES PETTY CASH'];
+const BANKS_CO1 = ['HDFC BANK LTD - 50200080113661', 'HDFC BANK LTD - 50200090005267', 'SERVICE PETTY CASH', 'SALES PETTY CASH'];
+// settings kept in memory are kept separately for every company
+const CO_STATE = new Map();
+const ST = () => { const id = coId(); let st = CO_STATE.get(id); if (!st) { st = { ROLE_DEF: {}, CUSTOM_ROLES: [], WA_CFG: null, GSTKEY: '', MAIL_KEY: null, LEAD_SOURCES: [...LEAD_SOURCES_DEF], LEAD_INTERESTS: [...LEAD_INTERESTS_DEF], BANKS: id === 1 ? [...BANKS_CO1] : ['Cash', 'Bank account'] }; CO_STATE.set(id, st); } return st; };
 // Super Admin = owner: everything, and the ONLY role that can delete anything.
 // Admin staff / Sales staff / Technician staff: Super Admin ticks what each person can use.
 const SUPER = 'Super Admin';
@@ -100,27 +118,27 @@ const PERMS = [
   { k: 'field', l: 'Field visits — check in / out at customer sites with GPS, photos & km travelled', g: 'Features' },
   { k: 'field_team', l: 'See everyone’s field visits, routes & kilometres', g: 'Attendance & pay' },
   { k: 'calls', l: 'Call leads — phone calls longer than the set time come in as leads (Rago Calls Android app)', g: 'Features' },
+  { k: 'delete', l: 'Delete records — leads, customers, service tickets, products, call logs, warranty cases', g: 'Actions' },
 ];
 const TECH_KEYS = ['view_phone', 'view_charges', 'chat', 'projects', 'voice_assign', 'whatsapp', 'field'], STAFF_KEYS = ['chat', 'field'];
 const ALL_KEYS = PERMS.map(p => p.k);
 const DEFAULTS = {
-  Admin: ALL_KEYS.filter(k => !['team', 'payroll'].includes(k)),
+  Admin: ALL_KEYS.filter(k => !['team', 'payroll', 'delete'].includes(k)),
   'Sales Admin': ['dashboard', 'customers', 'leads', 'leads_all', 'lead_lists', 'service_create', 'view_charges', 'view_phone', 'customer_edit', 'billing', 'chat', 'projects', 'voice_assign', 'whatsapp', 'field', 'field_team', 'att_team', 'calls'],
   Sales: ['dashboard', 'services', 'customers', 'leads', 'service_create', 'view_charges', 'view_phone', 'chat', 'projects', 'voice_assign', 'whatsapp', 'field', 'calls'],
   Technician: ['view_phone', 'chat', 'projects'],
   Staff: ['chat'],
 };
 // Super Admin can change each role's default features and add their own roles (stored in settings)
-let ROLE_DEF = {}, CUSTOM_ROLES = [];
-const roleDefaults = () => Object.fromEntries(Object.keys(DEFAULTS).map(r => [r, Array.isArray(ROLE_DEF[r]) ? ROLE_DEF[r] : DEFAULTS[r]]));
+const roleDefaults = () => Object.fromEntries(Object.keys(DEFAULTS).map(r => [r, Array.isArray(ST().ROLE_DEF[r]) ? ST().ROLE_DEF[r] : DEFAULTS[r]]));
 const roleKeys = role => role === 'Technician' ? TECH_KEYS : role === 'Staff' ? STAFF_KEYS : ALL_KEYS;
 const cleanPerms = (role, list) => role === SUPER ? ALL_KEYS : (Array.isArray(list) ? list : roleDefaults()[role] || []).filter(k => (role === 'Technician' ? TECH_KEYS : role === 'Staff' ? STAFF_KEYS : ALL_KEYS).includes(k));
-const BRANDS = ['Heaven', 'G Media'];
+const BRANDS = (process.env.BRANCHES || process.env.COMPANY_NAME || 'Rago Infotech').split(',').map(x => x.trim()).filter(Boolean);   // first branch(es) of a NEW install only
 const JOB_TYPES = ['New Installation', 'CCTV Camera Fitting', 'Automation Fitting', 'Wiring / Cabling', 'Site Survey', 'AMC Visit', 'Other'];
 const OPEN_ST = ['Work Not Started', 'On-Process', 'Work Pending'];   // a technician with one of these is busy
 const LEAVE_TYPES = ['Casual Leave', 'Sick Leave', 'Emergency Leave', 'Other'];
 // Heaven Automation office, Thillai Nagar, Trichy (from the Google Maps listing). Super Admin can change it in Profile.
-const OFFICE_DEFAULT = { name: 'Heaven Automation office, Thillai Nagar, Trichy', lat: 10.8225698, lng: 78.683858, radius: 150, late: '09:45' };
+const OFFICE_DEFAULT = { name: 'Main office', lat: 10.8225698, lng: 78.683858, radius: 150, late: '09:45' };
 
 // ---------- auth helpers ----------
 const hash = (pw, salt = crypto.randomBytes(16).toString('hex')) => salt + ':' + crypto.scryptSync(pw, salt, 32).toString('hex');
@@ -135,8 +153,10 @@ const unsign = t => {
 const cookies = h => Object.fromEntries((h || '').split(';').map(c => c.trim().split('=')).filter(x => x[0]).map(([k, ...v]) => [k, decodeURIComponent(v.join('='))]));
 const randPw = () => Array.from({ length: 8 }, () => 'abcdefghjkmnpqrstuvwxyz23456789'[crypto.randomInt(31)]).join('');
 const isSuper = u => u.role === SUPER;
+const canDel = u => isSuper(u) || (u.permissions || []).includes('delete');   // Super Admin always; others only when given "Delete records"
+const delNeed = (req, res, next) => canDel(req.user) ? next() : res.status(403).json({ error: 'You don’t have permission to delete. Ask the Super Admin.' });
 const isBoss = u => u.role === SUPER || u.role === 'Admin';
-const can = (u, k) => isSuper(u) || (u.permissions || []).includes(k);
+const can = (u, k) => (isSuper(u) && !u._superPerms) || (u.permissions || []).includes(k);   // a client company's Super Admin gets only what its plan includes
 const isTech = u => u.role === 'Technician';
 const need = (...ks) => (req, res, next) => ks.some(k => can(req.user, k)) ? next() : res.status(403).json({ error: 'Not allowed' });
 const approveNeed = (req, res, next) => can(req.user, 'leave_approve') ? next() : res.status(403).json({ error: 'You don’t have permission to approve or mark attendance' });
@@ -145,17 +165,22 @@ const superOnly = (req, res, next) => isSuper(req.user) ? next() : res.status(40
 const techOnly = (req, res, next) => (isTech(req.user) || isSuper(req.user)) ? next() : res.status(403).json({ error: 'Not allowed' });
 const auth = wrap(async (req, res, next) => {
   if (req.path.startsWith('/calls/device/') && /^Bearer rgd_[A-Za-z0-9_-]{30,}$/.test(req.headers.authorization || '')) {   // Rago Calls phone app
+    const dco = await coById(coFromTok(req.headers.authorization.slice(11))); if (!dco) return res.status(401).json({ error: 'Sign in again' }); CTX.enterWith({ s: dco.schema, c: dco.id });
     const th = crypto.createHash('sha256').update(req.headers.authorization.slice(7)).digest('hex');
     const u = (await q(`SELECT u.id,u.name,u.email,u.phone,u.role,u.job_role,u.username,u.permissions,u.active,u.brand_id, b.name brand_name, dv.id device_id FROM call_devices dv JOIN users u ON u.id=dv.user_id LEFT JOIN brands b ON b.id=u.brand_id WHERE dv.token_hash=$1 AND u.active AND dv.active`, [th])).rows[0];
     if (!u) return res.status(401).json({ error: 'This phone is signed out. Sign in again in the Rago Calls app.' });
-    req.user = u; return next();
+    req.user = u; await planApply(req); return next();
   }
   const d = unsign(cookies(req.headers.cookie).gz);
+  if (d && d.c && d.c !== 1) { const co = await coById(d.c); if (!co || co.status !== 'active') return res.status(401).json({ error: 'Login required' }); await ensureCo(co); CTX.enterWith({ s: co.schema, c: co.id }); }
   const u = d && (await q('SELECT u.id,u.name,u.email,u.phone,u.role,u.job_role,u.username,u.permissions,u.active,u.brand_id,u.photo_v,u.created_at, b.name brand_name FROM users u LEFT JOIN brands b ON b.id=u.brand_id WHERE u.id=$1 AND u.active', [d.id])).rows[0];
   if (!u) return res.status(401).json({ error: 'Login required' });
-  req.user = u; next();
+  req.user = u; await planApply(req); seen(req);
+  if (req.method === 'GET' && !u.brand_id && +req.headers['x-branch'] && req.query.brand === undefined) req.query.brand = String(+req.headers['x-branch']);   // top branch switcher
+  next();
 });
-const me = u => ({ id: u.id, name: u.name, role: u.role, username: u.username, brand_id: u.brand_id || null, brand: u.brand_name || null, photo_v: u.photo_v || 0, permissions: isSuper(u) ? ALL_KEYS : u.permissions });
+const me = u => { const pl = planOf(CO_CACHE.get(coId())); return { id: u.id, name: u.name, role: u.role, username: u.username, brand_id: u.brand_id || null, brand: u.brand_name || null, photo_v: u.photo_v || 0,
+  permissions: modPerms(pl, isSuper(u) ? ALL_KEYS : u.permissions), company_id: coId(), company_name: (CO_CACHE.get(coId()) || {}).name || '', owner: SAAS && coId() === 1 && isSuper(u), saas: SAAS, plan: pl }; };
 const pub = u => { const { password_hash, photo, photo_mime, cal_token, ...r } = u; return r; };
 
 const tries = {};
@@ -167,13 +192,18 @@ app.post('/api/login', wrap(async (req, res) => {
   const uk = 'u:' + String(username || '').trim().toLowerCase(), tu = tries[uk] || { n: 0, at: Date.now() };
   if (Date.now() - tu.at > 900000) { tu.n = 0; tu.at = Date.now(); }
   if (tu.n >= 10) return res.status(429).json({ error: 'This account is locked for 15 minutes after many wrong passwords.' });
-  const u = (await q('SELECT * FROM users WHERE lower(username)=lower($1)', [String(username || '').trim()])).rows[0];
+  const co = await coOfLogin(username);
+  if (co) { await ensureCo(co); CTX.enterWith({ s: co.schema, c: co.id }); }
+  const u = co ? (await q('SELECT * FROM users WHERE lower(username)=lower($1)', [String(username || '').trim()])).rows[0] : null;
   if (!u || !verify(String(password || ''), u.password_hash)) { tries[ip] = { n: t.n + 1, at: t.at }; if (u) tries[uk] = { n: tu.n + 1, at: tu.at }; return res.status(401).json({ error: 'Wrong username or password' }); }
   if (!u.active) return res.status(403).json({ error: 'Your account has been disabled. Please contact the Super Admin.' });
+  if (co.status === 'suspended') return res.status(403).json({ error: 'This company account is paused. Please contact Rago Infotech.' });
+  if (co.status === 'deletion_requested' || co.status === 'deleted') return res.status(403).json({ error: 'This company account was deleted.' });
   delete tries[ip]; delete tries[uk];
   if (u.brand_id) u.brand_name = ((await q('SELECT name FROM brands WHERE id=$1', [u.brand_id])).rows[0] || {}).name;
+  pev('login', u.name, { role: u.role }, u.id).catch(() => {}); P(`INSERT INTO platform.user_seen(company_id,user_id,name,role,last_seen,last_login) VALUES($1,$2,$3,$4,now(),now()) ON CONFLICT (company_id,user_id) DO UPDATE SET name=$3, role=$4, last_seen=now(), last_login=now()`, [co.id, u.id, u.name, u.role]).catch(() => {});
   const secure = req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
-  res.setHeader('Set-Cookie', `gz=${sign({ id: u.id, exp: Date.now() + 30 * 864e5 })}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 86400}${secure}`);
+  res.setHeader('Set-Cookie', `gz=${sign({ id: u.id, c: co.id, exp: Date.now() + 30 * 864e5 })}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 86400}${secure}`);
   res.json(me(u));
 }));
 app.post('/api/logout', (req, res) => { res.setHeader('Set-Cookie', 'gz=; Path=/; HttpOnly; Max-Age=0'); res.json({ ok: true }); });
@@ -184,7 +214,10 @@ app.use('/api', (req, res, next) => {
     res.on('finish', () => { if (res.statusCode < 400) VER = Math.max(VER + 1, Date.now()); });
   next();
 });
-app.use('/api', (req, res, next) => (req.path === '/login' || req.path === '/logout' || req.path === '/calls/device-login') ? next() : auth(req, res, next));
+app.use('/api', (req, res, next) => (req.path === '/login' || req.path === '/logout' || req.path === '/calls/device-login' || req.path === '/signup' || req.path === '/plans') ? next() : auth(req, res, next));
+// modules that are whole screens: switched off when the company's plan doesn't include them
+app.use(['/api/mail'], modGate('whatsapp'));
+app.use(['/api/attendance', '/api/leave', '/api/payroll', '/api/advances', '/api/salary'], modGate('attendance'));
 app.get('/api/pulse', wrap(async (req, res) => {
   const r = (await q('SELECT COALESCE(MAX(id),0)::int last, COUNT(*) FILTER (WHERE NOT read)::int unread FROM notifications WHERE user_id=$1', [req.user.id])).rows[0];
   res.set('Cache-Control', 'no-store').json({ v: VER, last: r.last, unread: r.unread, chat: can(req.user, 'chat') ? await chatUnread(req.user.id).catch(() => 0) : 0, wa: can(req.user, 'whatsapp') ? await waUnread(req.user).catch(() => 0) : 0, wa_last: can(req.user, 'whatsapp') ? ((await q('SELECT COALESCE(MAX(id),0)::int n FROM wa_messages').catch(() => ({ rows: [{ n: 0 }] }))).rows[0].n) : 0, chat_last: (await q('SELECT COALESCE(MAX(id),0)::int n FROM chat_messages')).rows[0].n });
@@ -207,8 +240,8 @@ const pickOf = (v, list, d) => list.includes(v) ? v : d;
 const cleanLead = (b, cur = {}) => {
   const o = {}, t = k => { if (b[k] !== undefined) o[k] = String(b[k] ?? '').trim() || null; };
   ['name', 'company', 'phone', 'email', 'address', 'notes', 'lost_reason'].forEach(t);
-  if (b.source !== undefined) o.source = b.source ? pickOf(b.source, LEAD_SOURCES, 'Other') : null;
-  if (b.interest !== undefined) o.interest = b.interest ? pickOf(b.interest, LEAD_INTERESTS, 'Other') : null;
+  if (b.source !== undefined) o.source = b.source ? pickOf(b.source, ST().LEAD_SOURCES, 'Other') : null;
+  if (b.interest !== undefined) o.interest = b.interest ? pickOf(b.interest, ST().LEAD_INTERESTS, 'Other') : null;
   if (b.priority !== undefined) o.priority = pickOf(b.priority, LEAD_PRIORITIES, cur.priority || 'Warm');
   if (b.stage !== undefined) o.stage = pickOf(b.stage, LEAD_STAGES, cur.stage || 'New Enquiry');
   if (b.assigned_to !== undefined) o.assigned_to = Number.isInteger(+b.assigned_to) && +b.assigned_to > 0 ? +b.assigned_to : null;
@@ -285,7 +318,7 @@ app.post('/api/leads/bulk', need('leads'), wrap(async (req, res) => {
   { const p = [ids], sc = leadScope(req.user, p); ids = (await q(`SELECT l.id FROM leads l WHERE l.id=ANY($1::int[]) AND ${sc}`, p)).rows.map(r => r.id); }
   if (!ids.length) return res.status(400).json({ error: 'Nothing selected' });
   if (req.body.delete) {
-    if (!isSuper(req.user)) return res.status(403).json({ error: 'Only the Super Admin can delete' });
+    if (!canDel(req.user)) return res.status(403).json({ error: 'You don’t have permission to delete' });
     await q('DELETE FROM leads WHERE id=ANY($1::int[])', [ids]); return res.json({ ok: true });
   }
   const o = cleanLead({ stage: req.body.stage, assigned_to: req.body.assigned_to, priority: req.body.priority }), keys = Object.keys(o);
@@ -379,7 +412,8 @@ app.post('/api/leads/:id/convert', need('leads'), wrap(async (req, res) => {
   res.json({ customer: { id: c.id, name: c.name, phone: c.phone, address: c.address, tickets: 0 } });
 }));
 
-app.delete('/api/leads/:id', superOnly, wrap(async (req, res) => {
+app.delete('/api/leads/:id', delNeed, wrap(async (req, res) => {
+  { const p = [+req.params.id], sc = leadScope(req.user, p); if (!(await q(`SELECT 1 FROM leads l WHERE l.id=$1 AND ${sc}`, p)).rows.length) return res.status(404).json({ error: 'Lead not found' }); }
   await q('DELETE FROM chats WHERE lead_id=$1', [req.params.id]).catch(() => {});
   await q('UPDATE projects SET lead_id=NULL WHERE lead_id=$1', [req.params.id]).catch(() => {});
   await q('DELETE FROM leads WHERE id=$1', [req.params.id]); res.json({ ok: true });
@@ -459,9 +493,9 @@ async function initV2() {
   await q(`UPDATE services SET work_done_on=COALESCE(resolved_on, on_process_at, assigned_on, submitted_on) WHERE work_done_on IS NULL AND status IN ('Awaiting Payment','Resolved')`);
 
   if (!(await q(`SELECT 1 FROM settings WHERE k='office'`)).rows.length)
-    await q(`INSERT INTO settings(k,v) VALUES('office',$1)`, [JSON.stringify(OFFICE_DEFAULT)]);
+    await q(`INSERT INTO settings(k,v) VALUES('office',$1)`, [JSON.stringify(coId() === 1 ? OFFICE_DEFAULT : { ...OFFICE_DEFAULT, name: ((CTX.getStore() || {}).name || 'Main') + ' office' })]);
   if (!(await q('SELECT 1 FROM brands LIMIT 1')).rows.length)
-    for (const n of BRANDS) await q('INSERT INTO brands(name) VALUES($1) ON CONFLICT DO NOTHING', [n]);
+    for (const n of (coId() === 1 ? BRANDS : [(CTX.getStore() || {}).name || 'Main'])) await q('INSERT INTO brands(name) VALUES($1) ON CONFLICT DO NOTHING', [n]);
   if (!(await q('SELECT 1 FROM job_types LIMIT 1')).rows.length)
     for (const n of JOB_TYPES) await q('INSERT INTO job_types(name) VALUES($1) ON CONFLICT DO NOTHING', [n]);
   const heaven = (await q(`SELECT id FROM brands ORDER BY (lower(name)='heaven') DESC, id LIMIT 1`)).rows[0].id;
@@ -510,6 +544,7 @@ async function init() {
   ALTER TABLE services ADD COLUMN IF NOT EXISTS bill_state TEXT;
   ALTER TABLE services ADD COLUMN IF NOT EXISTS bill_no INT;
   ALTER TABLE services ADD COLUMN IF NOT EXISTS billed_at TIMESTAMPTZ;
+  CREATE TABLE IF NOT EXISTS payments (id SERIAL PRIMARY KEY, service_id INT REFERENCES services(id) ON DELETE CASCADE, amount NUMERIC(12,2) NOT NULL, bank TEXT, paid_on DATE DEFAULT CURRENT_DATE, note TEXT, approval TEXT DEFAULT 'Pending', created_at TIMESTAMPTZ DEFAULT now());
   ALTER TABLE payments ADD COLUMN IF NOT EXISTS mode TEXT;
   ALTER TABLE payments ADD COLUMN IF NOT EXISTS actual NUMERIC(12,2);
   ALTER TABLE payments ADD COLUMN IF NOT EXISTS disc NUMERIC(12,2);
@@ -526,7 +561,6 @@ async function init() {
   CREATE TABLE IF NOT EXISTS push_subs (id SERIAL PRIMARY KEY, user_id INT NOT NULL, endpoint TEXT UNIQUE NOT NULL, p256dh TEXT, auth TEXT, created_at TIMESTAMPTZ DEFAULT now());
   ALTER TABLE services DROP CONSTRAINT IF EXISTS services_technician_id_fkey;
   ALTER TABLE services DROP CONSTRAINT IF EXISTS services_helper_id_fkey;
-  CREATE TABLE IF NOT EXISTS payments (id SERIAL PRIMARY KEY, service_id INT REFERENCES services(id) ON DELETE CASCADE, amount NUMERIC(12,2) NOT NULL, bank TEXT, paid_on DATE DEFAULT CURRENT_DATE, note TEXT, approval TEXT DEFAULT 'Pending', created_at TIMESTAMPTZ DEFAULT now());
   CREATE TABLE IF NOT EXISTS service_history (id SERIAL PRIMARY KEY, service_id INT REFERENCES services(id) ON DELETE CASCADE, done_by TEXT, done_on TIMESTAMPTZ DEFAULT now(), changes TEXT);
   CREATE TABLE IF NOT EXISTS service_photos (id SERIAL PRIMARY KEY, service_id INT REFERENCES services(id) ON DELETE CASCADE, stage TEXT, caption TEXT, mime TEXT, data BYTEA, uploaded_by TEXT, created_at TIMESTAMPTZ DEFAULT now());
   CREATE INDEX IF NOT EXISTS idx_services_status ON services(status);
@@ -534,6 +568,7 @@ async function init() {
   await initTodos();
   await initExtra();
   await initV2();
+  if (coId() !== 1) return;   // the rest (push keys, first "admin" login, ADMIN_PASSWORD recovery) is only for company #1
   let kp = (await q(`SELECT v FROM settings WHERE k='vapid'`)).rows[0];
   if (!kp) { const k = webpush.generateVAPIDKeys(); await q(`INSERT INTO settings(k,v) VALUES('vapid',$1)`, [JSON.stringify(k)]); kp = { v: JSON.stringify(k) }; }
   const vk = JSON.parse(kp.v); VAPID_PUB = vk.publicKey; webpush.setVapidDetails('mailto:heavenautomationindia@gmail.com', vk.publicKey, vk.privateKey);
@@ -592,7 +627,7 @@ app.get('/api/meta', wrap(async (req, res) => {
   const ag = await q(`SELECT id,name FROM users WHERE role IN ('${SUPER}','Admin','Sales Admin','Sales') AND active ORDER BY name`);
   let it = { rows: [] }; try { it = await q('SELECT id,name FROM issue_types ORDER BY id'); } catch (e) { /* table missing: fall back to defaults */ }
   const ISSUE_TYPES = it.rows, JT = (await q('SELECT id,name FROM job_types ORDER BY id')).rows, brands = (await q('SELECT id,name FROM brands ORDER BY id')).rows;
-  res.json({ SERVICE_TYPES: ISSUE_TYPES.length ? ISSUE_TYPES.map(r => r.name) : SERVICE_TYPES, ISSUE_TYPES, JOB_TYPES: JT.map(r => r.name), JOB_TYPE_ROWS: JT, brands, VISIT_TYPES, STATUSES, APPROVALS, BANKS, ROLES, PERMS, DEFAULTS: roleDefaults(), CUSTOM_ROLES, TECH_KEYS, STAFF_KEYS, LEAD_STAGES, LEAD_PRIORITIES, LEAD_SOURCES, LEAD_INTERESTS, LEAVE_TYPES, technicians: await techList(), agents: ag.rows });
+  res.json({ SERVICE_TYPES: ISSUE_TYPES.length ? ISSUE_TYPES.map(r => r.name) : SERVICE_TYPES, ISSUE_TYPES, JOB_TYPES: JT.map(r => r.name), JOB_TYPE_ROWS: JT, brands, VISIT_TYPES, STATUSES, APPROVALS, BANKS: ST().BANKS, ROLES, PERMS, DEFAULTS: roleDefaults(), CUSTOM_ROLES: ST().CUSTOM_ROLES, TECH_KEYS, STAFF_KEYS, LEAD_STAGES, LEAD_PRIORITIES, LEAD_SOURCES: ST().LEAD_SOURCES, LEAD_INTERESTS: ST().LEAD_INTERESTS, LEAVE_TYPES, technicians: await techList(), agents: ag.rows });
 }));
 
 // issue types (for services) and job types (for jobs): add = Super Admin or "Add issue types & job types"; delete = Super Admin only
@@ -611,7 +646,16 @@ app.post('/api/brands', superOnly, wrap(async (req, res) => {
   const name = String((req.body || {}).name || '').trim().replace(/\s+/g, ' ').slice(0, 40);
   if (!name) return res.status(400).json({ error: 'Enter the brand name' });
   if ((await q('SELECT 1 FROM brands WHERE lower(name)=lower($1)', [name])).rows.length) return res.status(409).json({ error: 'That brand already exists' });
+  if (coId() !== 1) { const lim = planOf(await coById(coId())).branches, n = (await q('SELECT COUNT(*)::int n FROM brands')).rows[0].n;
+    if (n >= lim) return res.status(402).json({ error: `Your plan includes ${lim} branch${lim > 1 ? 'es' : ''}. To add another branch, contact Rago Infotech.`, upgrade: true, branch_limit: lim }); }
   await q('INSERT INTO brands(name) VALUES($1)', [name]); res.json({ ok: true });
+}));
+app.patch('/api/brands/:id', superOnly, wrap(async (req, res) => {   // rename a branch
+  const name = String((req.body || {}).name || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+  if (!name) return res.status(400).json({ error: 'Enter the branch name' });
+  if ((await q('SELECT 1 FROM brands WHERE lower(name)=lower($1) AND id<>$2', [name, +req.params.id])).rows.length) return res.status(409).json({ error: 'That name is already used' });
+  const r = await q('UPDATE brands SET name=$1 WHERE id=$2', [name, +req.params.id]); if (!r.rowCount) return res.status(404).json({ error: 'Not found' });
+  res.json({ ok: true });
 }));
 app.delete('/api/brands/:id', superOnly, wrap(async (req, res) => {
   const id = +req.params.id;
@@ -648,7 +692,7 @@ const fvSetRate = async (uid, v) => { let c = {}; try { c = JSON.parse(((await q
   c.rates = c.rates && typeof c.rates === 'object' ? c.rates : {}; if (v === '' || v === null || !(+v >= 0)) delete c.rates[uid]; else c.rates[uid] = Math.min(1000, Math.round(+v * 100) / 100);
   await q(`INSERT INTO settings(k,v) VALUES('fv_cfg',$1) ON CONFLICT (k) DO UPDATE SET v=excluded.v`, [JSON.stringify(c)]); };
 const fvRateAdd = (u, c) => x => isSuper(u) ? { ...x, fv_rate: c.rates[x.id] ?? null } : x;
-const jobRole = (role, name) => { const c = name && CUSTOM_ROLES.find(x => x.name === name); return c && c.base === role ? c.name : null; };
+const jobRole = (role, name) => { const c = name && ST().CUSTOM_ROLES.find(x => x.name === name); return c && c.base === role ? c.name : null; };
 const manages = (me, role) => isSuper(me) || !['Admin', SUPER].includes(role);
 // salary, joining date and "salary paid by" brand — only the Super Admin can set them
 const payFields = (me, b, cur) => {
@@ -666,10 +710,12 @@ app.post('/api/users', need('team'), wrap(async (req, res) => {
   if (!b.name || !b.email || !b.phone) return res.status(400).json({ error: 'Name, email and phone are required' });
   if (!ROLES.includes(b.role)) return res.status(400).json({ error: 'Choose a role' });
   if (!manages(req.user, b.role)) return res.status(403).json({ error: 'Only the Super Admin can add admin staff' });
+  if (b.role === SUPER && coId() !== 1) return res.status(400).json({ error: 'A company has only one Super Admin. Add this person as Admin.' });
+  { const lim = await seatCheck(); if (lim) return res.status(402).json({ error: lim, upgrade: true }); }
   const br = await brandFor(b.role, b.brand_id); if (br.error) return res.status(400).json({ error: br.error });
   const base = (b.name.trim().split(/\s+/)[0].toLowerCase().replace(/[^a-z0-9]/g, '') || b.role.toLowerCase().replace(/\W/g, ''));
   let username;
-  for (let i = 0; i < 20; i++) { username = base + crypto.randomInt(100, 999); if (!(await q('SELECT 1 FROM users WHERE username=$1', [username])).rows.length) break; }
+  for (let i = 0; i < 40; i++) { username = base + crypto.randomInt(100, i < 20 ? 999 : 99999); if (!(await P('SELECT 1 FROM platform.logins WHERE lower(username)=lower($1)', [username])).rows.length && !(await q('SELECT 1 FROM users WHERE username=$1', [username])).rows.length) break; }
   const password = randPw();
   const pay = payFields(req.user, b, {});
   if (pay.error) return res.status(400).json({ error: pay.error });
@@ -679,8 +725,10 @@ app.post('/api/users', need('team'), wrap(async (req, res) => {
     pay.pay_brand_id = hb;
   }
   const jr = jobRole(b.role, b.job_role);
+  await P('INSERT INTO platform.logins(username, company_id) VALUES(lower($1),$2) ON CONFLICT DO NOTHING', [username, coId()]);
+  pev('user_added', req.user.name, { name: b.name, role: b.role }).catch(() => {});
   const r = await q('INSERT INTO users(name,email,phone,role,username,password_hash,permissions,brand_id,salary,join_date,pay_brand_id,att_rules,job_role) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *',
-    [b.name.trim(), b.email.trim(), b.phone.trim(), b.role, username, hash(password), cleanPerms(b.role, Array.isArray(b.permissions) ? b.permissions : jr ? (CUSTOM_ROLES.find(x => x.name === jr) || {}).perms : undefined), br.id, pay.salary ?? 0, pay.join_date ?? null, pay.pay_brand_id ?? br.id, pay.att_rules ? JSON.stringify(pay.att_rules) : null, jr]);
+    [b.name.trim(), b.email.trim(), b.phone.trim(), b.role, username, hash(password), cleanPerms(b.role, Array.isArray(b.permissions) ? b.permissions : jr ? (ST().CUSTOM_ROLES.find(x => x.name === jr) || {}).perms : undefined), br.id, pay.salary ?? 0, pay.join_date ?? null, pay.pay_brand_id ?? br.id, pay.att_rules ? JSON.stringify(pay.att_rules) : null, jr]);
   if (isSuper(req.user) && b.fv_rate !== undefined) await fvSetRate(r.rows[0].id, b.fv_rate);
   res.json({ user: pub(r.rows[0]), credentials: { username, password } });
 }));
@@ -690,6 +738,8 @@ app.patch('/api/users/:id', need('team'), wrap(async (req, res) => {
   const role = ROLES.includes(b.role) ? b.role : cur.role;
   if (!manages(req.user, cur.role) || !manages(req.user, role)) return res.status(403).json({ error: 'Only the Super Admin can change admin staff' });
   if (cur.id === req.user.id && (b.active === false || role !== cur.role)) return res.status(400).json({ error: "You can't deactivate yourself or change your own role" });
+  if (role === SUPER && cur.role !== SUPER && coId() !== 1) return res.status(400).json({ error: 'A company has only one Super Admin.' });
+  if (b.active === true && !cur.active) { const lim = await seatCheck(); if (lim) return res.status(402).json({ error: lim, upgrade: true }); }
   const br = await brandFor(role, b.brand_id !== undefined ? b.brand_id : cur.brand_id); if (br.error) return res.status(400).json({ error: br.error });
   const pay = payFields(req.user, b, cur);
   if (pay.error) return res.status(400).json({ error: pay.error });
@@ -720,7 +770,8 @@ app.delete('/api/users/:id', superOnly, wrap(async (req, res) => {
   if (open) return res.status(400).json({ error: `This person still has ${open} open job(s). Reassign them first.` });
   await q('DELETE FROM attendance WHERE user_id=$1', [id]); await q('DELETE FROM leave_requests WHERE user_id=$1', [id]);
   await q('DELETE FROM notifications WHERE user_id=$1', [id]); await q('DELETE FROM push_subs WHERE user_id=$1', [id]);
-  await q('DELETE FROM users WHERE id=$1', [id]); res.json({ ok: true });
+  const un = (await q('SELECT username FROM users WHERE id=$1', [id])).rows[0];
+  await q('DELETE FROM users WHERE id=$1', [id]); if (un) await P('DELETE FROM platform.logins WHERE username=lower($1) AND company_id=$2', [un.username, coId()]); res.json({ ok: true });
 }));
 
 // ---------- services ----------
@@ -1120,7 +1171,7 @@ app.post('/api/services/:id/settle', need('payments'), wrap(async (req, res) => 
   if (!brandOK(req.user, s)) return res.status(403).json({ error: 'This ticket belongs to another brand' });
   const cashDue = Math.max(0, Number(s.amount_received) - Number(s.received_settled)), bankDue = Math.max(0, Number(s.bank_amount || 0) - Number(s.bank_settled || 0)), close = s.status === 'Awaiting Payment';
   if (!close && cashDue <= 0 && bankDue <= 0) return res.status(400).json({ error: 'Nothing to settle' });
-  const b = req.body || {}, cashBank = BANKS.includes(b.bank) ? b.bank : null, trBank = BANKS.includes(b.transfer_bank) ? b.transfer_bank : null;
+  const b = req.body || {}, cashBank = ST().BANKS.includes(b.bank) ? b.bank : null, trBank = ST().BANKS.includes(b.transfer_bank) ? b.transfer_bank : null;
   // discount: actual amount − discount = final amount (shown to the customer)
   const disc = b.discount_on ? money(b.discount) : 0, actual = b.discount_on ? money(b.actual) : null;
   if (b.discount_on && (actual <= 0 || disc > actual)) return res.status(400).json({ error: 'Enter the actual amount and a discount that is not more than it' });
@@ -1128,7 +1179,7 @@ app.post('/api/services/:id/settle', need('payments'), wrap(async (req, res) => 
   if (s.bill_state === 'Billed' && cashDue <= 0 && bankDue <= 0 && close) {
     const due = Number(s.bill_total) || 0, act = actual ?? due, fin = Math.round((act - disc) * 100) / 100, mode = ['Cash', 'Bank', 'UPI'].includes(b.mode) ? b.mode : null;
     if (!mode) return res.status(400).json({ error: 'Choose how the customer paid: Cash, Bank or UPI' });
-    const acc = BANKS.includes(b.account) ? b.account : null;
+    const acc = ST().BANKS.includes(b.account) ? b.account : null;
     if (mode !== 'Cash' && !acc) return res.status(400).json({ error: 'Choose the account that received the money' });
     await q(`INSERT INTO payments(service_id,amount,bank,note,approval,received_by,mode,actual,disc) VALUES($1,$2,$3,$4,'Approved',$5,$6,$7,$8)`, [s.id, fin, acc || cashBank, `Bill #${s.bill_no}${disc ? ` · discount ₹${disc}` : ''}`, req.user.name, mode, act, disc]);
     await q(`UPDATE services SET charges_applied=$2, discount=COALESCE(discount,0)+$3, status='Resolved', resolved_on=now(), approval='Approved' WHERE id=$1`, [s.id, act, disc]);
@@ -1198,11 +1249,13 @@ app.post('/api/admin/reset-data', superOnly, wrap(async (req, res) => {
   if (what.includes('attendance')) await q(`UPDATE settings SET v=to_char(now() AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD') WHERE k='att_start'`);
   res.json({ ok: true, deleted: what });
 }));
-app.delete('/api/services/:id', superOnly, wrap(async (req, res) => {
+app.delete('/api/services/:id', delNeed, wrap(async (req, res) => {
+  if (!isSuper(req.user) && req.user.brand_id) { const sv = (await q('SELECT brand_id FROM services WHERE id=$1', [+req.params.id])).rows[0]; if (!sv || (sv.brand_id && sv.brand_id !== req.user.brand_id)) return res.status(404).json({ error: 'Ticket not found' }); }
   await q('DELETE FROM notifications WHERE service_id=$1', [req.params.id]);
   await q('DELETE FROM services WHERE id=$1', [req.params.id]); res.json({ ok: true });
 }));
-app.delete('/api/customers/:id', superOnly, wrap(async (req, res) => {
+app.delete('/api/customers/:id', delNeed, wrap(async (req, res) => {
+  { const p = [+req.params.id], sc = custScope(req.user, p); if (!(await q(`SELECT 1 FROM customers c WHERE c.id=$1 AND ${sc}`, p)).rows.length) return res.status(404).json({ error: 'Customer not found' }); }
   const ids = (await q('SELECT id FROM services WHERE customer_id=$1', [req.params.id])).rows.map(r => r.id);
   if (ids.length) { await q('DELETE FROM notifications WHERE service_id=ANY($1::int[])', [ids]); await q('DELETE FROM services WHERE id=ANY($1::int[])', [ids]); }
   await q('UPDATE leads SET customer_id=NULL WHERE customer_id=$1', [req.params.id]);
@@ -1248,6 +1301,7 @@ app.post('/api/services/:id/discount', need('payments'), brandGuard, wrap(async 
 // Every item has a date + time (India time). On that day it shows in the To-do list,
 // and at that time the person gets a reminder (bell + phone push).
 const TZ = 'Asia/Kolkata';
+const SAAS = process.env.SAAS !== '0';   // SAAS=0 → single-company CRM (e.g. Heaven Automation): no sign-up page, console or companies
 const AUDIO_RE = /^data:(audio\/(?:webm|ogg|mp4|mpeg|aac|x-m4a|m4a|wav|x-wav))(?:;[^,]*)?;base64,(.+)$/;
 async function initTodos() {
   try {
@@ -1503,13 +1557,22 @@ function parseReminder(raw, today, nowHM) {
 const nowHMIST = () => new Date().toLocaleTimeString('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const prettyWhen = (d, t) => `${new Date(d + 'T12:00:00Z').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })} at ${(() => { const [h, m] = t.split(':').map(Number); return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'am' : 'pm'}`; })()}`;
 app.post('/api/reminders/parse', wrap(async (req, res) => res.json(parseReminder((req.body || {}).text, await todayIST(), nowHMIST()))));
-const tokenUser = async tok => /^[a-f0-9]{40}$/.test(String(tok || '')) ? (await q('SELECT id,name,role,brand_id,permissions FROM users WHERE cal_token=$1 AND active', [tok])).rows[0] : null;
+const tokenUser = async tok => /^(k\d+x)?[a-f0-9]{40}$/.test(String(tok || '')) ? (await q('SELECT id,name,role,brand_id,permissions FROM users WHERE cal_token=$1 AND active', [tok])).rows[0] : null;
 app.get('/api/me/links', wrap(async (req, res) => {
   let tok = ((await q('SELECT cal_token FROM users WHERE id=$1', [req.user.id])).rows[0] || {}).cal_token;
-  if (!tok || req.query.reset) { tok = crypto.randomBytes(20).toString('hex'); await q('UPDATE users SET cal_token=$1 WHERE id=$2', [tok, req.user.id]); }
+  if (!tok || req.query.reset) { tok = coPrefix() + crypto.randomBytes(20).toString('hex'); await q('UPDATE users SET cal_token=$1 WHERE id=$2', [tok, req.user.id]); }
   res.set('Cache-Control', 'no-store').json({ token: tok });
 }));
 // Siri Shortcut / Google Assistant: GET or POST /hook/<personal-key>/remind?text=…  → speaks back the confirmation
+app.use(['/cal/', '/hook/', '/d/'], wrap(async (req, res, next) => {
+  const tok = decodeURIComponent(req.path.split('/')[1] || ''), co = await coById(coFromTok(tok));
+  if (co && co.id !== 1) CTX.enterWith({ s: co.schema, c: co.id }); next();
+}));
+app.use(['/bl-logo/', '/bl-seal/', '/bl-sign/', '/webhook/whatsapp/'], wrap(async (req, res, next) => {
+  const id = +req.query.co || (req.baseUrl.startsWith('/webhook') ? +String(req.path.split('/')[1] || '').replace(/^k/, '') : 0);
+  if (id > 1) { const co = await coById(id); if (!co) return res.status(404).end(); CTX.enterWith({ s: co.schema, c: co.id }); }
+  next();
+}));
 app.all('/hook/:tok/remind', express.urlencoded({ extended: false }), wrap(async (req, res) => {
   const u = await tokenUser(req.params.tok); if (!u) return res.status(404).type('text').send('Link not valid. Copy it again from Rago CRM → Profile.');
   const text = String((req.body && req.body.text) || req.query.text || '').trim();
@@ -2087,7 +2150,7 @@ async function permMigrate() {
 }
 // lead sources & interests can be changed (Leads → ⚙ Sources & interests)
 async function loadLeadLists() {
-  for (const [k, arr, def] of [['lead_sources', LEAD_SOURCES, LEAD_SOURCES_DEF], ['lead_interests', LEAD_INTERESTS, LEAD_INTERESTS_DEF]]) {
+  for (const [k, arr, def] of [['lead_sources', ST().LEAD_SOURCES, LEAD_SOURCES_DEF], ['lead_interests', ST().LEAD_INTERESTS, LEAD_INTERESTS_DEF]]) {
     let v = null; try { v = JSON.parse(((await q('SELECT v FROM settings WHERE k=$1', [k])).rows[0] || {}).v || 'null'); } catch (e) { v = null; }
     arr.splice(0, arr.length, ...(Array.isArray(v) && v.length ? v : def));
     if (!arr.includes('Other')) arr.push('Other');
@@ -2099,7 +2162,7 @@ app.put('/api/lead-lists', need('lead_lists'), wrap(async (req, res) => {
   if (!src.length || !int.length) return res.status(400).json({ error: 'Keep at least one in each list' });
   await q(`INSERT INTO settings(k,v) VALUES('lead_sources',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [JSON.stringify(src)]);
   await q(`INSERT INTO settings(k,v) VALUES('lead_interests',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [JSON.stringify(int)]);
-  await loadLeadLists(); res.json({ ok: true, sources: LEAD_SOURCES, interests: LEAD_INTERESTS });
+  await loadLeadLists(); res.json({ ok: true, sources: ST().LEAD_SOURCES, interests: ST().LEAD_INTERESTS });
 }));
 async function initChat() {
   await permMigrate(); await loadLeadLists();
@@ -2483,7 +2546,7 @@ const DAILY = [
   ['🛡️', 'Safety first, always. Your family is waiting for you at home.'],
   ['💡', 'Every problem has a solution — sometimes it just needs a fresh look.'],
   ['🎉', 'Celebrate small wins. They keep the big goals moving.'],
-  ['🌟', 'Your work today builds the name of Heaven Automation tomorrow.'],
+  ['🌟', 'Your work today builds the name of our company tomorrow.'],
 ];
 const GREET_TIME = h => h < 12 ? ['Good morning', '🌅'] : h < 16 ? ['Good afternoon', '🌤️'] : h < 20 ? ['Good evening', '🌇'] : ['Good night', '🌙'];
 app.get('/api/greeting', wrap(async (req, res) => {
@@ -2753,10 +2816,9 @@ app.delete('/api/notes/:id', wrap(async (req, res) => {
 // Every WhatsApp number is a row in wa_numbers: brand + purpose (Sales / Service), its own Phone number ID,
 // optional own WhatsApp Business Account (WABA) and token. Staff see only the numbers of their own brand.
 const WA_RATES = { service: 0.115, utility: 0.115, marketing: 0.8631, authentication: 0.115, free: 1000, gst: 0.18 };   // Meta India card (Oct 2026), ₹ per message
-let WA_CFG = null;
 async function waDb() { try { return JSON.parse(((await q(`SELECT v FROM settings WHERE k='wa_cfg'`)).rows[0] || {}).v || '{}'); } catch (e) { return {}; } }
 async function waCfg(fresh) {
-  if (WA_CFG && !fresh) return WA_CFG;
+  if (ST().WA_CFG && !fresh) return ST().WA_CFG;
   const db = await waDb(), E = process.env, pick = (k, e) => E[e] || db[k] || '';
   const token = pick('token', 'WA_TOKEN'), waba = pick('waba_id', 'WA_WABA_ID');
   const rows = (await q(`SELECT n.*, b.name brand FROM wa_numbers n LEFT JOIN brands b ON b.id=n.brand_id ORDER BY n.sort, n.id`).catch(() => ({ rows: [] }))).rows;
@@ -2768,10 +2830,10 @@ async function waCfg(fresh) {
       name: n.label || '', label: n.label || ((n.brand ? n.brand + ' · ' : '') + (purpose === 'sales' ? 'Sales' : 'Service')) };
   });
   const by = {}; numbers.forEach(n => { by[n.key] = n; });
-  WA_CFG = { token, app_secret: pick('app_secret', 'WA_APP_SECRET'), verify_token: pick('verify_token', 'WA_VERIFY_TOKEN'), waba_id: waba, numbers, by,
+  ST().WA_CFG = { token, app_secret: pick('app_secret', 'WA_APP_SECRET'), verify_token: pick('verify_token', 'WA_VERIFY_TOKEN'), waba_id: waba, numbers, by,
     graph: (E.WA_GRAPH_URL || 'https://graph.facebook.com') + '/' + (E.WA_API_VERSION || 'v21.0'),
     from_env: { token: !!E.WA_TOKEN, app_secret: !!E.WA_APP_SECRET, verify_token: !!E.WA_VERIFY_TOKEN, waba_id: !!E.WA_WABA_ID, sales_phone_id: !!E.WA_SALES_PHONE_ID, service_phone_id: !!E.WA_SERVICE_PHONE_ID } };
-  return WA_CFG;
+  return ST().WA_CFG;
 }
 const waLineOf = async phoneId => { const c = await waCfg(); const n = c.numbers.find(x => x.phone_id && x.phone_id === String(phoneId)); return n ? n.key : null; };
 const waReady = n => !!(n && n.token && n.phone_id);
@@ -2840,7 +2902,7 @@ const waUsers = async n => (await q(`SELECT id, role, brand_id FROM users WHERE 
 const waText = m => m.type === 'text' ? m.body : m.type === 'image' ? '📷 Photo' + (m.body ? ' · ' + m.body : '') : m.type === 'document' ? '📄 ' + (m.fname || 'Document') : m.type === 'audio' ? '🎤 Voice message'
   : m.type === 'video' ? '🎬 Video' : m.type === 'sticker' ? '🙂 Sticker' : m.type === 'location' ? '📍 Location' : m.type === 'template' ? '📋 ' + (m.body || m.template || 'Template') : m.type === 'reaction' ? (m.body || '👍') : (m.body || 'Message');
 // ---------- webhook (Meta calls this) ----------
-app.get('/webhook/whatsapp', wrap(async (req, res) => {
+app.get(['/webhook/whatsapp', '/webhook/whatsapp/:co'], wrap(async (req, res) => {
   const c = await waCfg(true);
   if (req.query['hub.mode'] === 'subscribe' && c.verify_token && req.query['hub.verify_token'] === c.verify_token) { await waHookLog({ ok: true, why: 'Webhook verified by Meta ✓', fields: ['verify'] }); return res.status(200).send(String(req.query['hub.challenge'] || '')); }
   await waHookLog({ ok: false, why: 'Verify token did not match — copy it again from this setup screen', fields: ['verify'] });
@@ -2849,7 +2911,7 @@ app.get('/webhook/whatsapp', wrap(async (req, res) => {
 // last webhook calls from Meta (kept in settings so the Super Admin can see what arrives)
 const waHookLog = async e => { try { const r = (await q(`SELECT v FROM settings WHERE k='wa_hooks'`)).rows[0]; let a = []; try { a = JSON.parse(r ? r.v : '[]'); } catch (x) {}
   a.unshift({ at: new Date().toISOString(), ...e }); await q(`INSERT INTO settings(k,v) VALUES('wa_hooks',$1) ON CONFLICT (k) DO UPDATE SET v=excluded.v`, [JSON.stringify(a.slice(0, 15))]); } catch (x) { console.error('wa hook log', x.message); } };
-app.post('/webhook/whatsapp', wrap(async (req, res) => {
+app.post(['/webhook/whatsapp', '/webhook/whatsapp/:co'], wrap(async (req, res) => {
   const c = await waCfg();
   const sum = (() => { const o = { fields: [], phone_ids: [], messages: 0, statuses: 0, from: [] };
     for (const e of (req.body && req.body.entry) || []) for (const ch of e.changes || []) { o.fields.push(ch.field); const v = ch.value || {}; if (v.metadata && v.metadata.phone_number_id) o.phone_ids.push(String(v.metadata.phone_number_id)); o.messages += (v.messages || []).length; o.statuses += (v.statuses || []).length; (v.messages || []).forEach(m => o.from.push('…' + String(m.from || '').slice(-4))); }
@@ -3216,42 +3278,68 @@ app.post('/api/wa/test', superOnly, wrap(async (req, res) => {   // check every 
   res.json(out);
 }));
 
-// ---------- public legal pages (needed by Meta for the WhatsApp app) ----------
-const LEGAL_CO = process.env.COMPANY_NAME || 'Heaven Automation Pvt Ltd', LEGAL_MAIL = process.env.COMPANY_EMAIL || 'heavenautomationindia@gmail.com';
-const legalPage = (title, body) => `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title} · ${LEGAL_CO}</title>
-<style>body{margin:0;background:#f6f5f2;font:16px/1.65 -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#1d1d1f}main{max-width:760px;margin:0 auto;padding:40px 22px 60px}h1{font-size:30px;margin:0 0 4px}h2{font-size:19px;margin:28px 0 6px}.d{color:#777;font-size:14px}a{color:#1f6f5c}nav{display:flex;gap:16px;font-size:14px;margin-bottom:26px}</style></head>
-<body><main><nav><a href="/privacy">Privacy policy</a><a href="/terms">Terms of service</a><a href="/data-deletion">Data deletion</a></nav><h1>${title}</h1><div class="d">${LEGAL_CO} · Last updated 19 November 2026</div>${body}</main></body></html>`;
+// ---------- public legal pages: Rago CRM by Rago Infotech (needed by Google Play, App Store, Razorpay and Meta) ----------
+const LEGAL_CO = process.env.LEGAL_NAME || 'Rago Infotech', LEGAL_MAIL = process.env.LEGAL_EMAIL || 'ragoinfotech@gmail.com', LEGAL_PHONE = process.env.LEGAL_PHONE || '+91 93602 21820';
+const LEGAL_ADDR = process.env.LEGAL_ADDRESS || '4th Floor, Thanga Lakshmi Krupa, D-31, 7th Cross Road East, Thillai Nagar, Tennur, Tiruchirappalli, Tamil Nadu 620018, India', LEGAL_GST = process.env.LEGAL_GSTIN || '';
+const LEGAL_DATE = '27 November 2026';
+const legalPage = (title, body) => `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title} · Rago CRM</title>
+<style>body{margin:0;background:#f6f5f2;font:16px/1.65 -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#1d1d1f}main{max-width:760px;margin:0 auto;padding:40px 22px 60px}h1{font-size:30px;margin:0 0 4px}h2{font-size:19px;margin:28px 0 6px}.d{color:#777;font-size:14px}a{color:#1f6f5c}nav{display:flex;flex-wrap:wrap;gap:8px 16px;font-size:14px;margin-bottom:26px}li{margin:4px 0}address{font-style:normal}</style></head>
+<body><main><nav><a href="/privacy">Privacy policy</a><a href="/terms">Terms of service</a><a href="/refund">Cancellation &amp; refund</a><a href="/data-deletion">Account &amp; data deletion</a><a href="/contact">Contact</a></nav><h1>${title}</h1><div class="d">Rago CRM · ${LEGAL_CO} · Last updated ${LEGAL_DATE}</div>${body}
+<h2>Contact</h2><address>${LEGAL_CO}<br>${LEGAL_ADDR}${LEGAL_GST ? '<br>GSTIN: ' + LEGAL_GST : ''}<br>Email: <a href="mailto:${LEGAL_MAIL}">${LEGAL_MAIL}</a> · Phone: <a href="tel:${LEGAL_PHONE.replace(/\s/g, '')}">${LEGAL_PHONE}</a></address></main></body></html>`;
 app.get('/privacy', (req, res) => res.send(legalPage('Privacy policy', `
-<p>${LEGAL_CO} ("we", "us") uses Rago CRM, an internal business application, to manage customer enquiries, service requests, quotations, invoices and conversations with our customers, including over WhatsApp through the WhatsApp Business Platform provided by Meta.</p>
-<h2>Information we collect</h2><p>When you contact us or buy from us, we may collect your name, company name, phone number, WhatsApp profile name, email address, billing and site address, GSTIN, the messages, photos, documents and voice notes you send us, and details of the products and services you ask about or buy.</p>
-<h2>How we use it</h2><p>We use this information only to reply to your enquiries, provide quotations and invoices, schedule and complete service work, collect payments, send you updates about your order or service, and keep accounting and tax records required by law.</p>
-<h2>WhatsApp messages</h2><p>Messages you send to our business WhatsApp numbers are received through Meta's WhatsApp Business Platform and stored in our CRM so that our staff can reply. We send you business messages (for example quotations, service updates and payment reminders) and, where you have agreed, occasional offers. You can ask us to stop at any time by replying STOP.</p>
-<h2>Sharing</h2><p>We do not sell your personal data. It is accessible only to our authorised staff, and to service providers who host our systems (such as our cloud hosting provider and Meta for WhatsApp messaging) under their own privacy terms. We may disclose information when required by law.</p>
-<h2>Retention and security</h2><p>We keep your information while you are our customer and for as long as tax and accounting laws require. Access to the CRM is protected by individual staff logins.</p>
-<h2>Your rights</h2><p>You can ask us to see, correct or delete your personal information. See <a href="/data-deletion">Data deletion</a> or write to <a href="mailto:${LEGAL_MAIL}">${LEGAL_MAIL}</a>.</p>
-<h2>Contact</h2><p>${LEGAL_CO} · <a href="mailto:${LEGAL_MAIL}">${LEGAL_MAIL}</a></p>`)));
+<p>Rago CRM is a business software service (website and mobile apps) provided by ${LEGAL_CO} ("we", "us"). Businesses ("customers") use it to manage their leads, customers, service work, billing, staff attendance and field visits. This policy explains what information is handled and why.</p>
+<h2>Two kinds of information</h2><ul>
+<li><b>Account information</b> of the business and its users: company name, owner and staff names, phone numbers, email addresses, usernames and encrypted passwords, and subscription and payment records.</li>
+<li><b>Business records</b> that a customer stores in Rago CRM about its own customers and work: enquiries, contact details, quotations, invoices, payments, service tickets, photos, documents, messages and voice notes. These records belong to that business. We store and process them only to provide the service to that business.</li></ul>
+<h2>Information from the mobile app</h2><p>The app asks for each permission only when a feature needs it, and you can refuse or switch it off in your phone settings:</p><ul>
+<li><b>Location</b> — check-in / check-out at customer sites, attendance at the office, and kilometres travelled during a field-visit day. During a field-visit day a notification stays visible while location is used, also when the app is closed. Location is not collected when no field-visit day is active.</li>
+<li><b>Camera and photos</b> — to attach photos to visits, service tickets, deliveries and warranty cases.</li>
+<li><b>Microphone</b> — to record voice notes and voice messages.</li>
+<li><b>Notifications</b> — to show new leads, approvals, reminders and messages.</li>
+<li><b>Call log and phone state</b> (only in the version downloaded from our website, and only for users whose business turned on "Call leads") — to send the number, contact name, time, length and SIM of calls longer than the length set by the business, so they can be added as leads. Shorter calls never leave the phone.</li></ul>
+<h2>How we use information</h2><p>To run and secure the service, sign users in, show each business only its own data, send notifications and reminders chosen by the business, provide support, collect subscription payments and keep records required by law. We do not sell personal information and we do not use business records for advertising.</p>
+<h2>Service providers</h2><p>We use trusted providers to run the service: cloud hosting and database (Render), payment processing (Razorpay), and — only when a business connects them — WhatsApp messaging (Meta), email (the business's own mail provider, or Brevo) and maps (Google). Each provider handles data under its own privacy terms.</p>
+<h2>Security</h2><p>Each business's data is kept in a separate section of the database. Access needs an individual login, every request is checked against the user's permissions, connections are encrypted (HTTPS) and stored mail passwords are encrypted.</p>
+<h2>Retention and deletion</h2><p>Business records are kept while the business uses Rago CRM. A user can delete their account inside the app (Profile → Delete my account). A business owner can ask to delete the whole company account; its data is deleted within 30 days, except records we must keep by law (for example our subscription invoices). See <a href="/data-deletion">Account &amp; data deletion</a>.</p>
+<h2>Your rights</h2><p>You can ask to see, correct or delete your information. If a business stores your details as its customer, please contact that business first; we will help them with your request.</p>
+<h2>Children</h2><p>Rago CRM is for businesses and is not meant for children.</p>
+<h2>Changes</h2><p>We will update this page when the policy changes and show the new date above.</p>`)));
 app.get('/terms', (req, res) => res.send(legalPage('Terms of service', `
-<p>These terms apply when you communicate with ${LEGAL_CO} through our WhatsApp numbers, website links, shared quotations or invoices.</p>
-<h2>Use of our messaging</h2><p>Our WhatsApp numbers are for enquiries, orders, service requests and payments relating to our products and services. Please do not send unlawful, abusive or unrelated content.</p>
-<h2>Quotations and invoices</h2><p>Quotations are valid for the period stated on them. Prices, taxes and terms printed on a quotation or invoice apply to that order. Shared document links are meant for the recipient only.</p>
-<h2>Payments</h2><p>Payment details shown on our invoices (bank account and UPI) belong to ${LEGAL_CO}. Please confirm with us before paying to any other account.</p>
-<h2>Liability</h2><p>We take reasonable care to keep information accurate and our services available, but we are not liable for delays or interruptions caused by third-party services such as internet or messaging providers.</p>
-<h2>Contact</h2><p><a href="mailto:${LEGAL_MAIL}">${LEGAL_MAIL}</a></p>`)));
-app.get('/data-deletion', (req, res) => res.send(legalPage('Data deletion', `
-<p>You can ask ${LEGAL_CO} to delete the personal information we hold about you, including your WhatsApp conversation history with us.</p>
-<h2>How to request deletion</h2><p>Either send the message <b>DELETE MY DATA</b> to the WhatsApp number you contacted us on, or email <a href="mailto:${LEGAL_MAIL}?subject=Data%20deletion%20request">${LEGAL_MAIL}</a> with your name and phone number.</p>
-<h2>What happens next</h2><p>We confirm your identity and delete your messages and contact details within 30 days. Invoices and payment records that we must keep under Indian tax law (GST) are retained only for the legally required period and then deleted.</p>`)));
+<p>These terms apply to Rago CRM (website and mobile apps) provided by ${LEGAL_CO}. By creating an account or using the service you agree to them on behalf of your business.</p>
+<h2>Accounts</h2><p>The person who signs up becomes the Super Admin of the business account and is responsible for the users they add and the permissions they give. Keep passwords private. Tell us at once if you think an account is misused.</p>
+<h2>Plans and payment</h2><p>Some features are free within limits shown at sign-up; others need a paid subscription chosen by module and number of users. The price, taxes and billing period are shown before you pay. Subscriptions renew automatically through Razorpay until cancelled. Invoices with GST are issued for every payment.</p>
+<h2>Late payment</h2><p>If a renewal payment fails we send reminders. If it is not paid within the grace period the account becomes read-only until payment is made. Your data is not deleted because of late payment.</p>
+<h2>Your data</h2><p>Business records you put into Rago CRM belong to your business. You give us permission to store and process them only to provide the service. You are responsible for having the right to store your customers' information and for using messaging features (such as WhatsApp) according to the rules of those services and the law.</p>
+<h2>Acceptable use</h2><p>Do not use Rago CRM for unlawful activity, spam, harassment, or to break or overload the service, and do not try to access other businesses' data.</p>
+<h2>Availability</h2><p>We work to keep the service available and secure, but there may be maintenance or interruptions, including from third-party services such as hosting, internet, WhatsApp or payment providers.</p>
+<h2>Liability</h2><p>To the extent allowed by law, our total liability for any claim is limited to the subscription amount paid by your business for the three months before the claim. We are not liable for indirect losses.</p>
+<h2>Ending</h2><p>You can cancel anytime (see <a href="/refund">Cancellation &amp; refund</a>). We may suspend accounts that break these terms or do not pay.</p>
+<h2>Law</h2><p>These terms are governed by the laws of India. Courts at Tiruchirappalli, Tamil Nadu have jurisdiction.</p>`)));
+app.get('/refund', (req, res) => res.send(legalPage('Cancellation & refund policy', `
+<h2>Cancelling</h2><p>The Super Admin of a business can cancel the subscription anytime from the account, or by writing to <a href="mailto:${LEGAL_MAIL}">${LEGAL_MAIL}</a>. The paid features stay available until the end of the period already paid; no further renewals are charged.</p>
+<h2>Refunds</h2><p>Subscription payments are for the period chosen and are not refunded for unused days, except:</p><ul>
+<li>if you were charged twice or by mistake — the extra amount is refunded in full;</li>
+<li>if a paid feature did not work because of a fault on our side and we could not fix it within 7 days of your report — the unused part of that period is refunded.</li></ul>
+<p>Approved refunds go back to the original payment method through Razorpay within 5–7 working days.</p>
+<h2>Free plan</h2><p>The free plan can be used without payment within its limits and needs no cancellation.</p>
+<h2>Delivery</h2><p>Rago CRM is an online service. Paid features are switched on immediately after successful payment; nothing is shipped.</p>`)));
+app.get('/data-deletion', (req, res) => res.send(legalPage('Account & data deletion', `
+<h2>Delete your user account</h2><p>In the Rago CRM app or website open <b>Profile → Delete my account</b>, enter your password and confirm. Your login is removed at once and your name, phone, email, photo and saved passwords are erased. Work records you created for your business (such as attendance, invoices or service notes) stay with the business, shown as "Deleted user", because the business may need them for its accounts.</p>
+<h2>Delete a whole company account</h2><p>The company's Super Admin can do the same from Profile → Delete my account and choose to delete the company. Everyone's login stops at once and all the company's data is permanently deleted within 30 days. You can also email <a href="mailto:${LEGAL_MAIL}?subject=Delete%20company%20account">${LEGAL_MAIL}</a> from the owner's email address.</p>
+<h2>If a business has your details</h2><p>If you are a customer of a business that uses Rago CRM, ask that business to delete your details. You can also email us and we will pass your request to them.</p>
+<h2>What we keep</h2><p>Our own subscription invoices and payment records are kept for the period required by Indian tax law (GST), then deleted.</p>`)));
+app.get('/contact', (req, res) => res.send(legalPage('Contact us', `<p>Questions about Rago CRM, your subscription, payments or your data — we are happy to help.</p>`)));
 
 // ===================== WARRANTY & SERVICE: material collected from customers, handled on site or by a W&S vendor =====================
 const WC_ST = ['New', 'In progress', 'With vendor', 'Ready', 'Converted', 'Closed', 'Cancelled'];
 const WC_OPEN = ['New', 'In progress', 'With vendor', 'Ready'];
-const BANKS_DEF = [...BANKS];
-async function loadBanks() { let v = null; try { v = JSON.parse(((await q(`SELECT v FROM settings WHERE k='banks'`)).rows[0] || {}).v || 'null'); } catch (e) { v = null; } BANKS.splice(0, BANKS.length, ...(Array.isArray(v) && v.length ? v : BANKS_DEF)); }
-app.get('/api/settings/banks', wrap(async (req, res) => res.json(BANKS)));
+const BANKS_DEF_OF = () => coId() === 1 ? BANKS_CO1 : ['Cash', 'Bank account'];
+async function loadBanks() { let v = null; try { v = JSON.parse(((await q(`SELECT v FROM settings WHERE k='banks'`)).rows[0] || {}).v || 'null'); } catch (e) { v = null; } ST().BANKS = Array.isArray(v) && v.length ? v : [...BANKS_DEF_OF()]; }
+app.get('/api/settings/banks', wrap(async (req, res) => res.json(ST().BANKS)));
 app.put('/api/settings/banks', superOnly, wrap(async (req, res) => {
   const l = [...new Set((Array.isArray((req.body || {}).banks) ? req.body.banks : []).map(x => String(x || '').trim().slice(0, 80)).filter(Boolean))].slice(0, 30);
   if (!l.length) return res.status(400).json({ error: 'Keep at least one account' });
-  await q(`INSERT INTO settings(k,v) VALUES('banks',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [JSON.stringify(l)]); await loadBanks(); res.json({ ok: true, banks: BANKS });
+  await q(`INSERT INTO settings(k,v) VALUES('banks',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [JSON.stringify(l)]); await loadBanks(); res.json({ ok: true, banks: ST().BANKS });
 }));
 async function initWC() {
   await loadBanks();
@@ -3309,22 +3397,30 @@ app.post('/api/services/:id/warranty', wrap(async (req, res) => {
   res.json({ ok: true, id: c.id, case_no: 'WS-' + c.id });
 }));
 app.get('/api/wc', wrap(async (req, res) => {
-  const p = [], w = []; wcScope(req.user, p, w);
-  const st = String(req.query.status || 'open');
+  const p = [], w = [], Q = req.query; wcScope(req.user, p, w);
+  const st = String(Q.status || 'open'), add = (sql, v) => { p.push(v); w.push(sql.replace('?', '$' + p.length)); };
+  if (+Q.brand) add('c.brand_id=?', +Q.brand);   // branch tiles also change the counts
+  if (['Warranty', 'Service'].includes(Q.kind)) add('c.kind=?', Q.kind);
+  if (['On site', 'Off site'].includes(Q.mode)) add('c.mode=?', Q.mode); else if (Q.mode === 'none') w.push('c.mode IS NULL');
+  if (+Q.handler) add('c.handler_id=?', +Q.handler);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(Q.from || '')) add(`(c.created_at AT TIME ZONE '${TZ}')::date>=?`, Q.from);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(Q.to || '')) add(`(c.created_at AT TIME ZONE '${TZ}')::date<=?`, Q.to);
+  if (Q.transport === 'none') w.push(`COALESCE(jsonb_array_length(c.transport),0)=0`); else if (Q.transport === 'yes') w.push(`COALESCE(jsonb_array_length(c.transport),0)>0`);
   const cw = [...w], cp = [...p];
   if (req.query.service_id) {} else if (st === 'open') { p.push(WC_OPEN); w.push(`c.status=ANY($${p.length})`); } else if (WC_ST.includes(st)) { p.push(st); w.push(`c.status=$${p.length}`); }
-  if (req.query.vendor) { p.push(+req.query.vendor); w.push(`c.vendor_id=$${p.length}`); }
   if (req.query.service_id) { p.push(+req.query.service_id); w.push(`c.service_id=$${p.length}`); }
+  if (+Q.vendor) { p.push(+Q.vendor); w.push(`c.vendor_id=$${p.length}`); cw.push(`c.vendor_id=$${p.length}`); cp.push(+Q.vendor); }
   if (req.query.q) { p.push('%' + req.query.q + '%'); const n = p.length; w.push(`(c.item ILIKE $${n} OR c.serial_no ILIKE $${n} OR c.model ILIKE $${n} OR cu.name ILIKE $${n} OR cu.phone ILIKE $${n} OR ('WS-'||c.id) ILIKE $${n} OR s.ticket_no::text ILIKE $${n} OR v.name ILIKE $${n})`); }
-  const items = (await q(`${WC_SEL} ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY c.updated_at DESC LIMIT 500`, p)).rows;
+  const sort = { updated: 'c.updated_at DESC', new: 'c.created_at DESC', old: 'c.created_at', due: 'c.customer_charge-c.received DESC, c.updated_at DESC' }[Q.sort] || 'c.updated_at DESC';
+  const items = (await q(`${WC_SEL} ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY ${sort} LIMIT 500`, p)).rows;
   const counts = Object.fromEntries((await q(`SELECT c.status, COUNT(*)::int n FROM wc_cases c ${cw.length ? 'WHERE ' + cw.join(' AND ') : ''} GROUP BY 1`, cp)).rows.map(r => [r.status, r.n]));
   counts.open = WC_OPEN.reduce((t, k) => t + (counts[k] || 0), 0);
-  res.json({ items, counts, statuses: WC_ST, banks: BANKS, manage: wcCan(req.user) });
+  res.json({ items, counts, statuses: WC_ST, banks: ST().BANKS, manage: wcCan(req.user) });
 }));
 app.get('/api/wc/:id', wrap(async (req, res) => {
   const c = await wcLoad(req, res); if (!c) return;
   c.payments = (await q(`SELECT *, to_char(paid_on,'YYYY-MM-DD') paid_on FROM wc_payments p WHERE case_id=$1 ORDER BY p.id`, [c.id])).rows;
-  c.manage = wcCan(req.user); c.banks = BANKS; res.json(c);
+  c.manage = wcCan(req.user); c.banks = ST().BANKS; res.json(c);
 }));
 app.get('/api/wc/media/:mid', wrap(async (req, res) => {
   const m = (await q('SELECT * FROM wc_media WHERE id=$1', [+req.params.mid])).rows[0]; if (!m) return res.status(404).end();
@@ -3398,7 +3494,7 @@ app.post('/api/wc/:id/payments', wrap(async (req, res) => {
   const c = await wcLoad(req, res); if (!c) return;
   const b = req.body || {}, amt = money(b.amount), dir = b.dir === 'vendor' ? 'vendor' : 'customer';
   if (amt <= 0) return res.status(400).json({ error: 'Enter the amount' });
-  const mode = b.mode === 'Bank' ? 'Bank' : 'Cash', acc = BANKS.includes(b.account) ? b.account : null;
+  const mode = b.mode === 'Bank' ? 'Bank' : 'Cash', acc = ST().BANKS.includes(b.account) ? b.account : null;
   if (!acc) return res.status(400).json({ error: mode === 'Cash' ? 'Choose which cash account' : 'Choose which bank account' });
   if (dir === 'customer') { const due = Math.round((c.customer_charge - c.received) * 100) / 100; if (c.charge_type !== 'Paid' || c.customer_charge <= 0) return res.status(400).json({ error: 'Set the customer charge first (Paid)' }); if (amt > due + 0.009) return res.status(400).json({ error: `Only ₹${due} is due from the customer` }); }
   else if (!c.vendor_id) return res.status(400).json({ error: 'This case has no vendor' });
@@ -3477,11 +3573,11 @@ app.get('/api/wc-vendors/:id', wcVendorNeed, wrap(async (req, res) => {
   const cases = (await q(`${WC_SEL} WHERE c.vendor_id=$1 ORDER BY c.updated_at DESC LIMIT 300`, [v.id])).rows;
   const pays = (await q(`SELECT p.*, to_char(p.paid_on,'YYYY-MM-DD') paid_on, 'WS-' || p.case_id case_no FROM wc_payments p WHERE p.vendor_id=$1 AND p.dir='vendor' ORDER BY p.paid_on DESC, p.id DESC`, [v.id])).rows;
   const charges = cases.reduce((t, c) => t + Number(c.vendor_charge || 0), 0), paid = pays.reduce((t, p) => t + Number(p.amount), 0);
-  res.json({ vendor: v, cases, payments: pays, charges, paid, balance: Math.round((charges + Number(v.opening_bal || 0) - paid) * 100) / 100, holding: cases.filter(c => c.vendor_status === 'With vendor' && WC_OPEN.includes(c.status)).length, banks: BANKS });
+  res.json({ vendor: v, cases, payments: pays, charges, paid, balance: Math.round((charges + Number(v.opening_bal || 0) - paid) * 100) / 100, holding: cases.filter(c => c.vendor_status === 'With vendor' && WC_OPEN.includes(c.status)).length, banks: ST().BANKS });
 }));
 app.post('/api/wc-vendors/:id/payments', wcVendorNeed, wrap(async (req, res) => {   // pay the vendor without picking a case
   const b = req.body || {}, amt = money(b.amount); if (amt <= 0) return res.status(400).json({ error: 'Enter the amount' });
-  const acc = BANKS.includes(b.account) ? b.account : null; if (!acc) return res.status(400).json({ error: 'Choose the account' });
+  const acc = ST().BANKS.includes(b.account) ? b.account : null; if (!acc) return res.status(400).json({ error: 'Choose the account' });
   await q(`INSERT INTO wc_payments(vendor_id,dir,amount,mode,account,note,by_name) VALUES($1,'vendor',$2,$3,$4,$5,$6)`, [+req.params.id, amt, b.mode === 'Bank' ? 'Bank' : 'Cash', acc, String(b.note || '').slice(0, 300) || null, req.user.name]);
   res.json({ ok: true });
 }));
@@ -3491,11 +3587,10 @@ const GST_RE = /^[0-9]{2}[A-Z0-9]{10}[0-9A-Z][Z1-9A-Z][0-9A-Z]$/;
 const GST_CH = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const gstSum = g => { let t = 0; for (let i = 0; i < 14; i++) { const v = GST_CH.indexOf(g[i]) * (i % 2 ? 2 : 1); t += Math.floor(v / 36) + (v % 36); } return GST_CH[(36 - (t % 36)) % 36]; };
 const gstOk = v => { const g = String(v || '').trim().toUpperCase(); return g.length === 15 && /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(g) && gstSum(g) === g[14]; };
-let GSTKEY = '';
-const gstKey = () => process.env.GSTIN_API_KEY || GSTKEY;
+const gstKey = () => process.env.GSTIN_API_KEY || ST().GSTKEY;
 async function initGST() {
   await q(`CREATE TABLE IF NOT EXISTS gst_cache (gstin TEXT PRIMARY KEY, data JSONB, at TIMESTAMPTZ DEFAULT now())`);
-  const r = (await q(`SELECT v FROM settings WHERE k='gst_api_key'`)).rows[0]; GSTKEY = r ? String(r.v || '') : '';
+  const r = (await q(`SELECT v FROM settings WHERE k='gst_api_key'`)).rows[0]; ST().GSTKEY = r ? String(r.v || '') : '';
 }
 const gstOffline = g => { const st = (BL_STATES.find(x => x[0] === g.slice(0, 2)) || [])[1] || null; return { gstin: g, state: st, state_code: g.slice(0, 2), pan: g.slice(2, 12) }; };
 const gstShape = (g, d) => {   // provider record → our party fields
@@ -3534,21 +3629,21 @@ app.get('/api/settings/gst', superOnly, wrap(async (req, res) => {
 }));
 app.put('/api/settings/gst', superOnly, wrap(async (req, res) => {
   const k = String((req.body || {}).key || '').trim().slice(0, 200);
-  await q(`INSERT INTO settings(k,v) VALUES('gst_api_key',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [k]); GSTKEY = k; res.json({ ok: true, set: !!gstKey() });
+  await q(`INSERT INTO settings(k,v) VALUES('gst_api_key',$1) ON CONFLICT (k) DO UPDATE SET v=$1`, [k]); ST().GSTKEY = k; res.json({ ok: true, set: !!gstKey() });
 }));
 
 // ===================== ROLES & FEATURES (Super Admin) =====================
 async function initRoles() {
   await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS job_role TEXT`);
   const g = async k => { try { return JSON.parse(((await q(`SELECT v FROM settings WHERE k=$1`, [k])).rows[0] || {}).v || 'null'); } catch (e) { return null; } };
-  ROLE_DEF = (await g('role_defaults')) || {}; CUSTOM_ROLES = (await g('roles_custom')) || [];
+  ST().ROLE_DEF = (await g('role_defaults')) || {}; ST().CUSTOM_ROLES = (await g('roles_custom')) || [];
 }
 const ROLE_BASES = ['Admin', 'Sales Admin', 'Sales', 'Technician', 'Staff'];
 app.get('/api/roles', superOnly, wrap(async (req, res) => {
   const used = Object.fromEntries((await q(`SELECT job_role, COUNT(*)::int n FROM users WHERE job_role IS NOT NULL AND active GROUP BY 1`)).rows.map(r => [r.job_role, r.n]));
   const byRole = Object.fromEntries((await q(`SELECT role, COUNT(*)::int n FROM users WHERE active GROUP BY 1`)).rows.map(r => [r.role, r.n]));
-  res.json({ perms: PERMS, bases: ROLE_BASES, keys: Object.fromEntries(ROLE_BASES.map(r => [r, roleKeys(r)])), builtin: ROLE_BASES.map(r => ({ role: r, perms: roleDefaults()[r] || [], factory: DEFAULTS[r], users: byRole[r] || 0, changed: Array.isArray(ROLE_DEF[r]) })),
-    custom: CUSTOM_ROLES.map(c => ({ ...c, users: used[c.name] || 0 })) });
+  res.json({ perms: PERMS, bases: ROLE_BASES, keys: Object.fromEntries(ROLE_BASES.map(r => [r, roleKeys(r)])), builtin: ROLE_BASES.map(r => ({ role: r, perms: roleDefaults()[r] || [], factory: DEFAULTS[r], users: byRole[r] || 0, changed: Array.isArray(ST().ROLE_DEF[r]) })),
+    custom: ST().CUSTOM_ROLES.map(c => ({ ...c, users: used[c.name] || 0 })) });
 }));
 app.put('/api/roles', superOnly, wrap(async (req, res) => {
   const b = req.body || {}, defs = {}, cust = [], seen = new Set();
@@ -3560,12 +3655,12 @@ app.put('/api/roles', superOnly, wrap(async (req, res) => {
     seen.add(name.toLowerCase()); cust.push({ name, base: c.base, perms: [...new Set(Array.isArray(c.perms) ? c.perms : [])].filter(k => roleKeys(c.base).includes(k)), apply: undefined });
   }
   // a renamed / removed custom role: people keep their features, the label goes back to the base role
-  const gone = CUSTOM_ROLES.filter(o => !cust.some(n => n.name === o.name)).map(o => o.name);
+  const gone = ST().CUSTOM_ROLES.filter(o => !cust.some(n => n.name === o.name)).map(o => o.name);
   if (gone.length) await q(`UPDATE users SET job_role=NULL WHERE job_role=ANY($1)`, [gone]);
   for (const c of cust) await q(`UPDATE users SET role=$2 WHERE job_role=$1 AND role<>$2`, [c.name, c.base]).catch(() => {});
   await q(`INSERT INTO settings(k,v) VALUES('role_defaults',$1) ON CONFLICT (k) DO UPDATE SET v=excluded.v`, [JSON.stringify(defs)]);
   await q(`INSERT INTO settings(k,v) VALUES('roles_custom',$1) ON CONFLICT (k) DO UPDATE SET v=excluded.v`, [JSON.stringify(cust)]);
-  ROLE_DEF = defs; CUSTOM_ROLES = cust;
+  ST().ROLE_DEF = defs; ST().CUSTOM_ROLES = cust;
   // optional: give the new features to everyone who already has that role
   let updated = 0;
   for (const a of (Array.isArray(b.apply) ? b.apply : [])) {
@@ -3596,6 +3691,8 @@ async function initFV() {
   CREATE TABLE IF NOT EXISTS fv_legs (user_id INT NOT NULL, t_from TIMESTAMPTZ NOT NULL, t_to TIMESTAMPTZ NOT NULL, km NUMERIC(9,2), src TEXT, mins INT, created_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY(user_id, t_from, t_to));
   CREATE TABLE IF NOT EXISTS fv_days (user_id INT NOT NULL, day DATE NOT NULL, started_at TIMESTAMPTZ, start_lat DOUBLE PRECISION, start_lng DOUBLE PRECISION, ended_at TIMESTAMPTZ, end_lat DOUBLE PRECISION, end_lng DOUBLE PRECISION, PRIMARY KEY(user_id, day));`);
   await q(`ALTER TABLE fv_days ADD COLUMN IF NOT EXISTS rate NUMERIC(8,2)`);
+  await q(`ALTER TABLE fv_visits ADD COLUMN IF NOT EXISTS travel_mode TEXT; ALTER TABLE fv_visits ADD COLUMN IF NOT EXISTS fare NUMERIC(10,2); ALTER TABLE fv_media ADD COLUMN IF NOT EXISTS kind TEXT;
+    ALTER TABLE fv_days ADD COLUMN IF NOT EXISTS manual_km NUMERIC(8,2); ALTER TABLE fv_days ADD COLUMN IF NOT EXISTS manual_note TEXT; ALTER TABLE fv_days ADD COLUMN IF NOT EXISTS return_mode TEXT; ALTER TABLE fv_days ADD COLUMN IF NOT EXISTS return_fare NUMERIC(10,2); ALTER TABLE fv_days ADD COLUMN IF NOT EXISTS return_ticket INT`);
   await q(`ALTER TABLE fv_visits ADD COLUMN IF NOT EXISTS plan_id INT`);
   await q(`ALTER TABLE fv_visits ADD COLUMN IF NOT EXISTS cust_pending BOOLEAN DEFAULT false`);
   if (!(await q(`SELECT 1 FROM settings WHERE k='fv_perm_v1'`)).rows.length) {   // sales people get field visits once
@@ -3661,17 +3758,18 @@ const fvLegRoad = async (uid, cfg, pts, from, to, a, b, done) => {
 };
 const fvDay = async (uid, day) => {
   const cfg = await fvCfg();
-  const visits = (await q(`SELECT v.*, to_char(v.day,'YYYY-MM-DD') AS day, (SELECT COALESCE(json_agg(json_build_object('id',m.id,'at',m.created_at) ORDER BY m.id),'[]') FROM fv_media m WHERE m.visit_id=v.id) photos
+  const visits = (await q(`SELECT v.*, to_char(v.day,'YYYY-MM-DD') AS day, (SELECT COALESCE(json_agg(json_build_object('id',m.id,'at',m.created_at) ORDER BY m.id),'[]') FROM fv_media m WHERE m.visit_id=v.id AND COALESCE(m.kind,'photo')='photo') photos, (SELECT m.id FROM fv_media m WHERE m.visit_id=v.id AND m.kind='ticket' ORDER BY m.id DESC LIMIT 1) ticket
     FROM fv_visits v WHERE v.user_id=$1 AND v.day=$2 ORDER BY v.in_at`, [uid, day])).rows;
   const d = (await q(`SELECT * FROM fv_days WHERE user_id=$1 AND day=$2`, [uid, day])).rows[0] || null;
   const pts = await fvDayPts(uid, day);
-  let prevT = d && d.started_at, prevP = d && d.start_lat != null ? { lat: d.start_lat, lng: d.start_lng } : null, total = 0, onSite = 0;
+  let prevT = d && d.started_at, prevP = d && d.start_lat != null ? { lat: d.start_lat, lng: d.start_lng } : null, total = 0, onSite = 0, busKm = 0, fares = 0;
   let gerr = null;
   for (const v of visits) {
-    if (prevT) { const L = await fvLegRoad(uid, cfg, pts, prevT, v.in_at, prevP, { lat: v.in_lat, lng: v.in_lng }, true); v.km_before = L.km; v.km_est = L.est; v.km_src = L.src; v.drive_min = L.mins || null; if (L.gerr) gerr = L.gerr; total += L.km; } else { v.km_before = 0; v.km_est = false; v.km_src = null; }
+    if (prevT) { const L = await fvLegRoad(uid, cfg, pts, prevT, v.in_at, prevP, { lat: v.in_lat, lng: v.in_lng }, true); v.km_before = L.km; v.km_est = L.est; v.km_src = L.src; v.drive_min = L.mins || null; if (L.gerr) gerr = L.gerr; total += L.km; if (v.travel_mode === 'bus') busKm += L.km; } else { v.km_before = 0; v.km_est = false; v.km_src = null; }
     if (v.out_at) { onSite += (new Date(v.out_at) - new Date(v.in_at)) / 60e3; prevT = v.out_at; prevP = { lat: v.out_lat ?? v.in_lat, lng: v.out_lng ?? v.in_lng }; }
     else { onSite += (Date.now() - new Date(v.in_at)) / 60e3; prevT = null; }
   }
+  for (const v of visits) fares += Number(v.fare || 0);
   let after = 0, afterSrc = null;   // travel after the last check-out (to the office / home)
   const lastOut = visits.length && visits[visits.length - 1].out_at;
   if (lastOut) { const ended = d && d.ended_at, endT = ended || new Date().toISOString(), endP = d && d.end_lat != null ? { lat: d.end_lat, lng: d.end_lng } : null;
@@ -3680,8 +3778,13 @@ const fvDay = async (uid, day) => {
     total += after; }
   const open = visits.find(v => !v.out_at) || null, km = Math.round(total * 100) / 100;
   const rate = d && d.rate != null ? Number(d.rate) : fvRate(cfg, uid);
+  if (d && d.return_mode === 'bus') busKm += after;
+  fares += Number((d && d.return_fare) || 0);
+  const bikeKm = Math.max(0, Math.round((total - busKm) * 100) / 100), petrol = Math.round(bikeKm * rate * 100) / 100, fareT = Math.round(fares * 100) / 100;
+  const manual = d && d.manual_km != null ? Number(d.manual_km) : null, diff = manual != null ? Math.round((manual - km) * 10) / 10 : null;
   const srcs = visits.map(v => v.km_src).concat(afterSrc).filter(Boolean);
-  return { day, visits, open, started: d, km, km_after: after, km_after_src: afterSrc, on_site_min: Math.round(onSite), rate, amount: Math.round(km * rate * 100) / 100,
+  return { day, visits, open, started: d, km, km_after: after, km_after_src: afterSrc, on_site_min: Math.round(onSite), rate, amount: Math.round((petrol + fareT) * 100) / 100,
+    bike_km: bikeKm, bus_km: Math.round(busKm * 100) / 100, petrol, fares: fareT, manual_km: manual, km_diff: diff, km_flag: diff != null && Math.abs(diff) >= 5, return_ticket: d && d.return_ticket || null,
     google: !!cfg.key, src: srcs.length && srcs.every(x => x === 'google') ? 'google' : srcs.some(x => x === 'google') ? 'mixed' : srcs.length ? 'gps' : null, gerr,
     route: pts.filter(p => p.kind !== 'gps' || (p.acc || 0) <= 150).map(p => [p.lat, p.lng, p.kind]) };
 };
@@ -3805,8 +3908,21 @@ app.post('/api/fv/end', need('field'), wrap(async (req, res) => {
   if ((await q(`SELECT 1 FROM fv_visits WHERE user_id=$1 AND out_at IS NULL`, [req.user.id])).rows.length) return res.status(400).json({ error: 'Check out of the current visit first' });
   await q(`INSERT INTO fv_days(user_id,day,started_at,ended_at,end_lat,end_lng) VALUES($1,$2,now(),now(),$3,$4) ON CONFLICT (user_id,day) DO UPDATE SET ended_at=now(), end_lat=$3, end_lng=$4`, [req.user.id, day, pt ? pt.lat : null, pt ? pt.lng : null]);
   await q(`UPDATE fv_days SET rate=$3 WHERE user_id=$1 AND day=$2`, [req.user.id, day, fvRate(await fvCfg(), req.user.id)]);   // the ₹/km on the day it ended stays for that day
+  const eb = req.body || {};
+  if (eb.manual_km !== undefined && eb.manual_km !== '' && eb.manual_km !== null) await q(`UPDATE fv_days SET manual_km=$3, manual_note=$4 WHERE user_id=$1 AND day=$2`, [req.user.id, day, Math.max(0, +eb.manual_km || 0), String(eb.manual_note || '').slice(0, 300) || null]);
+  if (eb.return_mode === 'bus') { if (!(+eb.return_fare > 0)) return res.status(400).json({ error: 'Came back by bus — enter the ticket amount' });
+    let tid = null; const last = (await q(`SELECT id FROM fv_visits WHERE user_id=$1 AND day=$2 ORDER BY in_at DESC LIMIT 1`, [req.user.id, day])).rows[0];
+    if (eb.ticket && last) { const tb = { ...eb, photo: eb.ticket }; const e = await fvPhoto(last.id, tb, 'ticket'); if (e) return res.status(400).json({ error: e }); tid = tb._mediaId; }
+    await q(`UPDATE fv_days SET return_mode='bus', return_fare=$3, return_ticket=$4 WHERE user_id=$1 AND day=$2`, [req.user.id, day, Math.round(+eb.return_fare * 100) / 100, tid]); }
   if (pt) await q(`INSERT INTO fv_track(user_id,day,at,lat,lng,acc,kind) VALUES($1,$2,now(),$3,$4,$5,'end')`, [req.user.id, day, pt.lat, pt.lng, pt.acc]);
   res.json({ ok: true });
+}));
+app.post('/api/fv/manual-km', need('field', 'field_team'), wrap(async (req, res) => {   // km noted by hand (odometer) for a day — compared with the map km
+  const b = req.body || {}, uid = fvUid(req); if (!uid) return res.status(403).json({ error: 'Not allowed' });
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : (await todayIST());
+  await q(`INSERT INTO fv_days(user_id,day) VALUES($1,$2) ON CONFLICT DO NOTHING`, [uid, day]);
+  await q(`UPDATE fv_days SET manual_km=$3, manual_note=$4 WHERE user_id=$1 AND day=$2`, [uid, day, b.km === '' || b.km == null ? null : Math.max(0, +b.km || 0), String(b.note || '').slice(0, 300) || null]);
+  const x = await fvDay(uid, day); res.json({ ok: true, km: x.km, manual_km: x.manual_km, km_diff: x.km_diff, km_flag: x.km_flag });
 }));
 app.post('/api/fv/track', need('field'), wrap(async (req, res) => {   // GPS points sent by the phone while travelling
   const day = (await todayIST()), d = (await q(`SELECT started_at, ended_at FROM fv_days WHERE user_id=$1 AND day=$2`, [req.user.id, day])).rows[0];
@@ -3836,14 +3952,15 @@ app.get('/api/fv/customer/:id', need('field', 'field_team'), wrap(async (req, re
   c.services = (await q(`SELECT COUNT(*)::int n FROM services WHERE customer_id=$1`, [c.id])).rows[0].n;
   res.json(c);
 }));
-const fvPhoto = async (visitId, b) => {
+const fvPhoto = async (visitId, b, kind) => {
   const m = /^data:(image\/[\w+.-]+);base64,(.+)$/.exec(String(b.photo || '')); if (!m) return 'Photo must be an image';
   const buf = Buffer.from(m[2], 'base64'); if (buf.length > 3e6) return 'Photo is too big';
-  const pt = fvPoint(b) || {}; await q(`INSERT INTO fv_media(visit_id,data,mime,lat,lng) VALUES($1,$2,$3,$4,$5)`, [visitId, buf, m[1], pt.lat ?? null, pt.lng ?? null]); return null;
+  const pt = fvPoint(b) || {}; const ins = await q(`INSERT INTO fv_media(visit_id,data,mime,lat,lng,kind) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, [visitId, buf, m[1], pt.lat ?? null, pt.lng ?? null, kind || 'photo']); b._mediaId = ins.rows[0].id; return null;
 };
 app.post('/api/fv/checkin', need('field'), wrap(async (req, res) => {
   const b = req.body || {}, pt = fvPoint(b); if (!pt) return res.status(400).json({ error: 'Location needed — turn on GPS and allow location' });
   if ((await q(`SELECT 1 FROM fv_visits WHERE user_id=$1 AND out_at IS NULL`, [req.user.id])).rows.length) return res.status(400).json({ error: 'You are still checked in at another place — check out there first' });
+  if (b.travel_mode === 'bus' && !(+b.fare > 0)) return res.status(400).json({ error: 'Came by bus — enter the ticket amount' });
   let c = null, plan = null;
   if (+b.plan_id) { plan = (await q(`${FVP_SEL} WHERE fp.id=$1`, [+b.plan_id])).rows[0];
     if (!plan || plan.user_id !== req.user.id || plan.status !== 'planned') return res.status(400).json({ error: 'This planned visit is not open for you' });
@@ -3864,8 +3981,13 @@ app.post('/api/fv/checkin', need('field'), wrap(async (req, res) => {
   await q(`INSERT INTO fv_track(user_id,day,at,lat,lng,acc,kind) VALUES($1,$2,now(),$3,$4,$5,'in')`, [req.user.id, day, pt.lat, pt.lng, pt.acc]);
   if (plan) { await q(`UPDATE fv_visits SET plan_id=$2, lead_id=$3 WHERE id=$1`, [r.id, plan.id, plan.lead_id]); await q(`UPDATE fv_plans SET visit_id=$2 WHERE id=$1`, [plan.id, r.id]);
     if (plan.lead_id) await leadLog(plan.lead_id, req.user.name, `📍 Reached the site (field visit) at ${new Date().toLocaleTimeString('en-IN', { timeZone: TZ, hour: 'numeric', minute: '2-digit' })}`); }
+  const mode = ['bike', 'bus'].includes(b.travel_mode) ? b.travel_mode : 'bike';
+  if (mode === 'bus') { const fare = Math.round(Math.max(0, +b.fare || 0) * 100) / 100;
+    await q(`UPDATE fv_visits SET travel_mode='bus', fare=$2 WHERE id=$1`, [r.id, fare]);
+    if (b.ticket) { const e = await fvPhoto(r.id, { ...b, photo: b.ticket }, 'ticket'); if (e) return res.status(400).json({ error: e }); } }
+  else await q(`UPDATE fv_visits SET travel_mode='bike' WHERE id=$1`, [r.id]);
   if (b.photo) { const e = await fvPhoto(r.id, b); if (e) return res.status(400).json({ error: e }); }
-  res.json({ ok: true, id: r.id, old_customer: !!c, customer_id: c ? c.id : null, pending });
+  res.json({ ok: true, id: r.id, old_customer: !!c, customer_id: c ? c.id : null, pending, travel_mode: mode });
 }));
 const fvOwn = async (req, res) => {
   const v = (await q(`SELECT * FROM fv_visits WHERE id=$1`, [+req.params.id])).rows[0];
@@ -3946,10 +4068,59 @@ app.get('/api/fv/report', need('field', 'field_team'), wrap(async (req, res) => 
   const uid = fvUid(req); if (!uid) return res.status(403).json({ error: 'Not allowed' });
   const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : (await todayIST()), from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : to.slice(0, 8) + '01';
   const days = (await q(`SELECT DISTINCT to_char(day,'YYYY-MM-DD') d FROM (SELECT day FROM fv_visits WHERE user_id=$1 AND day BETWEEN $2 AND $3 UNION SELECT day FROM fv_days WHERE user_id=$1 AND day BETWEEN $2 AND $3 AND started_at IS NOT NULL) t ORDER BY 1 DESC`, [uid, from, to])).rows.map(r => r.d);
-  const rows = []; for (const d of days.slice(0, 62)) { const x = await fvDay(uid, d); rows.push({ day: d, visits: x.visits.length, km: x.km, rate: x.rate, amount: x.amount, src: x.src, on_site_min: x.on_site_min, new_customers: x.visits.filter(v => v.is_new).length }); }
-  res.json({ from, to, rows, km: Math.round(rows.reduce((t, r) => t + r.km, 0) * 100) / 100, visits: rows.reduce((t, r) => t + r.visits, 0), amount: Math.round(rows.reduce((t, r) => t + r.amount, 0) * 100) / 100 });
+  const rows = []; for (const d of days.slice(0, 62)) { const x = await fvDay(uid, d); rows.push({ day: d, visits: x.visits.length, km: x.km, rate: x.rate, amount: x.amount, src: x.src, on_site_min: x.on_site_min, new_customers: x.visits.filter(v => v.is_new).length, bike_km: x.bike_km, bus_km: x.bus_km, petrol: x.petrol, fares: x.fares, manual_km: x.manual_km, km_diff: x.km_diff, km_flag: x.km_flag }); }
+  const S2 = k => Math.round(rows.reduce((t, r) => t + (Number(r[k]) || 0), 0) * 100) / 100;
+  res.json({ from, to, rows, km: S2('km'), visits: rows.reduce((t, r) => t + r.visits, 0), amount: S2('amount'), petrol: S2('petrol'), fares: S2('fares'), bike_km: S2('bike_km'), flagged: rows.filter(r => r.km_flag).length });
 }));
 
+// ---------- Staff report: what each person did in a period (leads, quotations, invoices, calls, services, field visits, attendance) ----------
+app.get('/api/staff-report', wrap(async (req, res) => {
+  if (!(isBoss(req.user) || can(req.user, 'dashboard') || can(req.user, 'att_team'))) return res.status(403).json({ error: 'Not allowed' });
+  const today = await todayIST(), to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : today, from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : to.slice(0, 8) + '01';
+  const p = [], bw = (col) => `(${col} AT TIME ZONE '${TZ}')::date BETWEEN $1 AND $2`;
+  let w = 'active'; if (+req.query.brand) { p.push(+req.query.brand); w += ` AND brand_id=$${p.length}`; } else if (req.user.brand_id && !isSuper(req.user)) { p.push(req.user.brand_id); w += ` AND brand_id=$${p.length}`; }
+  const users = (await q(`SELECT id, name, role, brand_id FROM users WHERE ${w} ORDER BY role, lower(name)`, p)).rows;
+  const one = async (sql, pp) => { try { return (await q(sql, pp)).rows; } catch (e) { return []; } };
+  const by = (rows, k = 'uid') => Object.fromEntries(rows.map(r => [r[k], r]));
+  const leads = by(await one(`SELECT created_by uid, COUNT(*)::int n, COUNT(*) FILTER (WHERE stage='Closed Won')::int won FROM leads WHERE ${bw('created_at')} GROUP BY 1`, [from, to]));
+  const acts = by(await one(`SELECT u.id uid, COUNT(*)::int n FROM lead_activity a JOIN users u ON u.name=a.by_name WHERE ${bw('a.created_at')} GROUP BY 1`, [from, to]));
+  const docs = by(await one(`SELECT created_by uid, COUNT(*) FILTER (WHERE type='quotation')::int quotes, COALESCE(SUM(total) FILTER (WHERE type='quotation'),0)::float quote_amt,
+    COUNT(*) FILTER (WHERE type='invoice')::int invoices, COALESCE(SUM(total) FILTER (WHERE type='invoice'),0)::float invoice_amt FROM bl_docs WHERE status NOT IN ('Draft','Cancelled') AND doc_date BETWEEN $1 AND $2 GROUP BY 1`, [from, to]));
+  const calls = by(await one(`SELECT user_id uid, COUNT(*)::int n, COALESCE(SUM(duration),0)::int secs, COUNT(*) FILTER (WHERE status='accepted')::int leads FROM calls WHERE ${bw('started_at')} GROUP BY 1`, [from, to]));
+  const svc = by(await one(`SELECT technician_id uid, COUNT(*) FILTER (WHERE status IN ('Resolved','Awaiting Payment'))::int done, COUNT(*) FILTER (WHERE status NOT IN ('Resolved','Awaiting Payment','Cancelled'))::int open FROM services WHERE technician_id IS NOT NULL AND (${bw('COALESCE(work_done_on,submitted_on)')} OR status NOT IN ('Resolved','Awaiting Payment','Cancelled')) GROUP BY 1`, [from, to]));
+  const svcNew = by(await one(`SELECT u.id uid, COUNT(*)::int n FROM service_history h JOIN users u ON u.name=h.done_by WHERE (h.changes ILIKE 'Ticket created%' OR h.changes ILIKE 'Job created%' OR h.changes ILIKE 'Created from%') AND ${bw('h.created_at')} GROUP BY 1`, [from, to]));
+  const att = by(await one(`SELECT user_id uid, COUNT(*) FILTER (WHERE status IN ('Present','Late','Half Day','On Duty'))::int present, COUNT(*) FILTER (WHERE status='Late')::int late, COUNT(*) FILTER (WHERE status ILIKE '%leave%' OR status='Absent')::int absent FROM attendance WHERE day BETWEEN $1 AND $2 GROUP BY 1`, [from, to]));
+  const fvv = by(await one(`SELECT user_id uid, COUNT(*)::int visits, COUNT(DISTINCT day)::int days, COALESCE(SUM(fare),0)::float fares FROM fv_visits WHERE day BETWEEN $1 AND $2 GROUP BY 1`, [from, to]));
+  const rows = [];
+  for (const u of users) {
+    const f = fvv[u.id] || {}; let km = 0, petrol = 0, fares = 0;
+    if (f.visits && req.query.km !== '0') { const ds = (await q(`SELECT DISTINCT to_char(day,'YYYY-MM-DD') d FROM fv_visits WHERE user_id=$1 AND day BETWEEN $2 AND $3 ORDER BY 1 LIMIT 62`, [u.id, from, to])).rows;
+      for (const d of ds) { try { const x = await fvDay(u.id, d.d); km += x.km; petrol += x.petrol; fares += x.fares; } catch (e) {} } }
+    const L = leads[u.id] || {}, D = docs[u.id] || {}, C = calls[u.id] || {}, S = svc[u.id] || {}, A = att[u.id] || {};
+    rows.push({ id: u.id, name: u.name, role: u.role, leads: L.n || 0, won: L.won || 0, followups: (acts[u.id] || {}).n || 0, quotes: D.quotes || 0, quote_amt: D.quote_amt || 0, invoices: D.invoices || 0, invoice_amt: D.invoice_amt || 0,
+      calls: C.n || 0, call_min: Math.round((C.secs || 0) / 60), services_done: S.done || 0, services_open: S.open || 0, services_new: (svcNew[u.id] || {}).n || 0,
+      visits: f.visits || 0, field_days: f.days || 0, km: Math.round(km * 10) / 10, petrol: Math.round(petrol), fares: Math.round(fares), travel: Math.round(petrol + fares), present: A.present || 0, late: A.late || 0, absent: A.absent || 0 });
+  }
+  const T = k => rows.reduce((t, r) => t + (Number(r[k]) || 0), 0), sc = r => r.leads + r.followups + r.quotes + r.invoices + r.calls + r.services_done + r.services_new + r.visits + r.present;
+  rows.sort((a, b) => sc(b) - sc(a));
+  res.json({ from, to, rows, totals: Object.fromEntries(['leads', 'won', 'followups', 'quotes', 'quote_amt', 'invoices', 'invoice_amt', 'calls', 'call_min', 'services_done', 'services_open', 'services_new', 'visits', 'km', 'petrol', 'fares', 'travel', 'present', 'late', 'absent'].map(k => [k, Math.round(T(k) * 10) / 10])) });
+}));
+app.get('/api/staff-report/:id/history', wrap(async (req, res) => {   // one person's activity, newest first
+  if (!(isBoss(req.user) || can(req.user, 'dashboard') || can(req.user, 'att_team') || +req.params.id === req.user.id)) return res.status(403).json({ error: 'Not allowed' });
+  const u = (await q('SELECT id, name, role FROM users WHERE id=$1', [+req.params.id])).rows[0]; if (!u) return res.status(404).json({ error: 'Not found' });
+  const today = await todayIST(), to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : today, from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : to.slice(0, 8) + '01';
+  const one = async (sql, pp) => { try { return (await q(sql, pp)).rows; } catch (e) { return []; } }, bw = c => `(${c} AT TIME ZONE '${TZ}')::date BETWEEN $2 AND $3`;
+  const ev = [
+    ...(await one(`SELECT created_at at, 'lead' k, 'New lead · ' || name || COALESCE(' · ' || phone,'') t FROM leads WHERE created_by=$1 AND ${bw('created_at')}`, [u.id, from, to])),
+    ...(await one(`SELECT created_at at, 'follow' k, text t FROM lead_activity WHERE by_name=$1 AND ${bw('created_at')}`, [u.name, from, to].map((x, i) => i ? x : u.name))),
+    ...(await one(`SELECT created_at at, type k, initcap(replace(type,'_',' ')) || ' ' || COALESCE(no,'') || ' · ' || COALESCE(party->>'company',party->>'name','') || ' · ₹' || total t FROM bl_docs WHERE created_by=$1 AND status NOT IN ('Draft','Cancelled') AND doc_date BETWEEN $2 AND $3`, [u.id, from, to])),
+    ...(await one(`SELECT started_at at, 'call' k, '📞 ' || COALESCE(direction,'Call') || ' · ' || COALESCE(contact,phone) || ' · ' || (duration/60) || ' min ' || (duration%60) || ' s' t FROM calls WHERE user_id=$1 AND ${bw('started_at')}`, [u.id, from, to])),
+    ...(await one(`SELECT h.created_at at, 'service' k, 'Ticket #' || s.ticket_no || ' · ' || h.changes t FROM service_history h JOIN services s ON s.id=h.service_id WHERE h.done_by=$1 AND ${bw('h.created_at')}`, [u.name, from, to].map((x, i) => i ? x : u.name))),
+    ...(await one(`SELECT in_at at, 'visit' k, '📍 Visit · ' || COALESCE(cust_company,cust_name,'site') || CASE WHEN travel_mode='bus' THEN ' · 🚌 bus ₹' || COALESCE(fare,0) ELSE '' END || COALESCE(' · ' || outcome,'') t FROM fv_visits WHERE user_id=$1 AND day BETWEEN $2 AND $3`, [u.id, from, to])),
+    ...(await one(`SELECT COALESCE(check_in, day::timestamptz) at, 'att' k, '🕘 ' || status || COALESCE(' · in ' || to_char(check_in AT TIME ZONE '${TZ}','HH12:MI AM'),'') || COALESCE(' · out ' || to_char(check_out AT TIME ZONE '${TZ}','HH12:MI AM'),'') t FROM attendance WHERE user_id=$1 AND day BETWEEN $2 AND $3`, [u.id, from, to])),
+  ].sort((a, b) => new Date(b.at) - new Date(a.at)).slice(0, 1500);
+  res.json({ user: u, from, to, items: ev });
+}));
 // ===================== BILLING (Swipe-style): quotations, invoices, proforma, challans, credit notes, purchases, stock, expenses =====================
 const ExcelJS = require('exceljs');
 const BL_STATES = [['01','Jammu and Kashmir'],['02','Himachal Pradesh'],['03','Punjab'],['04','Chandigarh'],['05','Uttarakhand'],['06','Haryana'],['07','Delhi'],['08','Rajasthan'],['09','Uttar Pradesh'],['10','Bihar'],['11','Sikkim'],['12','Arunachal Pradesh'],['13','Nagaland'],['14','Manipur'],['15','Mizoram'],['16','Tripura'],['17','Meghalaya'],['18','Assam'],['19','West Bengal'],['20','Jharkhand'],['21','Odisha'],['22','Chhattisgarh'],['23','Madhya Pradesh'],['24','Gujarat'],['26','Dadra and Nagar Haveli and Daman and Diu'],['27','Maharashtra'],['29','Karnataka'],['30','Goa'],['31','Lakshadweep'],['32','Kerala'],['33','Tamil Nadu'],['34','Puducherry'],['35','Andaman and Nicobar Islands'],['36','Telangana'],['37','Andhra Pradesh'],['38','Ladakh'],['97','Other Territory']];
@@ -4046,7 +4217,7 @@ app.get('/api/bl/meta', need('billing', 'purchases'), wrap(async (req, res) => {
   const brands = [];
   for (const r of (await q(`SELECT id FROM brands ${req.user.brand_id && !isSuper(req.user) ? 'WHERE id=' + (+req.user.brand_id) : ''} ORDER BY id`)).rows) { const b = await blBrand(r.id); delete b.prefix; b.prefixes = Object.fromEntries(Object.keys(BL_TYPES).map(t => [t, (b.prefixes || {})[t] ?? BL_TYPES[t].p])); brands.push(b); }
   const cats = await blCats();
-  res.json({ states: BL_STATES.map(s => s[1]), types: Object.fromEntries(Object.entries(BL_TYPES).map(([k, v]) => [k, v.l])), modes: BL_MODES, units: BL_UNITS, taxes: BL_TAXES, exp_cats: await blExpCats(), categories: cats, brands, banks: BANKS, my_brand: req.user.brand_id || null });
+  res.json({ states: BL_STATES.map(s => s[1]), types: Object.fromEntries(Object.entries(BL_TYPES).map(([k, v]) => [k, v.l])), modes: BL_MODES, units: BL_UNITS, taxes: BL_TAXES, exp_cats: await blExpCats(), categories: cats, brands, banks: ST().BANKS, my_brand: req.user.brand_id || null });
 }));
 app.put('/api/bl/brand/:id', superOnly, wrap(async (req, res) => {
   const id = +req.params.id, b = req.body || {};
@@ -4168,7 +4339,7 @@ app.patch('/api/bl/products/:id', blNeed, wrap(async (req, res) => {
   const ks = Object.keys(o); if (ks.length) await q(`UPDATE bl_products SET ${ks.map((k, i) => `${k}=$${i + 2}`).join(',')}, updated_at=now() WHERE id=$1`, [+req.params.id, ...ks.map(k => o[k])]);
   res.json({ ok: true });
 }));
-app.delete('/api/bl/products/:id', blNeed, wrap(async (req, res) => {    // used products are hidden, not deleted
+app.delete('/api/bl/products/:id', blNeed, delNeed, wrap(async (req, res) => {    // used products are hidden, not deleted
   const used = (await q(`SELECT 1 FROM bl_docs WHERE items @> $1::jsonb LIMIT 1`, [JSON.stringify([{ pid: +req.params.id }])])).rows.length;
   if (used) await q('UPDATE bl_products SET active=false WHERE id=$1', [+req.params.id]); else await q('DELETE FROM bl_products WHERE id=$1', [+req.params.id]);
   res.json({ ok: true, hidden: !!used });
@@ -4346,9 +4517,13 @@ const blNextNo = async (brandId, type) => {
   const b = await blBrand(brandId), pre = b ? b.prefix(type) : BL_TYPES[type].p;
   const last = (await q(`SELECT COALESCE(MAX(seq),0) n FROM bl_docs WHERE brand_id IS NOT DISTINCT FROM $1 AND type=$2`, [brandId, type])).rows[0].n;
   const start = +((b && b.next_no || {})[type]) || 1, seq = Math.max(last + 1, start);
-  return { seq, no: pre + seq };
+  return { seq, no: pre + String(seq).padStart(3, '0') };   // INV-001, QT-001 … separate series for every branch
 };
 // stock effect of a document: invoice & challan take stock out (an invoice made from a challan doesn't take it twice), credit note & purchase bring it in
+app.get('/api/bl/next-no', need('billing', 'purchases'), wrap(async (req, res) => {   // preview of the next automatic number
+  const type = BL_TYPES[req.query.type] ? req.query.type : 'invoice', brandId = req.user.brand_id && !isSuper(req.user) ? req.user.brand_id : (+req.query.brand || null);
+  res.json(await blNextNo(brandId, type));
+}));
 const blStockSign = async d => {
   if (d.status === 'Cancelled' || d.status === 'Draft') return 0;
   if (d.type === 'invoice') { if (d.ref_id) { const r = (await q('SELECT type FROM bl_docs WHERE id=$1', [d.ref_id])).rows[0]; if (r && r.type === 'challan') return 0; } return -1; }
@@ -4443,7 +4618,7 @@ const blSave = async (req, res, old) => {
   const draftAgainst = draft ? against : null; if (draft) against = null;   // a draft credits nothing until it is saved for real
   const pickNo = async () => {   // number for a new document or a draft being finalised
     let nn = await blNextNo(brandId, type);
-    if (b.no && String(b.no).trim() && String(b.no).trim() !== 'Draft') { const want = String(b.no).trim().slice(0, 40); if ((await q('SELECT 1 FROM bl_docs WHERE brand_id IS NOT DISTINCT FROM $1 AND type=$2 AND no=$3 AND id<>$4', [brandId, type, want, old ? old.id : 0])).rows.length) return { error: `${want} is already used` }; nn = { no: want, seq: +(/(\d+)\s*$/.exec(want) || [])[1] || nn.seq }; }
+    // numbers are always automatic (no typing): next number of this branch + document type
     return nn;
   };
   const afterMade = async (no, v) => {
@@ -4464,7 +4639,7 @@ const blSave = async (req, res, old) => {
   } else {
     const nn = draft ? { no: 'Draft', seq: null } : await pickNo(); if (nn.error) return res.status(409).json({ error: nn.error });
     Object.assign(vals, { type, no: nn.no, seq: nn.seq, against_id: draft ? draftAgainst : against, ref_id: +b.ref_id || null, lead_id: +b.lead_id || null, service_id: +b.service_id || null, status: draft ? 'Draft' : openSt,
-      created_by: req.user.id, created_by_name: req.user.name, share_token: crypto.randomBytes(12).toString('base64url') });
+      created_by: req.user.id, created_by_name: req.user.name, share_token: coPrefix() + crypto.randomBytes(12).toString('base64url') });
     const ks = Object.keys(vals); id = (await q(`INSERT INTO bl_docs(${ks.join(',')}) VALUES(${ks.map((_, i) => '$' + (i + 1)).join(',')}) RETURNING id`, ks.map(k => vals[k]))).rows[0].id;
     if (!draft) await afterMade(nn.no, vals);
   }
@@ -4554,7 +4729,7 @@ app.post('/api/bl/docs/:id/payments', need('billing', 'purchases'), wrap(async (
   if (amt > due + 0.009) return res.status(400).json({ error: `Only ₹${due} is due on this` });
   const mode = BL_MODES.includes(b.mode) ? b.mode : 'Cash';
   await q(`INSERT INTO bl_payments(doc_id,amount,mode,account,pay_date,note,by_name) VALUES($1,$2,$3,$4,COALESCE($5::date,CURRENT_DATE),$6,$7)`,
-    [d.id, amt, mode, BANKS.includes(b.account) ? b.account : (String(b.account || '').slice(0, 60) || null), /^\d{4}-\d{2}-\d{2}$/.test(b.pay_date) ? b.pay_date : null, String(b.note || '').slice(0, 300) || null, req.user.name]);
+    [d.id, amt, mode, ST().BANKS.includes(b.account) ? b.account : (String(b.account || '').slice(0, 60) || null), /^\d{4}-\d{2}-\d{2}$/.test(b.pay_date) ? b.pay_date : null, String(b.note || '').slice(0, 300) || null, req.user.name]);
   await q('UPDATE bl_docs SET paid=paid+$2, updated_at=now() WHERE id=$1', [d.id, amt]);
   const z = await blLoad(req, res, d.id); await q('UPDATE bl_docs SET status=$2 WHERE id=$1', [d.id, blStatus(z)]);
   res.json({ ok: true, status: blStatus(z), due: br2(z.total - z.paid - z.credited) });
@@ -4604,7 +4779,7 @@ const blHTML = (d, b, opts = {}) => {
     : `<tr><td class="c">${i + 1}</td><td><b>${bhe(l.name)}</b>${l.desc ? `<div class="ds">${bhe(l.desc).replace(/\n/g, '<br>')}</div>` : ''}</td>${hasHsn ? `<td class="c">${bhe(l.hsn || '')}</td>` : ''}<td class="r">${l.qty} ${bhe(l.unit || '')}</td><td class="r">${binr(l.rate)}${l.incl ? '<div class="ds">incl. tax</div>' : ''}</td>${hasDisc ? `<td class="r">${l.dtype === 'amt' ? '₹' + binr(l.dval) : l.disc ? l.disc + '%' : '—'}</td>` : ''}${supply ? '' : `<td class="r hm">${binr(l.taxable)}</td><td class="r">${l.tax}%<div class="ds">${binr(l.tax_amt)}</div></td>`}<td class="r"><b>${binr(l.amount)}</b></td></tr>`)).join('');
   const taxLines = d.inter ? (Number(d.igst) ? `<tr><td>IGST</td><td class="r">${binr(d.igst)}</td></tr>` : '') : (Number(d.cgst) ? `<tr><td>CGST</td><td class="r">${binr(d.cgst)}</td></tr><tr><td>SGST</td><td class="r">${binr(d.sgst)}</td></tr>` : '');
   const due = br2(d.total - d.paid - d.credited);
-  const logo = b.has_logo ? `<img class="logo" src="${opts.base || ''}/bl-logo/${b.id}?v=${b.v || 0}" alt="">` : '';
+  const logo = b.has_logo ? `<img class="logo" src="${opts.base || ''}/bl-logo/${b.id}?v=${b.v || 0}${coQS()}" alt="">` : '';
   const from = `<div class="fromn">${bhe(b.legal_name || b.name)}</div><div>${bhe(b.address || '').replace(/\n/g, '<br>')}</div>${b.state ? `<div>State: ${bhe(b.state)} (${blStateCode(b.state)})</div>` : ''}${b.gstin ? `<div><b>GSTIN:</b> ${bhe(b.gstin)}</div>` : ''}${b.phone ? `<div>📞 ${bhe(b.phone)}</div>` : ''}${b.email ? `<div>✉ ${bhe(b.email)}</div>` : ''}`;
   const to = `<div class="lbl">${vend ? 'Vendor' : 'Bill to · billing address'}</div><div class="fromn">${bhe(P.company || P.name || '')}</div>${P.company && P.name && P.company !== P.name ? `<div>${bhe(P.name)}</div>` : ''}<div>${bhe(P.address || '').replace(/\n/g, '<br>')}${P.city ? ', ' + bhe(P.city) : ''}${P.pincode ? ' - ' + bhe(P.pincode) : ''}</div>${P.phone ? `<div>📞 ${bhe(P.phone)}</div>` : ''}${P.state ? `<div>State: ${bhe(P.state)} (${blStateCode(P.state)})</div>` : ''}${P.gstin ? `<div><b>GSTIN:</b> ${bhe(P.gstin)}</div>` : ''}${d.pos ? `<div>Place of supply: ${bhe(d.pos)} (${blStateCode(d.pos)})</div>` : ''}`;
   const shipOn = !vend && (P.ship_address || P.ship_name || P.ship_city);
@@ -4616,8 +4791,8 @@ const blHTML = (d, b, opts = {}) => {
   const bk = d.bank && typeof d.bank === 'object' ? d.bank : ((b.banks || [])[0] || {});   // the account chosen on this bill (older bills: the brand's first account)
   const bank = !vend && !bk.none && (bk.bank_account || bk.upi) ? `<div class="bank"><div class="lbl">Bank details</div>${bk.holder ? `<div>A/c name: <b>${bhe(bk.holder)}</b></div>` : ''}${bk.bank_name ? `<div>Bank: <b>${bhe(bk.bank_name)}</b></div>` : ''}${bk.bank_account ? `<div>A/c no: <b>${bhe(bk.bank_account)}</b></div>` : ''}${bk.bank_ifsc ? `<div>IFSC: <b>${bhe(bk.bank_ifsc)}</b>${bk.bank_branch ? ' · ' + bhe(bk.bank_branch) : ''}</div>` : ''}${bk.upi ? `<div>UPI: <b>${bhe(bk.upi)}</b></div>` : ''}${opts.pay && bk.upi && due > 0 && d.type === 'invoice' ? `<a class="paybtn noprint" href="upi://pay?pa=${encodeURIComponent(bk.upi)}&pn=${encodeURIComponent(b.legal_name || b.name)}&am=${due.toFixed(2)}&cu=INR&tn=${encodeURIComponent(d.no)}">Pay ₹${binr(due)} by UPI</a>` : ''}</div>` : '';
   const sealOn = d.show_seal !== false && !vend;
-  const sealImg = sealOn && b.has_seal ? `<img class="seal" src="${opts.base || ''}/bl-seal/${b.id}?v=${b.v || 0}" alt="Seal">` : '';
-  const signImg = sealOn && b.has_sign ? `<img class="signi" src="${opts.base || ''}/bl-sign/${b.id}?v=${b.v || 0}" alt="Signature">` : '';
+  const sealImg = sealOn && b.has_seal ? `<img class="seal" src="${opts.base || ''}/bl-seal/${b.id}?v=${b.v || 0}${coQS()}" alt="Seal">` : '';
+  const signImg = sealOn && b.has_sign ? `<img class="signi" src="${opts.base || ''}/bl-sign/${b.id}?v=${b.v || 0}${coQS()}" alt="Signature">` : '';
   const notes = [d.notes && `<div class="lbl">Notes</div><div>${bhe(d.notes).replace(/\n/g, '<br>')}</div>`, (d.terms || (!vend && b.terms)) && `<div class="lbl">Terms & conditions</div><div>${bhe(d.terms || b.terms).replace(/\n/g, '<br>')}</div>`].filter(Boolean).join('');
   const css = `*{box-sizing:border-box}body{margin:0;background:#f2f2f2;font:13px/1.45 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1d1d1f}.pg{max-width:820px;margin:16px auto;background:#fff;padding:34px 36px;box-shadow:0 2px 14px rgba(0,0,0,.08)}
   .hd{display:flex;gap:18px;align-items:flex-start;justify-content:space-between}.logo{max-height:64px;max-width:180px;object-fit:contain;margin-bottom:6px}.fromn{font-weight:700;font-size:15px}.ttl{font-size:22px;font-weight:800;letter-spacing:.5px;color:${col};text-transform:uppercase;text-align:right}
@@ -4634,6 +4809,8 @@ const blHTML = (d, b, opts = {}) => {
   .itw{overflow-x:auto;-webkit-overflow-scrolling:touch}
   @media (max-width:640px){.pg{margin:0;padding:18px 12px;box-shadow:none}.parties,.foot{flex-direction:column;gap:10px}.it{font-size:11px}.it th{font-size:9.5px;letter-spacing:0;padding:6px 3px}.it td{padding:6px 3px}.it .hm{display:none}.hd{flex-direction:column}.ttl{text-align:left}.foot>div{max-width:none!important}}
   @media print{body{background:#fff}.pg{box-shadow:none;margin:0;max-width:none;padding:10mm}.noprint,.bar{display:none!important}@page{size:${thermal ? '80mm auto' : 'A4'};margin:${thermal ? '2mm' : '8mm'}}}`;
+  const plNow = coId() === 1 ? { kind: 'owner' } : planOf(CO_CACHE.get(coId()));
+  const wm = plNow.kind === 'trial' || plNow.kind === 'free';   // trial / free plan bills carry the Rago watermark and a small Rago note
   const stamp = d.status === 'Draft' ? '<div class="stamp">DRAFT</div>' : d.status === 'Cancelled' ? '<div class="stamp">CANCELLED</div>' : (d.type === 'invoice' && d.status === 'Paid') ? '<div class="stamp ok">PAID</div>' : '';
   const head = thermal
     ? `<div class="hd">${logo}<div>${from}</div><div class="ttl" style="margin-top:8px">${title}</div>${meta}${stamp}</div>`
@@ -4641,10 +4818,10 @@ const blHTML = (d, b, opts = {}) => {
   const itHead = thermal ? '<tr><th colspan="2">Item</th><th class="r">Amount</th></tr>' : `<tr><th class="c">#</th><th>Item</th>${hasHsn ? '<th class="c">HSN/SAC</th>' : ''}<th class="r">Qty</th><th class="r">Rate</th>${hasDisc ? '<th class="r">Disc</th>' : ''}${supply ? '' : '<th class="r hm">Taxable</th><th class="r">GST</th>'}<th class="r">Amount</th></tr>`;
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${bhe(title + ' ' + d.no)}</title><style>${css}</style></head><body>
   ${opts.bar && !opts.embed ? `<div class="bar noprint"><button onclick="print()">🖨 Print / Save PDF</button></div>` : ''}${opts.embed ? '<style>body{background:#fff}.pg{margin:0 auto;box-shadow:none}</style>' : ''}
-  <div class="pg">${head}<div class="parties"><div>${to}</div>${ship}</div>${blDelivHTML(d)}
+  <div class="pg"${wm ? ' style="position:relative;overflow:hidden"' : ''}>${wm ? `<div aria-hidden="true" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:0"><div style="transform:rotate(-30deg);font-size:120px;font-weight:900;letter-spacing:8px;color:rgba(227,170,43,.11);white-space:nowrap">RAGO CRM</div></div>` : ''}${head}<div class="parties"><div>${to}</div>${ship}</div>${blDelivHTML(d)}
   <div class="itw"><table class="it">${itHead}${rows}</table></div>
   <div class="foot"><div>${gstTab}<div class="words">${blWords(Number(d.total))}</div>${bank}${notes ? `<div style="margin-top:10px">${notes}</div>` : ''}</div><div style="max-width:${thermal ? 'none' : '300px'}">${tot}<div class="sig${sealImg || signImg ? ' hasimg' : ''}">${sealImg || signImg ? `<div class="sigimgs">${sealImg}${signImg}</div>` : ''}<div>For ${bhe(b.legal_name || b.name)}${b.sign_name ? `<br><small>${bhe(b.sign_name)}</small>` : ''}<br><small>Authorised signatory</small></div></div></div></div>
-  </div>${opts.auto ? '<script>setTimeout(()=>print(),400)</script>' : ''}</body></html>`;
+  ${wm ? '<div style="position:relative;margin-top:18px;padding-top:10px;border-top:1px dashed #ddd;text-align:center;font-size:11.5px;color:#888">Made with <b>Rago CRM</b> — quotations, GST invoices, leads &amp; attendance in one app · ragoinfotech.com/rago-crm</div>' : ''}</div>${opts.auto ? '<script>setTimeout(()=>print(),400)</script>' : ''}</body></html>`;
 };
 app.get('/api/bl/docs/:id/print', need('billing', 'purchases'), wrap(async (req, res) => {
   const d = await blLoad(req, res, +req.params.id); if (!d) return;
@@ -5122,18 +5299,19 @@ app.post('/api/calls/device-login', wrap(async (req, res) => {    // the phone a
   const { username, password } = req.body || {}, uk = 'u:' + String(username || '').trim().toLowerCase(), tu = tries[uk] || { n: 0, at: Date.now() };
   if (Date.now() - tu.at > 900000) { tu.n = 0; tu.at = Date.now(); }
   if (tu.n >= 10) return res.status(429).json({ error: 'This account is locked for 15 minutes after many wrong passwords.' });
-  const u = (await q('SELECT * FROM users WHERE lower(username)=lower($1)', [String(username || '').trim()])).rows[0];
+  const co = await coOfLogin(username); if (co) CTX.enterWith({ s: co.schema, c: co.id });
+  const u = co ? (await q('SELECT * FROM users WHERE lower(username)=lower($1)', [String(username || '').trim()])).rows[0] : null;
   if (!u || !verify(String(password || ''), u.password_hash)) { tries[ip] = { n: t.n + 1, at: t.at }; if (u) tries[uk] = { n: tu.n + 1, at: tu.at }; return res.status(401).json({ error: 'Wrong username or password' }); }
   delete tries[ip]; delete tries[uk];
   if (!u.active) return res.status(403).json({ error: 'Your account has been disabled.' });
   if (!isSuper(u) && !(u.permissions || []).includes('calls')) return res.status(403).json({ error: 'Call leads is not turned on for you. Ask the Super Admin to enable “Call leads” on your user.' });
-  const tok = 'rgd_' + crypto.randomBytes(30).toString('base64url');
+  const tok = 'rgd_' + coPrefix() + crypto.randomBytes(30).toString('base64url');
   const r = (await q(`INSERT INTO call_devices(user_id,token_hash,name,last_seen) VALUES($1,$2,$3,now()) RETURNING id`, [u.id, crypto.createHash('sha256').update(tok).digest('hex'), String((req.body || {}).device || 'Android phone').slice(0, 80)])).rows[0];
   res.json({ ok: true, token: tok, device_id: r.id, name: u.name, cfg: await callCfg() });
 }));
 app.post('/api/calls/device-token', wrap(async (req, res) => {    // the Rago CRM Android app: the logged-in user turns on call leads on this phone
   if (!isSuper(req.user) && !can(req.user, 'calls')) return res.status(403).json({ error: 'Call leads is not turned on for you' });
-  const name = String((req.body || {}).device || 'Android phone').slice(0, 80), tok = 'rgd_' + crypto.randomBytes(30).toString('base64url');
+  const name = String((req.body || {}).device || 'Android phone').slice(0, 80), tok = 'rgd_' + coPrefix() + crypto.randomBytes(30).toString('base64url');
   await q(`UPDATE call_devices SET active=false WHERE user_id=$1 AND name=$2 AND active`, [req.user.id, name]);
   const r = (await q(`INSERT INTO call_devices(user_id,token_hash,name,last_seen) VALUES($1,$2,$3,now()) RETURNING id`, [req.user.id, crypto.createHash('sha256').update(tok).digest('hex'), name])).rows[0];
   res.json({ ok: true, token: tok, device_id: r.id, name: req.user.name, cfg: await callCfg() });
@@ -5198,6 +5376,20 @@ app.post('/api/calls/settings', wrap(async (req, res) => {
   const b = req.body || {}, v = { min_sec: Math.max(10, Math.min(3600, Math.round((+b.min_min || 5) * 60))), incoming: b.incoming !== false, outgoing: b.outgoing !== false };
   await q(`INSERT INTO settings(k,v) VALUES('call_cfg',$1) ON CONFLICT (k) DO UPDATE SET v=excluded.v`, [JSON.stringify(v)]); res.json({ ok: true, cfg: v });
 }));
+app.delete('/api/calls/:id', need('calls'), delNeed, wrap(async (req, res) => {
+  const c = await callGet(req, res); if (!c) return;
+  await q('DELETE FROM calls WHERE id=$1', [c.id]); res.json({ ok: true });
+}));
+app.post('/api/calls/delete', need('calls'), delNeed, wrap(async (req, res) => {    // many at once (e.g. all ignored)
+  const p = [], sc = callSee(req.user, p), b = req.body || {};
+  if (Array.isArray(b.ids)) { p.push(b.ids.map(Number).filter(Boolean).slice(0, 1000)); const r = await q(`DELETE FROM calls c WHERE c.id=ANY($${p.length}::int[]) AND ${sc}`, p); return res.json({ ok: true, n: r.rowCount }); }
+  if (['ignored', 'accepted', 'existing'].includes(b.status)) { p.push(b.status); const r = await q(`DELETE FROM calls c WHERE c.status=$${p.length} AND ${sc}`, p); return res.json({ ok: true, n: r.rowCount }); }
+  res.status(400).json({ error: 'Choose what to delete' });
+}));
+app.delete('/api/wc/:id(\\d+)', delNeed, wrap(async (req, res) => {
+  const c = await wcLoad(req, res); if (!c) return;
+  await q('DELETE FROM wc_cases WHERE id=$1', [c.id]); res.json({ ok: true });
+}));
 app.delete('/api/calls/devices/:id', wrap(async (req, res) => {
   if (!callAdmin(req.user)) return res.status(403).json({ error: 'Only the Admin or Super Admin can remove a phone' });
   await q(`UPDATE call_devices SET active=false WHERE id=$1`, [+req.params.id]); res.json({ ok: true });
@@ -5205,13 +5397,12 @@ app.delete('/api/calls/devices/:id', wrap(async (req, res) => {
 app.get(['/rago-calls.apk', '/rago-crm.apk'], (req, res) => { const f = path.join(__dirname, 'public', 'app', 'rago-calls.apk'); if (!fs.existsSync(f)) return res.status(404).send('The Android app file is not uploaded yet.'); res.download(f, 'rago-crm.apk'); });
 
 // ---------- email: each user connects their own mailbox once (Hostinger by default) ----------
-let MAIL_KEY = null;
 const mailKey = async () => {
-  if (MAIL_KEY) return MAIL_KEY;
-  if (process.env.MAIL_KEY) return (MAIL_KEY = crypto.createHash('sha256').update(process.env.MAIL_KEY).digest());
+  if (ST().MAIL_KEY) return ST().MAIL_KEY;
+  if (process.env.MAIL_KEY) return (ST().MAIL_KEY = crypto.createHash('sha256').update(process.env.MAIL_KEY).digest());
   let k = (await q(`SELECT v FROM settings WHERE k='mail_key'`)).rows[0];
   if (!k) { const v = crypto.randomBytes(32).toString('hex'); await q(`INSERT INTO settings(k,v) VALUES('mail_key',$1) ON CONFLICT (k) DO NOTHING`, [v]); k = (await q(`SELECT v FROM settings WHERE k='mail_key'`)).rows[0]; }
-  return (MAIL_KEY = Buffer.from(k.v, 'hex'));
+  return (ST().MAIL_KEY = Buffer.from(k.v, 'hex'));
 };
 const mailEnc = async t => { const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', await mailKey(), iv), e = Buffer.concat([c.update(String(t), 'utf8'), c.final()]); return [iv, c.getAuthTag(), e].map(x => x.toString('base64')).join('.'); };
 const mailDec = async s => { const [iv, tag, e] = String(s).split('.').map(x => Buffer.from(x, 'base64')); const d = crypto.createDecipheriv('aes-256-gcm', await mailKey(), iv); d.setAuthTag(tag); return Buffer.concat([d.update(e), d.final()]).toString('utf8'); };
@@ -5258,7 +5449,7 @@ app.post('/api/mail/send', wrap(async (req, res) => {
   let link = '', doc = null;
   if (+b.doc_id) {
     doc = await blLoad(req, res, +b.doc_id); if (!doc) return;
-    if (!doc.share_token) { doc.share_token = crypto.randomBytes(12).toString('base64url'); await q('UPDATE bl_docs SET share_token=$2 WHERE id=$1', [doc.id, doc.share_token]); }
+    if (!doc.share_token) { doc.share_token = coPrefix() + crypto.randomBytes(12).toString('base64url'); await q('UPDATE bl_docs SET share_token=$2 WHERE id=$1', [doc.id, doc.share_token]); }
     link = `${req.headers['x-forwarded-proto'] || req.protocol}://${req.get('host')}/d/${doc.share_token}`;
   }
   const sig = m.signature ? '\n\n' + m.signature : '';
@@ -5428,5 +5619,442 @@ app.post('/api/mail/relay', superOnly, wrap(async (req, res) => {
   res.json({ ok: true, on: true, tail });
 }));
 
-init().then(initGST).then(initChat).then(initProjects).then(initWA).then(initBL).then(initWC).then(initRoles).then(initFV).then(initV29).then(initV30).then(initV32).then(initV32b).then(() => { setInterval(remindDue, 30000); remindDue(); setInterval(holidayDue, 5 * 60000); holidayDue(); }).then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
+// ===================== COMPANY ACCOUNTS (multi-company) =====================
+const coOfLogin = async username => {
+  const u = String(username || '').trim().toLowerCase(); if (!u) return null;
+  const r = (await P('SELECT company_id FROM platform.logins WHERE username=$1', [u])).rows[0];
+  return coById(r ? r.company_id : 1);   // not in the index (older logins) → company #1
+};
+const INIT_CHAIN = () => [init, initGST, initChat, initProjects, initWA, initBL, initWC, initRoles, initFV, initV29, initV30, initV32, initV32b];
+const INIT_HASH = () => crypto.createHash('sha1').update(INIT_CHAIN().map(f => f.toString()).join('|')).digest('hex').slice(0, 16);   // changes only when the table design changes
+const runInit = async co => { await inCo(co, async () => { for (const f of INIT_CHAIN()) await f(); }); if (co.id && co.id !== 1) { await P('UPDATE platform.companies SET schema_v=$2 WHERE id=$1', [co.id, INIT_HASH()]); CO_CACHE.delete(co.id); } };
+const MIGRATING = new Map();
+const ensureCo = async co => {   // bring one company's tables up to date (once), e.g. on its first request after an update
+  if (!co || co.id === 1 || co.schema_v === INIT_HASH()) return;
+  if (!MIGRATING.has(co.id)) MIGRATING.set(co.id, runInit(co).catch(e => console.error('migrate company', co.id, e.message)).finally(() => MIGRATING.delete(co.id)));
+  await MIGRATING.get(co.id);
+};
+async function initPlatform() {
+  await P(`CREATE SCHEMA IF NOT EXISTS platform;
+  CREATE TABLE IF NOT EXISTS platform.companies (id SERIAL PRIMARY KEY, name TEXT NOT NULL, schema TEXT UNIQUE NOT NULL, status TEXT DEFAULT 'active', plan TEXT DEFAULT 'free',
+    owner_name TEXT, phone TEXT, email TEXT, city TEXT, gstin TEXT, modules JSONB DEFAULT '[]', seats INT DEFAULT 5, trial_until DATE, notes TEXT, created_at TIMESTAMPTZ DEFAULT now());
+  ALTER TABLE platform.companies ADD COLUMN IF NOT EXISTS schema_v TEXT;
+  CREATE TABLE IF NOT EXISTS platform.logins (username TEXT PRIMARY KEY, company_id INT NOT NULL);
+  CREATE INDEX IF NOT EXISTS idx_pl_co ON platform.logins(company_id);`);
+  if (!(await P('SELECT 1 FROM platform.companies WHERE id=1')).rows.length)
+    await P(`INSERT INTO platform.companies(id,name,schema,plan,modules,seats) VALUES(1,$1,'public','owner','["all"]',100000) ON CONFLICT (id) DO NOTHING`, [process.env.COMPANY_NAME || 'Rago Infotech']);
+    if (process.env.COMPANY_NAME) await P(`UPDATE platform.companies SET name=$1 WHERE id=1 AND name<>$1`, [process.env.COMPANY_NAME.trim().slice(0, 120)]);   // rename your own company from Render
+  await P(`SELECT setval(pg_get_serial_sequence('platform.companies','id'), GREATEST((SELECT MAX(id) FROM platform.companies),1))`);
+}
+const allCos = async () => (await P(`SELECT *, to_char(trial_until,'YYYY-MM-DD') trial_until, to_char(paid_until,'YYYY-MM-DD') paid_until FROM platform.companies ORDER BY id`)).rows;
+const forEachCo = async fn => { for (const co of await allCos()) { if (co.status !== 'active') continue; if (co.id !== 1 && co.schema_v !== INIT_HASH()) continue; try { await inCo(co, fn); } catch (e) { console.error('company', co.id, e.message); } } };
+const backfillLogins = async () => {   // company #1 usernames into the shared login index (once per start, cheap)
+  await inCo({ schema: 'public', id: 1 }, async () => { const us = (await q('SELECT lower(username) u FROM users')).rows; for (const x of us) await P('INSERT INTO platform.logins(username,company_id) VALUES($1,1) ON CONFLICT DO NOTHING', [x.u]); });
+};
+// create a new company: its own schema with all tables, its brand, and its Super Admin login
+async function createCompany(b) {
+  const name = String(b.name || '').trim().slice(0, 120); if (!name) throw Object.assign(new Error('Enter the company name'), { user: true });
+  const uname = String(b.username || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '').slice(0, 40);
+  if (uname.length < 3) throw Object.assign(new Error('Choose a username (3 letters or more)'), { user: true });
+  if ((await P('SELECT 1 FROM platform.logins WHERE username=$1', [uname])).rows.length) throw Object.assign(new Error('This username is taken — choose another'), { user: true });
+  const pw = String(b.password || ''); if (pw.length < 6) throw Object.assign(new Error('Password needs at least 6 characters'), { user: true });
+  const co = (await P(`INSERT INTO platform.companies(name,schema,owner_name,phone,email,city,plan,modules,seats,trial_until) VALUES($1,'pending-'||md5(random()::text),$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+    [name, String(b.owner_name || '').slice(0, 120) || null, String(b.phone || '').slice(0, 30) || null, String(b.email || '').slice(0, 120) || null, String(b.city || '').slice(0, 80) || null,
+     b.plan || 'trial', JSON.stringify(b.modules || ['all']), +b.seats || (b.plan && b.plan !== 'trial' ? 5 : TRIAL_SEATS), b.trial_until || (b.plan && b.plan !== 'trial' ? null : new Date(Date.now() + TRIAL_DAYS * 864e5 + 5.5 * 3600e3).toISOString().slice(0, 10))])).rows[0];
+  co.schema = 'c' + co.id; await P('UPDATE platform.companies SET schema=$2 WHERE id=$1', [co.id, co.schema]);
+  await P(`CREATE SCHEMA IF NOT EXISTS "${co.schema}"`);
+  try {
+    await CTX.run({ s: co.schema, c: co.id, name }, async () => {
+      for (const f of INIT_CHAIN()) await f();
+      await q('INSERT INTO users(name,email,phone,role,username,password_hash,permissions) VALUES($1,$2,$3,$4,$5,$6,$7)', [String(b.owner_name || 'Super Admin').slice(0, 120), b.email || null, b.phone || null, SUPER, uname, hash(pw), ALL_KEYS]);
+    });
+    await P('INSERT INTO platform.logins(username,company_id) VALUES($1,$2)', [uname, co.id]); await P('UPDATE platform.companies SET schema_v=$2 WHERE id=$1', [co.id, INIT_HASH()]);
+  } catch (e) { await P(`DROP SCHEMA IF EXISTS "${co.schema}" CASCADE`); await P('DELETE FROM platform.companies WHERE id=$1', [co.id]); throw e; }
+  CO_CACHE.delete(co.id);
+  return co;
+}
+const ownerOnly = (req, res, next) => (SAAS && coId() === 1 && isSuper(req.user)) ? next() : res.status(403).json({ error: SAAS ? 'Only the Rago owner can do this' : 'Not available' });
+app.get('/api/platform/companies', ownerOnly, wrap(async (req, res) => {
+  const out = [];
+  for (const co of await allCos()) {
+    let users = 0, active = 0, last = null;
+    try { const r = await inCo(co, () => q(`SELECT COUNT(*)::int n, COUNT(*) FILTER (WHERE active)::int a FROM users`)); users = r.rows[0].n; active = r.rows[0].a; } catch (e) {}
+    out.push({ id: co.id, name: co.name, status: co.status, plan: co.plan, modules: co.modules, seats: co.seats, owner_name: co.owner_name, phone: co.phone, email: co.email, city: co.city, created_at: co.created_at, trial_until: co.trial_until, users, active_users: active });
+  }
+  res.json({ companies: out, totals: { companies: out.length, users: out.reduce((t, c) => t + c.active_users, 0), paid: out.filter(c => c.plan !== 'free' && c.id !== 1).length } });
+}));
+app.post('/api/platform/companies', ownerOnly, wrap(async (req, res) => {
+  try { const co = await createCompany(req.body || {}); res.json({ ok: true, id: co.id, schema: co.schema }); }
+  catch (e) { if (e.user) return res.status(400).json({ error: e.message }); throw e; }
+}));
+app.patch('/api/platform/companies/:id', ownerOnly, wrap(async (req, res) => {
+  const id = +req.params.id, b = req.body || {}; if (id === 1) return res.status(400).json({ error: 'This is your own company' });
+  const cur = await coById(id); if (!cur || cur.status === 'deleted') return res.status(404).json({ error: 'Company not found' });
+  const set = [], v = [id];
+  if (['active', 'suspended'].includes(b.status)) { v.push(b.status); set.push(`status=$${v.length}`); }
+  if (b.seats !== undefined) { v.push(Math.max(1, +b.seats || 1)); set.push(`seats=$${v.length}`); }
+  if (b.notes !== undefined) { v.push(String(b.notes).slice(0, 2000)); set.push(`notes=$${v.length}`); }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(b.trial_until || '')) { v.push(b.trial_until); set.push(`trial_until=$${v.length}`); }
+  if (!set.length) return res.json({ ok: true });
+  await P(`UPDATE platform.companies SET ${set.join(',')} WHERE id=$1`, v); CO_CACHE.delete(id);
+  if (b.status) await inCo(cur, () => pev(b.status === 'active' ? 'company_activated' : 'company_paused', req.user.name, {})); res.json({ ok: true });
+}));
+
+// ===================== PLANS & MODULES =====================
+// Prices (per user per month): one module ₹199, whole CRM ₹499. Free: Attendance for up to 5 users. Every new company: 7-day trial with everything on, then it asks to renew.
+const BRANCH_LIMIT = +process.env.BRANCH_LIMIT || 1;   // branches a company may create (owner can raise it per company in the Console)
+const PRICE_ATT = +process.env.PRICE_ATTENDANCE || 100;   // Attendance & Payroll above the free 5 users
+const PRICE_MODULE = +process.env.PRICE_MODULE || 199, PRICE_ALL = +process.env.PRICE_ALL || 499, FREE_USERS = +process.env.FREE_USERS || 5, TRIAL_DAYS = +process.env.TRIAL_DAYS || 7, TRIAL_SEATS = +process.env.TRIAL_SEATS || 50;
+const MODULES = [
+  { k: 'leads', l: 'Leads & CRM', d: 'Leads, follow-ups, call leads, projects', perms: ['leads', 'leads_all', 'lead_lists', 'calls', 'projects'] },
+  { k: 'service', l: 'Service desk', d: 'Service tickets, technicians, payments, warranty & service', perms: ['services', 'service_create', 'service_assign', 'service_edit', 'payments', 'pay_overview', 'view_charges', 'types', 'warranty'] },
+  { k: 'billing', l: 'Billing & Inventory', d: 'Quotations, GST invoices, stock, purchases, reports', perms: ['billing', 'purchases'] },
+  { k: 'attendance', l: 'Attendance & Payroll', d: 'Check-in, leave, permission, salary slips', perms: ['att_team', 'leave_approve', 'payroll'] },
+  { k: 'field', l: 'Field Sales', d: 'Site check-in with GPS and photos, km & allowance', perms: ['field', 'field_team'] },
+  { k: 'whatsapp', l: 'WhatsApp & Mail', d: 'WhatsApp numbers, each user’s own email — add-on, coming soon', perms: ['whatsapp'], addon: true },
+];
+const MOD_KEYS = MODULES.map(m => m.k), CORE_MODS = MODULES.filter(m => !m.addon).map(m => m.k);   // "Whole CRM" = the core modules; add-ons are separate
+function modGate(mod) { return (req, res, next) => (coId() === 1 || !req.plan || req.plan.modules.includes(mod)) ? next() : res.status(402).json({ error: 'This is not in your plan. Add the module from Profile → Plan.', upgrade: true, module: mod }); }
+const todayStr = () => new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10);
+const planOf = co => {   // what this company can use right now
+  if (!co || co.id === 1) return { kind: 'owner', modules: MOD_KEYS, seats: 1e6, all: true, branches: null };
+  const r = planOf0(co); r.branches = +co.branches || BRANCH_LIMIT; return r;
+};
+const planOf0 = co => {
+  const mods = Array.isArray(co.modules) ? co.modules : [];
+  const trial = co.plan === 'trial' && co.trial_until && String(co.trial_until).slice(0, 10) >= todayStr();
+  const paid = co.plan === 'paid' && (!co.paid_until || String(co.paid_until).slice(0, 10) >= todayStr());
+  if (paid || trial) { const m = [...new Set([...(mods.includes('all') ? CORE_MODS : []), ...mods.filter(x => MOD_KEYS.includes(x))])]; return { kind: paid ? 'paid' : 'trial', modules: m, seats: +co.seats || FREE_USERS, all: CORE_MODS.every(k => m.includes(k)), until: String((paid ? co.paid_until : co.trial_until) || '').slice(0, 10) || null }; }
+  return { kind: 'free', modules: ['attendance'], seats: FREE_USERS, all: false, was: co.plan, expired: co.plan === 'trial' || co.plan === 'paid', ended: String((co.plan === 'paid' ? co.paid_until : co.trial_until) || '').slice(0, 10) || null };
+};
+const modPrice = k => k === 'attendance' ? PRICE_ATT : PRICE_MODULE;
+const planPrice = (mods, seats) => { const core = mods.filter(m => CORE_MODS.includes(m)), all = mods.includes('all') || core.length >= CORE_MODS.length; const per = all ? PRICE_ALL : Math.min(PRICE_ALL, core.reduce((t, k) => t + modPrice(k), 0)); return { per_user: per, seats, monthly: per * seats, all }; };   // add-ons are not charged yet
+const NO_MOD = new Set(MODULES.flatMap(m => m.perms));
+const modPerms = (pl, perms) => (perms || []).filter(k => !NO_MOD.has(k) || MODULES.some(m => pl.modules.includes(m.k) && m.perms.includes(k)));
+async function planApply(req) {
+  if (coId() === 1) return;
+  const pl = planOf(await coById(coId())); req.plan = pl;
+  req.user.permissions = modPerms(pl, isSuper(req.user) ? ALL_KEYS : req.user.permissions);
+  if (isSuper(req.user)) req.user._superPerms = true;
+}
+const seatCheck = async () => {
+  if (coId() === 1) return null;
+  const pl = planOf(await coById(coId())), n = (await q('SELECT COUNT(*)::int n FROM users WHERE active')).rows[0].n;
+  return n >= pl.seats ? `Your plan allows ${pl.seats} users. ${pl.kind === 'free' ? 'The free plan is for up to ' + FREE_USERS + ' users — choose a plan to add more.' : 'Add more users to your plan first.'}` : null;
+};
+// activity for the Rago Console
+const SEEN = new Map();
+function seen(req) { const k = coId() + ':' + req.user.id, t = Date.now(); if ((SEEN.get(k) || 0) > t - 300000) return; SEEN.set(k, t);
+  P(`INSERT INTO platform.user_seen(company_id,user_id,name,role,last_seen) VALUES($1,$2,$3,$4,now()) ON CONFLICT (company_id,user_id) DO UPDATE SET name=$3, role=$4, last_seen=now()`, [coId(), req.user.id, req.user.name, req.user.role]).catch(() => {}); }
+const pev = (kind, by, detail, uid) => P(`INSERT INTO platform.events(company_id,user_id,by_name,kind,detail) VALUES($1,$2,$3,$4,$5)`, [coId(), uid || null, by || null, kind, JSON.stringify(detail || {})]);
+async function initPlans() {
+  await P(`ALTER TABLE platform.companies ADD COLUMN IF NOT EXISTS paid_until DATE;
+  ALTER TABLE platform.companies ADD COLUMN IF NOT EXISTS source TEXT;
+  ALTER TABLE platform.companies ADD COLUMN IF NOT EXISTS want JSONB;
+  ALTER TABLE platform.companies ADD COLUMN IF NOT EXISTS branches INT;
+  ALTER TABLE platform.companies ADD COLUMN IF NOT EXISTS gstin TEXT;
+  ALTER TABLE platform.companies ADD COLUMN IF NOT EXISTS bill_name TEXT;
+  ALTER TABLE platform.companies ADD COLUMN IF NOT EXISTS bill_address TEXT;
+  CREATE TABLE IF NOT EXISTS platform.payments (id BIGSERIAL PRIMARY KEY, company_id INT NOT NULL, order_id TEXT UNIQUE NOT NULL, payment_id TEXT, amount INT NOT NULL, gst INT DEFAULT 0, months INT NOT NULL, modules JSONB, seats INT,
+    status TEXT DEFAULT 'created', by_name TEXT, created_at TIMESTAMPTZ DEFAULT now(), paid_at TIMESTAMPTZ, paid_until DATE);
+  ALTER TABLE platform.payments ADD COLUMN IF NOT EXISTS gstin TEXT; ALTER TABLE platform.payments ADD COLUMN IF NOT EXISTS bill_name TEXT;
+  ALTER TABLE platform.payments ADD COLUMN IF NOT EXISTS inv_no TEXT; ALTER TABLE platform.payments ADD COLUMN IF NOT EXISTS bill_address TEXT; ALTER TABLE platform.payments ADD COLUMN IF NOT EXISTS period_from DATE; ALTER TABLE platform.payments ADD COLUMN IF NOT EXISTS mailed_at TIMESTAMPTZ;
+  CREATE TABLE IF NOT EXISTS platform.inv_seq (fy TEXT PRIMARY KEY, n INT NOT NULL DEFAULT 0);
+  ALTER TABLE platform.companies ADD COLUMN IF NOT EXISTS reminded JSONB DEFAULT '{}'::jsonb;
+  CREATE TABLE IF NOT EXISTS platform.user_seen (company_id INT NOT NULL, user_id INT NOT NULL, name TEXT, role TEXT, last_seen TIMESTAMPTZ, last_login TIMESTAMPTZ, PRIMARY KEY (company_id, user_id));
+  CREATE TABLE IF NOT EXISTS platform.events (id BIGSERIAL PRIMARY KEY, company_id INT, user_id INT, by_name TEXT, kind TEXT NOT NULL, detail JSONB, at TIMESTAMPTZ DEFAULT now());
+  CREATE INDEX IF NOT EXISTS idx_pev_at ON platform.events(at DESC); CREATE INDEX IF NOT EXISTS idx_pev_co ON platform.events(company_id, at DESC);`);
+}
+app.get('/api/plans', (req, res) => res.json({ price_attendance: PRICE_ATT, modules: MODULES.filter(m => !m.addon).map(({ k, l, d }) => ({ k, l, d, price: modPrice(k) })), addons: MODULES.filter(m => m.addon).map(({ k, l, d }) => ({ k, l, d, soon: true })), price_module: PRICE_MODULE, price_all: PRICE_ALL, free_users: FREE_USERS, trial_days: TRIAL_DAYS }));
+app.get('/api/my-plan', wrap(async (req, res) => {
+  const co = await coById(coId()), pl = planOf(co), users = (await q('SELECT COUNT(*)::int n FROM users WHERE active')).rows[0].n;
+  const want = co && co.want ? co.want : null;
+  res.json({ remind_days: REMIND_DAYS, plan: pl, users, want, want_price: want ? planPrice(want.modules || [], want.seats || 1) : null, company: co ? { name: co.name, plan: co.plan, modules: co.modules, seats: co.seats, trial_until: co.trial_until, paid_until: co.paid_until, gstin: co.gstin || '', bill_name: co.bill_name || co.name, bill_address: co.bill_address || '' } : null, price: co && co.id !== 1 ? planPrice(co.modules || [], co.seats || 1) : null,
+    modules: MODULES.map(({ k, l, d, addon }) => ({ k, l, d, addon: !!addon, price: addon ? null : modPrice(k), on: pl.modules.includes(k) })), price_attendance: PRICE_ATT, price_module: PRICE_MODULE, price_all: PRICE_ALL, free_users: FREE_USERS,
+    pay: { online: !!(RZP_ID && RZP_SECRET), gst: PLAN_GST, months: PAY_MONTHS },
+    payments: co && co.id !== 1 ? (await P(`SELECT order_id, inv_no, payment_id, amount, gst, gstin, bill_name, months, seats, modules, paid_at, to_char(paid_until,'YYYY-MM-DD') paid_until FROM platform.payments WHERE company_id=$1 AND status='paid' ORDER BY paid_at DESC LIMIT 12`, [co.id])).rows : [] });
+}));
+
+// ---------- signup from the website: company + Super Admin, free plan or a free trial of the chosen modules ----------
+const SIGN_TRIES = {};
+app.post('/api/signup', wrap(async (req, res) => {
+  if (!SAAS) return res.status(404).json({ error: 'Sign-up is not available' });
+  const ip = req.ip, t = SIGN_TRIES[ip] || { n: 0, at: Date.now() }; if (Date.now() - t.at > 3600e3) { t.n = 0; t.at = Date.now(); }
+  if (t.n >= 5) return res.status(429).json({ error: 'Too many sign-ups from this network. Try again in an hour.' }); SIGN_TRIES[ip] = { n: t.n + 1, at: t.at };
+  const b = req.body || {};
+  if (b.website) return res.json({ ok: true });   // bots fill the hidden field
+  const phone = String(b.phone || '').replace(/[^\d+]/g, ''); if (phone.replace(/\D/g, '').length < 10) return res.status(400).json({ error: 'Enter a valid mobile number' });
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(b.email || ''))) return res.status(400).json({ error: 'Enter a valid email' });
+  if (!String(b.owner_name || '').trim()) return res.status(400).json({ error: 'Enter your name' });
+  let mods = (Array.isArray(b.modules) ? b.modules : []).filter(m => CORE_MODS.includes(m) || m === 'all'); if (mods.includes('all')) mods = ['all'];   // add-ons can't be bought yet
+  const free = !mods.length || (mods.length === 1 && mods[0] === 'attendance' && (+b.seats || FREE_USERS) <= FREE_USERS);
+  const seats = free ? FREE_USERS : Math.max(1, Math.min(10000, Math.round(+b.seats || 5)));
+  const want = { modules: free ? ['attendance'] : mods, seats };
+  const gstin = String(b.gstin || '').trim().toUpperCase(); if (gstin && !gstOk(gstin)) return res.status(400).json({ error: 'GST number is not valid — check it, or leave it empty' });   // plan they chose → offered when the trial ends
+  const until = new Date(Date.now() + TRIAL_DAYS * 864e5 + 5.5 * 3600e3).toISOString().slice(0, 10);
+  try {
+    const co = await createCompany({ name: b.company, owner_name: b.owner_name, phone, email: b.email, city: b.city, username: b.username, password: b.password,
+      plan: 'trial', modules: ['all'], seats: Math.max(seats, TRIAL_SEATS), trial_until: until });
+    await P('UPDATE platform.companies SET source=$2, want=$3, gstin=$4, bill_name=$5 WHERE id=$1', [co.id, String(b.source || 'website').slice(0, 40), JSON.stringify(want), gstin || null, gstin ? String(b.company || '').trim().slice(0, 160) : null]);
+    await inCo(co, () => pev('signup', b.owner_name, { plan: 'trial', chose: free ? 'free' : mods.join(','), seats }));
+    const ownerSupers = await inCo({ schema: 'public', id: 1 }, async () => (await q(`SELECT id FROM users WHERE role=$1 AND active`, [SUPER])).rows.map(x => x.id));
+    inCo({ schema: 'public', id: 1 }, () => notifyLink(ownerSupers, '🎉 New company signed up', `${co.name} · ${b.owner_name} · ${TRIAL_DAYS}-day trial · chose ${free ? 'free plan' : seats + ' users'}`, 'owner')).catch(() => {});
+    res.json({ ok: true, company: co.name, username: String(b.username).trim().toLowerCase(), plan: 'trial', trial_until: until, trial_days: TRIAL_DAYS, chose: free ? 'free' : 'paid', price: free ? null : planPrice(mods, seats) });
+  } catch (e) { if (e.user) return res.status(400).json({ error: e.message }); throw e; }
+}));
+app.get('/signup', (req, res) => SAAS ? res.sendFile(path.join(__dirname, 'public', 'signup.html')) : res.redirect('/'));
+app.get(['/console', '/console/'], (req, res, next) => { if (!SAAS) return res.redirect('/'); res.setHeader('Cache-Control', 'no-cache'); res.setHeader('X-Robots-Tag', 'noindex'); res.sendFile(path.join(__dirname, 'public', 'console.html')); });
+
+// ---------- Rago Console (owner only): everything about every company ----------
+app.get('/api/console/overview', ownerOnly, wrap(async (req, res) => {
+  const cos = (await allCos()).filter(c => c.status !== 'deleted');
+  const seenRows = (await P(`SELECT company_id, COUNT(*) FILTER (WHERE last_seen > now() - interval '1 day')::int today, COUNT(*) FILTER (WHERE last_seen > now() - interval '7 days')::int week, MAX(last_seen) last FROM platform.user_seen GROUP BY company_id`)).rows;
+  const sm = Object.fromEntries(seenRows.map(r => [r.company_id, r]));
+  const list = [];
+  for (const co of cos) {
+    let users = 0, active = 0;
+    try { const r = await inCo(co, () => q(`SELECT COUNT(*)::int n, COUNT(*) FILTER (WHERE active)::int a FROM users`)); users = r.rows[0].n; active = r.rows[0].a; } catch (e) {}
+    const pl = planOf(co), price = co.id === 1 ? null : planPrice(co.modules || [], co.seats || 1);
+    list.push({ id: co.id, name: co.name, owner_name: co.owner_name, phone: co.phone, email: co.email, city: co.city, status: co.status, plan: co.plan, plan_now: pl.kind, modules: pl.modules, seats: pl.seats, users, active_users: active,
+      active_today: (sm[co.id] || {}).today || 0, active_week: (sm[co.id] || {}).week || 0, last_seen: (sm[co.id] || {}).last || null, trial_until: co.trial_until, paid_until: co.paid_until, created_at: co.created_at, source: co.source,
+      monthly: pl.kind === 'paid' ? price.monthly : 0, trial_value: pl.kind === 'trial' ? price.monthly : 0, notes: co.notes, branches: pl.branches });
+  }
+  const clients = list.filter(c => c.id !== 1), mon = todayStr().slice(0, 7);
+  const growth = (await P(`SELECT to_char(created_at AT TIME ZONE 'Asia/Kolkata','YYYY-MM') m, COUNT(*)::int n FROM platform.companies WHERE id<>1 AND created_at > now() - interval '12 months' GROUP BY 1 ORDER BY 1`)).rows;
+  res.json({ companies: list, growth, totals: {
+    companies: clients.length, active: clients.filter(c => c.status === 'active').length, paid: clients.filter(c => c.plan_now === 'paid').length, trial: clients.filter(c => c.plan_now === 'trial').length, free: clients.filter(c => c.plan_now === 'free').length,
+    paused: clients.filter(c => c.status === 'suspended').length, users: clients.reduce((t, c) => t + c.active_users, 0), active_today: clients.reduce((t, c) => t + c.active_today, 0),
+    new_this_month: clients.filter(c => String(c.created_at.toISOString ? c.created_at.toISOString() : c.created_at).slice(0, 7) === mon).length,
+    monthly: clients.reduce((t, c) => t + c.monthly, 0), trial_value: clients.reduce((t, c) => t + c.trial_value, 0) } });
+}));
+app.get('/api/console/company/:id', ownerOnly, wrap(async (req, res) => {
+  const co = await coById(+req.params.id); if (!co) return res.status(404).json({ error: 'Not found' });
+  const users = await inCo(co, async () => (await q(`SELECT id, name, role, username, phone, email, active, created_at FROM users ORDER BY active DESC, role, lower(name)`)).rows);
+  const seenM = Object.fromEntries((await P('SELECT user_id, last_seen, last_login FROM platform.user_seen WHERE company_id=$1', [co.id])).rows.map(r => [r.user_id, r]));
+  users.forEach(u => { const x = seenM[u.id] || {}; u.last_seen = x.last_seen || null; u.last_login = x.last_login || null; });
+  let counts = {};
+  try { counts = await inCo(co, async () => (await q(`SELECT (SELECT COUNT(*) FROM leads)::int leads, (SELECT COUNT(*) FROM customers)::int customers, (SELECT COUNT(*) FROM services)::int services,
+    (SELECT COUNT(*) FROM bl_docs WHERE type='invoice' AND status<>'Draft')::int invoices, (SELECT COUNT(*) FROM bl_docs WHERE type='quotation' AND status<>'Draft')::int quotations, (SELECT COUNT(*) FROM attendance)::int attendance_days`)).rows[0]); } catch (e) {}
+  const events = (await P(`SELECT id, by_name, kind, detail, at FROM platform.events WHERE company_id=$1 ORDER BY at DESC LIMIT 100`, [co.id])).rows;
+  // more numbers: usage, staff, data (each counted on its own so one missing table never breaks the page)
+  const one = async (sql, p = []) => { try { return (await inCo(co, () => q(sql, p))).rows[0]; } catch (e) { return {}; } };
+  const more = Object.assign({},
+    await one(`SELECT (SELECT COUNT(*) FROM bl_products)::int products, (SELECT COUNT(*) FROM brands)::int branches`),
+    await one(`SELECT COUNT(*)::int attendance_30 FROM attendance WHERE day > CURRENT_DATE - 30`),
+    await one(`SELECT COUNT(*)::int visits_30 FROM fv_visits WHERE day > CURRENT_DATE - 30`),
+    await one(`SELECT COUNT(*)::int calls_30 FROM calls WHERE created_at > now() - interval '30 days'`),
+    await one(`SELECT COUNT(*)::int leads_30 FROM leads WHERE created_at > now() - interval '30 days'`),
+    await one(`SELECT COALESCE(SUM(total),0)::float billed_month, COUNT(*)::int invoices_month FROM bl_docs WHERE type='invoice' AND status NOT IN ('Draft','Cancelled') AND doc_date >= date_trunc('month', CURRENT_DATE)`));
+  Object.assign(counts, more);
+  const act = users.filter(u => u.active), now = Date.now(), within = d => users.filter(u => u.last_seen && now - new Date(u.last_seen) < d * 864e5).length;
+  const lastU = users.filter(u => u.last_seen).sort((a, b) => new Date(b.last_seen) - new Date(a.last_seen))[0];
+  const roles = {}; act.forEach(u => { roles[u.role] = (roles[u.role] || 0) + 1; });
+  const logins30 = +(await P(`SELECT COUNT(*) n FROM platform.events WHERE company_id=$1 AND kind='login' AND at > now() - interval '30 days'`, [co.id])).rows[0].n;
+  const lastLogin = users.filter(u => u.last_login).sort((a, b) => new Date(b.last_login) - new Date(a.last_login))[0];
+  const pays = (await P(`SELECT order_id, inv_no, mailed_at, payment_id, amount, gst, gstin, months, seats, modules, by_name, paid_at, to_char(paid_until,'YYYY-MM-DD') paid_until FROM platform.payments WHERE company_id=$1 AND status='paid' ORDER BY paid_at DESC`, [co.id])).rows;
+  const pl = planOf(co), dayMs = 864e5, start = String(co.created_at instanceof Date ? co.created_at.toISOString() : co.created_at || '').slice(0, 10);
+  const tEnd = co.trial_until ? String(co.trial_until).slice(0, 10) : null, today = todayStr();
+  const summary = { kind: pl.kind, expired: !!pl.expired, was: co.plan, joined: start, trial_until: tEnd, paid_until: co.paid_until ? String(co.paid_until).slice(0, 10) : null,
+    trial_days: tEnd && start ? Math.max(1, Math.round((new Date(tEnd) - new Date(start)) / dayMs)) : null,
+    days_left: pl.until ? Math.max(0, Math.round((new Date(pl.until) - new Date(today)) / dayMs)) : null,
+    modules: pl.modules, seats: pl.seats, branch_limit: pl.branches, chose: co.want || null, chose_price: co.want ? planPrice(co.want.modules || [], co.want.seats || 1) : null,
+    paid_total: pays.reduce((t, x) => t + (+x.amount || 0), 0) };
+  const usage = { last_seen: lastU ? lastU.last_seen : null, last_seen_by: lastU ? lastU.name : null, last_login: lastLogin ? lastLogin.last_login : null, last_login_by: lastLogin ? lastLogin.name : null,
+    active_today: within(1), active_7: within(7), active_30: within(30), logins_30: logins30 };
+  const staff = { total: users.length, active: act.length, off: users.length - act.length, roles };
+  res.json({ company: { ...co, plan_now: pl }, users, counts, events, summary, usage, staff, payments: pays, price: co.id === 1 ? null : planPrice(co.modules || [], co.seats || 1) });
+}));
+app.get('/api/console/activity', ownerOnly, wrap(async (req, res) => {
+  const p = [], w = []; if (+req.query.company) { p.push(+req.query.company); w.push(`e.company_id=$${p.length}`); } if (req.query.kind) { p.push(String(req.query.kind)); w.push(`e.kind=$${p.length}`); }
+  res.json((await P(`SELECT e.id, e.company_id, c.name company, e.by_name, e.kind, e.detail, e.at FROM platform.events e LEFT JOIN platform.companies c ON c.id=e.company_id ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY e.at DESC LIMIT 300`, p)).rows);
+}));
+app.post('/api/console/company/:id/plan', ownerOnly, wrap(async (req, res) => {   // set a plan by hand (e.g. paid by bank transfer) until Razorpay is connected
+  const id = +req.params.id, b = req.body || {}; if (id === 1) return res.status(400).json({ error: 'Your own company has everything' });
+  const co = await coById(id); if (!co) return res.status(404).json({ error: 'Not found' });
+  const plan = ['free', 'trial', 'paid'].includes(b.plan) ? b.plan : co.plan;
+  let mods = (Array.isArray(b.modules) ? b.modules : co.modules || []).filter(m => MOD_KEYS.includes(m) || m === 'all'); if (mods.includes('all')) mods = ['all', ...mods.filter(m => !CORE_MODS.includes(m) && m !== 'all')];   // whole CRM + any add-ons
+  const seats = Math.max(1, Math.round(+b.seats || co.seats || 5)), until = /^\d{4}-\d{2}-\d{2}$/.test(b.until || '') ? b.until : null;
+  if (b.branches !== undefined) await P('UPDATE platform.companies SET branches=$2 WHERE id=$1', [id, Math.max(1, Math.min(500, Math.round(+b.branches) || 1))]);
+  await P(`UPDATE platform.companies SET plan=$2, modules=$3, seats=$4, trial_until=CASE WHEN $2='trial' THEN COALESCE($5::date, trial_until) ELSE trial_until END, paid_until=CASE WHEN $2='paid' THEN $5::date ELSE paid_until END WHERE id=$1`,
+    [id, plan, JSON.stringify(plan === 'free' ? ['attendance'] : mods), plan === 'free' ? FREE_USERS : seats, until]);
+  CO_CACHE.delete(id);
+  await inCo(co, () => pev('plan_changed', req.user.name, { plan, modules: mods, seats, until }));
+  res.json({ ok: true, price: planPrice(mods, seats) });
+}));
+
+// ---------- Razorpay: pay for the plan inside the app ----------
+// Render → Environment: RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET (and RAZORPAY_WEBHOOK_SECRET for the webhook). Never put the keys in the code.
+const RZP_ID = process.env.RAZORPAY_KEY_ID || '', RZP_SECRET = process.env.RAZORPAY_KEY_SECRET || '', RZP_HOOK = process.env.RAZORPAY_WEBHOOK_SECRET || '';
+const RZP_API = process.env.RAZORPAY_API || 'https://api.razorpay.com';
+const PLAN_GST = process.env.PLAN_GST === undefined ? 18 : +process.env.PLAN_GST, PAY_MONTHS = [1, 3, 6, 12];
+const payQuote = (mods, seats, months) => { const pr = planPrice(mods, seats), base = pr.monthly * months, gst = Math.round(base * PLAN_GST / 100); return { ...pr, months, base, gst, total: base + gst }; };
+function cleanMods(m) { let x = (Array.isArray(m) ? m : []).filter(k => CORE_MODS.includes(k) || k === 'all'); if (x.includes('all') || CORE_MODS.every(k => x.includes(k))) x = ['all']; return [...new Set(x)]; }
+app.post('/api/pay/order', wrap(async (req, res) => {
+  if (coId() === 1) return res.status(400).json({ error: 'Your own company has everything' });
+  if (!isSuper(req.user)) return res.status(403).json({ error: 'Only the Super Admin can pay for the plan' });
+  if (!RZP_ID || !RZP_SECRET) return res.status(503).json({ error: 'Online payment is not switched on yet. Send the plan to Rago on WhatsApp.' });
+  const b = req.body || {}, mods = cleanMods(b.modules), months = PAY_MONTHS.includes(+b.months) ? +b.months : 1;
+  if (!mods.length) return res.status(400).json({ error: 'Choose at least one module' });
+  if (mods.length === 1 && mods[0] === 'attendance' && +b.seats <= FREE_USERS) return res.status(400).json({ error: `Attendance is free for up to ${FREE_USERS} users — no payment needed.` });
+  const users = (await q('SELECT COUNT(*)::int n FROM users WHERE active')).rows[0].n, seats = Math.max(1, Math.min(10000, Math.round(+b.seats || 1)));
+  if (seats < users) return res.status(400).json({ error: `You have ${users} active users — choose at least ${users} users, or switch some staff off first.` });
+  const gstin = String(b.gstin || '').trim().toUpperCase(); if (gstin && !gstOk(gstin)) return res.status(400).json({ error: 'GST number is not valid — check it, or leave it empty' });
+  const billName = String(b.bill_name || '').trim().slice(0, 160), billAddr = String(b.bill_address || '').trim().slice(0, 400);
+  await P('UPDATE platform.companies SET gstin=$2, bill_name=COALESCE(NULLIF($3,\'\'), bill_name), bill_address=COALESCE(NULLIF($4,\'\'), bill_address) WHERE id=$1', [coId(), gstin || null, billName, billAddr]); CO_CACHE.delete(coId());
+  const qt = payQuote(mods, seats, months), co = await coById(coId());
+  const r = await fetch(RZP_API + '/v1/orders', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Basic ' + Buffer.from(RZP_ID + ':' + RZP_SECRET).toString('base64') },
+    body: JSON.stringify({ amount: qt.total * 100, currency: 'INR', receipt: 'rc' + coId() + '_' + Date.now().toString(36), notes: { company_id: String(coId()), company: (billName || co.name).slice(0, 200), gstin: gstin || '', seats: String(seats), months: String(months) } }) }).catch(() => null);
+  const o = r && r.ok ? await r.json().catch(() => null) : null;
+  if (!o || !o.id) return res.status(502).json({ error: 'Could not reach Razorpay. Try again in a minute.' });
+  await P(`INSERT INTO platform.payments(company_id, order_id, amount, gst, months, modules, seats, by_name, gstin, bill_name, bill_address) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [coId(), o.id, qt.total, qt.gst, months, JSON.stringify(mods), seats, req.user.name, gstin || null, billName || co.name, billAddr || co.bill_address || null]);
+  res.json({ key: RZP_ID, order_id: o.id, amount: qt.total * 100, quote: qt, name: 'Rago CRM', company: co.name, prefill: { name: req.user.name, email: req.user.email || co.email || '', contact: req.user.phone || co.phone || '' } });
+}));
+async function payApply(orderId, paymentId, by) {   // a payment went through → switch the plan on (runs once per order)
+  const row = (await P(`UPDATE platform.payments SET status='paid', payment_id=$2, paid_at=now() WHERE order_id=$1 AND status<>'paid' RETURNING *`, [orderId, paymentId])).rows[0];
+  if (!row) return (await P(`SELECT *, to_char(paid_until,'YYYY-MM-DD') paid_until FROM platform.payments WHERE order_id=$1`, [orderId])).rows[0] || null;
+  const co = await coById(row.company_id), pl = planOf(co);
+  const from = pl.kind === 'paid' && pl.until && pl.until > todayStr() ? pl.until : todayStr();
+  const d = new Date(from + 'T00:00:00Z'); d.setUTCMonth(d.getUTCMonth() + row.months); const until = d.toISOString().slice(0, 10);
+  const keepAddons = (co.modules || []).filter(m => !CORE_MODS.includes(m) && m !== 'all' && MOD_KEYS.includes(m));
+  await P(`UPDATE platform.companies SET plan='paid', modules=$2, seats=$3, paid_until=$4, status=CASE WHEN status='suspended' THEN status ELSE 'active' END WHERE id=$1`, [co.id, JSON.stringify([...row.modules, ...keepAddons]), row.seats, until]);
+  const fy = (() => { const t = todayStr(), y = +t.slice(0, 4), m = +t.slice(5, 7); const a = m >= 4 ? y : y - 1; return a + '-' + String(a + 1).slice(2); })();
+  const n = (await P(`INSERT INTO platform.inv_seq(fy,n) VALUES($1,1) ON CONFLICT (fy) DO UPDATE SET n=platform.inv_seq.n+1 RETURNING n`, [fy])).rows[0].n;
+  const invNo = `${INV_PREFIX}/${fy}/${String(n).padStart(4, '0')}`;
+  await P('UPDATE platform.payments SET paid_until=$2, inv_no=$3, period_from=$4, bill_address=COALESCE(bill_address,$5) WHERE id=$1', [row.id, until, invNo, from, co.bill_address || null]);
+  await P(`UPDATE platform.companies SET reminded='{}'::jsonb WHERE id=$1`, [co.id]);   // new period → reminders start again
+  CO_CACHE.delete(co.id);
+  payMail(row.order_id).catch(e => console.log('invoice mail:', e.message));
+  await inCo(co, () => pev('paid', by, { amount: row.amount, months: row.months, seats: row.seats, modules: row.modules, until, payment_id: paymentId }));
+  const ownerSupers = await inCo({ schema: 'public', id: 1 }, async () => (await q(`SELECT id FROM users WHERE role=$1 AND active`, [SUPER])).rows.map(x => x.id));
+  inCo({ schema: 'public', id: 1 }, () => notifyLink(ownerSupers, '💰 Payment received', `${co.name} paid ₹${row.amount.toLocaleString('en-IN')} · ${row.seats} users · ${row.months} month${row.months > 1 ? 's' : ''}`, 'owner')).catch(() => {});
+  return { ...row, paid_until: until, status: 'paid', inv_no: invNo };
+}
+const hmacOk = (data, sig, key) => { if (!sig || !key) return false; const h = crypto.createHmac('sha256', key).update(data).digest('hex'); return h.length === String(sig).length && crypto.timingSafeEqual(Buffer.from(h), Buffer.from(String(sig))); };
+app.post('/api/pay/verify', wrap(async (req, res) => {
+  const b = req.body || {}, oid = String(b.razorpay_order_id || ''), pid = String(b.razorpay_payment_id || '');
+  const row = (await P('SELECT * FROM platform.payments WHERE order_id=$1 AND company_id=$2', [oid, coId()])).rows[0];
+  if (!row) return res.status(404).json({ error: 'Payment not found' });
+  if (!hmacOk(oid + '|' + pid, b.razorpay_signature, RZP_SECRET)) return res.status(400).json({ error: 'Payment could not be verified. If money was taken, it will be switched on automatically or refunded.' });
+  const done = await payApply(oid, pid, req.user.name);
+  res.json({ ok: true, paid_until: done.paid_until, inv_no: done.inv_no, order_id: oid, plan: planOf(await coById(coId())) });
+}));
+// Razorpay webhook (Dashboard → Webhooks → URL https://<your app>/webhook/razorpay, events: payment.captured, order.paid) — switches the plan on even if the app was closed during payment
+app.post('/webhook/razorpay', wrap(async (req, res) => {
+  if (!hmacOk(req.rawBody || Buffer.from(''), req.headers['x-razorpay-signature'], RZP_HOOK)) return res.status(400).json({ error: 'bad signature' });
+  const ev = req.body || {}, pay = ev.payload && ev.payload.payment && ev.payload.payment.entity;
+  if (['payment.captured', 'order.paid'].includes(ev.event) && pay && pay.order_id) await payApply(pay.order_id, pay.id, 'Razorpay');
+  res.json({ ok: true });
+}));
+// ---------- subscription invoice (Rago Infotech → customer), emails and renewal reminders ----------
+const esc = bhe;
+const INV_PREFIX = process.env.INVOICE_PREFIX || 'RAGO', INV_SAC = process.env.INVOICE_SAC || '997331';
+const SELLER = () => ({ name: process.env.LEGAL_NAME || 'Rago Infotech', address: process.env.LEGAL_ADDRESS || 'Thillai Nagar, Tiruchirappalli, Tamil Nadu', gstin: (process.env.LEGAL_GSTIN || '').toUpperCase(),
+  email: process.env.LEGAL_EMAIL || 'ragoinfotech@gmail.com', phone: process.env.LEGAL_PHONE || '+91 93602 21820' });
+const MOD_NAMES = m => (m || []).includes('all') ? 'Whole CRM (Leads, Service, Billing, Attendance, Field Sales)' : (m || []).map(k => (MODULES.find(x => x.k === k) || {}).l || k).join(', ');
+const fdate = d => { if (!d) return ''; const iso = d instanceof Date ? new Date(d.getTime() + 5.5 * 3600e3).toISOString() : String(d); return new Date(iso.slice(0, 10) + 'T12:00:00Z').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }); };
+const rs = n => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function payInvoiceHTML(x, co) {
+  const se = SELLER(), sSt = (se.gstin || '33').slice(0, 2), bSt = (x.gstin || '').slice(0, 2) || sSt, intra = sSt === bSt, taxable = (+x.amount || 0) - (+x.gst || 0), g = +x.gst || 0;
+  const tax = g ? (intra ? `<tr><td>CGST 9%</td><td class="r">${rs(g / 2)}</td></tr><tr><td>SGST 9%</td><td class="r">${rs(g - g / 2)}</td></tr>` : `<tr><td>IGST 18%</td><td class="r">${rs(g)}</td></tr>`) : '';
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Invoice ${esc(x.inv_no || '')}</title><style>
+  body{font:14px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#1f2024;background:#f4f4f5;margin:0;padding:20px}.inv{max-width:760px;margin:0 auto;background:#fff;border-radius:14px;padding:28px;border-top:6px solid #e3aa2b}
+  h1{margin:0;font-size:24px}.top{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}.dim{color:#5a5d63}.r{text-align:right}table{width:100%;border-collapse:collapse;margin-top:16px}th,td{padding:9px 8px;border-bottom:1px solid #e8e8ea;text-align:left;vertical-align:top}th{background:#f4f4f5;font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+  .tot td{font-weight:700;font-size:16px;border-bottom:0}.two{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:18px}.box{background:#f4f4f5;border-radius:10px;padding:12px}.paid{display:inline-block;background:#e7f6ec;color:#15803d;font-weight:700;border-radius:99px;padding:3px 10px;font-size:12px}
+  .bar{max-width:760px;margin:0 auto 12px;text-align:right}.bar button{background:#e3aa2b;color:#16120a;border:0;border-radius:99px;padding:9px 18px;font-weight:600;cursor:pointer}@media print{body{background:#fff;padding:0}.bar{display:none}.inv{border-radius:0}}@media(max-width:560px){.two{grid-template-columns:1fr}}</style></head><body>
+  <div class="bar"><button onclick="print()">Print / Save PDF</button></div><div class="inv"><div class="top"><div><h1>${se.gstin ? 'Tax Invoice' : 'Invoice'}</h1><div class="dim">No. <b>${esc(x.inv_no || '—')}</b> · ${fdate(x.paid_at)}</div><span class="paid">PAID</span></div>
+  <div class="r"><b style="font-size:18px">${esc(se.name)}</b><div class="dim">${esc(se.address)}</div>${se.gstin ? `<div>GSTIN <b>${esc(se.gstin)}</b></div>` : ''}<div class="dim">${esc(se.email)} · ${esc(se.phone)}</div></div></div>
+  <div class="two"><div class="box"><div class="dim" style="font-size:12px">BILL TO</div><b>${esc(x.bill_name || co.name)}</b>${x.bill_address || co.bill_address ? `<div class="dim">${esc(x.bill_address || co.bill_address)}</div>` : ''}${x.gstin ? `<div>GSTIN <b>${esc(x.gstin)}</b></div>` : ''}<div class="dim">${esc(co.email || '')}</div></div>
+  <div class="box"><div class="dim" style="font-size:12px">PAYMENT</div><div>Razorpay · ${esc(x.payment_id || '')}</div><div class="dim">Order ${esc(x.order_id)}</div><div>Place of supply: ${intra ? 'same state' : 'state code ' + esc(bSt)}</div></div></div>
+  <table><tr><th>Description</th><th>SAC</th><th class="r">Amount</th></tr><tr><td><b>Rago CRM subscription</b><div class="dim">${esc(MOD_NAMES(x.modules))}<br>${x.seats} user${x.seats > 1 ? 's' : ''} × ${x.months} month${x.months > 1 ? 's' : ''} · ${fdate(x.period_from)} – ${fdate(x.paid_until)}</div></td><td>${esc(INV_SAC)}</td><td class="r">${rs(taxable)}</td></tr>
+  <tr><td colspan="2" class="r">Taxable value</td><td class="r">${rs(taxable)}</td></tr>${tax ? tax.replace(/<td>/g, '<td colspan="2" class="r">').replace(/<td colspan="2" class="r" class="r">/g, '<td class="r">') : ''}<tr class="tot"><td colspan="2" class="r">Total paid</td><td class="r">${rs(x.amount)}</td></tr></table>
+  <p class="dim" style="font-size:12px;margin-top:18px">This is a computer-generated invoice. Thank you for choosing Rago CRM.</p></div></body></html>`;
+}
+const payRow = async (oid) => (await P(`SELECT p.*, to_char(p.paid_until,'YYYY-MM-DD') paid_until, to_char(p.period_from,'YYYY-MM-DD') period_from FROM platform.payments p WHERE order_id=$1`, [oid])).rows[0];
+app.get('/api/pay/invoice/:oid', wrap(async (req, res) => {   // the customer's own invoices (Super Admin / Admin), or any for the Rago owner
+  const x = await payRow(String(req.params.oid)); if (!x || x.status !== 'paid') return res.status(404).send('Not found');
+  const owner = coId() === 1 && isSuper(req.user);
+  if (!owner && (x.company_id !== coId() || !(isSuper(req.user) || req.user.role === 'Admin'))) return res.status(403).send('Not allowed');
+  res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.end(payInvoiceHTML(x, await coById(x.company_id)));
+}));
+const invSig = oid => crypto.createHmac('sha256', SECRET + ':inv').update(String(oid)).digest('hex').slice(0, 32);
+const invLink = oid => `${APP_URL()}/inv/${encodeURIComponent(oid)}/${invSig(oid)}`;
+app.get('/inv/:oid/:sig', wrap(async (req, res) => {   // private invoice link sent by email (no login needed)
+  const oid = String(req.params.oid), sig = String(req.params.sig || '');
+  if (sig.length !== 32 || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(invSig(oid)))) return res.status(404).send('Not found');
+  const x = await payRow(oid); if (!x || x.status !== 'paid') return res.status(404).send('Not found');
+  res.setHeader('X-Robots-Tag', 'noindex'); res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.end(payInvoiceHTML(x, await coById(x.company_id)));
+}));
+async function ragoMail(to, subject, html) {   // emails from Rago Infotech, sent through the Brevo key saved in your own company (Profile → Email)
+  const relay = await inCo({ schema: 'public', id: 1 }, () => mailRelay()).catch(() => null);
+  const list = [...new Set((Array.isArray(to) ? to : [to]).map(e => String(e || '').trim().toLowerCase()).filter(e => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)))];
+  if (!relay || !list.length) return { sent: false, why: !relay ? 'no mail relay' : 'no email' };
+  await relaySend(relay, { from: { address: process.env.MAIL_FROM || SELLER().email, name: SELLER().name }, to: list, subject, html });
+  return { sent: true, to: list };
+}
+const coMails = async co => { const sup = await inCo(co, async () => (await q(`SELECT email FROM users WHERE role=$1 AND active AND email IS NOT NULL`, [SUPER])).rows.map(r => r.email)).catch(() => []); return [co.email, ...sup]; };
+const APP_URL = () => process.env.APP_URL || 'https://app.ragoinfotech.com';
+const mailWrap = (title, body) => `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f4f4f5;padding:20px"><div style="max-width:560px;margin:0 auto;background:#fff;border-radius:14px;padding:24px;border-top:6px solid #e3aa2b"><h2 style="margin:0 0 10px;color:#1f2024">${title}</h2>${body}<p style="color:#8a8d93;font-size:12px;margin-top:22px">${esc(SELLER().name)} · ${esc(SELLER().phone)} · ${esc(SELLER().email)}</p></div></div>`;
+async function payMail(oid) {
+  const x = await payRow(oid); if (!x || x.mailed_at) return;
+  const co = await coById(x.company_id), link = invLink(x.order_id);
+  const r = await ragoMail(await coMails(co), `Payment received — Invoice ${x.inv_no} · Rago CRM`, mailWrap('Thank you — payment received ✅',
+    `<p>Hi ${esc(co.owner_name || co.name)},</p><p>We received <b>${rs(x.amount)}</b> for <b>Rago CRM</b>. Your plan is active till <b>${fdate(x.paid_until)}</b>.</p>
+     <table style="width:100%;border-collapse:collapse;font-size:14px"><tr><td style="padding:6px 0;color:#5a5d63">Invoice no.</td><td><b>${esc(x.inv_no)}</b></td></tr><tr><td style="padding:6px 0;color:#5a5d63">Plan</td><td>${esc(MOD_NAMES(x.modules))}</td></tr><tr><td style="padding:6px 0;color:#5a5d63">Users</td><td>${x.seats}</td></tr><tr><td style="padding:6px 0;color:#5a5d63">Period</td><td>${fdate(x.period_from)} – ${fdate(x.paid_until)}</td></tr><tr><td style="padding:6px 0;color:#5a5d63">GST</td><td>${rs(x.gst)}${x.gstin ? ' · GSTIN ' + esc(x.gstin) : ''}</td></tr></table>
+     <p style="margin-top:18px"><a href="${link}" style="background:#e3aa2b;color:#16120a;text-decoration:none;padding:10px 18px;border-radius:99px;font-weight:600">View / download invoice</a></p><p style="color:#5a5d63;font-size:13px">You can also see all invoices in Rago CRM → Profile → Plan.</p>`)
+    + `<div style="max-width:760px;margin:16px auto 0">${payInvoiceHTML(x, co).replace(/^[\s\S]*<body>/, '').replace(/<\/body>[\s\S]*$/, '').replace(/<div class="bar">[\s\S]*?<\/div>/, '')}</div>`);
+  if (r.sent) await P('UPDATE platform.payments SET mailed_at=now() WHERE id=$1', [x.id]);
+  return r;
+}
+const REMIND_DAYS = +process.env.REMIND_DAYS || 4;
+async function planReminders() {   // runs every hour: 4 days before the plan / trial ends, and once when it has ended
+  const today = todayStr();
+  for (const co of (await allCos()).filter(c => c.id !== 1 && c.status === 'active' && (c.plan === 'paid' || c.plan === 'trial'))) {
+    const until = String((co.plan === 'paid' ? co.paid_until : co.trial_until) || '').slice(0, 10); if (!until) continue;
+    const left = Math.round((new Date(until + 'T00:00:00Z') - new Date(today + 'T00:00:00Z')) / 864e5), done = co.reminded || {};
+    let kind = null; if (left >= 0 && left <= REMIND_DAYS && done.soon !== until) kind = 'soon'; else if (left < 0 && done.ended !== until) kind = 'ended';
+    if (!kind) continue;
+    const what = co.plan === 'trial' ? 'free trial' : 'Rago CRM plan', link = APP_URL();
+    const subj = kind === 'soon' ? `Your ${what} ends ${left === 0 ? 'today' : 'in ' + left + ' day' + (left > 1 ? 's' : '')} — renew Rago CRM` : `Your ${what} has ended — renew to unlock Rago CRM`;
+    const body = kind === 'soon' ? `<p>Hi ${esc(co.owner_name || co.name)},</p><p>Your <b>${what}</b> for <b>${esc(co.name)}</b> ends on <b>${fdate(until)}</b>${left ? ` — ${left} day${left > 1 ? 's' : ''} from today` : ' — today'}.</p><p>Renew now so your team keeps working without a break. Your data is safe.</p>`
+      : `<p>Hi ${esc(co.owner_name || co.name)},</p><p>Your <b>${what}</b> for <b>${esc(co.name)}</b> ended on <b>${fdate(until)}</b>. Leads, Billing, Service and Field Sales are locked; Attendance stays free for ${FREE_USERS} users. <b>Your data is safe.</b></p><p>Renew to unlock everything again.</p>`;
+    const r = await ragoMail(await coMails(co), subj, mailWrap(kind === 'soon' ? '⏰ Plan ending soon' : '🔒 Plan ended', body + `<p style="margin-top:18px"><a href="${link}" style="background:#e3aa2b;color:#16120a;text-decoration:none;padding:10px 18px;border-radius:99px;font-weight:600">Renew in Rago CRM</a></p><p style="color:#5a5d63;font-size:13px">Open Rago CRM → Profile → Plan → Pay now.</p>`)).catch(e => ({ sent: false, why: e.message }));
+    const sup = await inCo(co, async () => (await q(`SELECT id FROM users WHERE role=$1 AND active`, [SUPER])).rows.map(x => x.id)).catch(() => []);
+    await inCo(co, () => notifyLink(sup, kind === 'soon' ? '⏰ Plan ending soon' : '🔒 Plan ended', kind === 'soon' ? `Your ${what} ends ${left === 0 ? 'today' : 'in ' + left + ' day' + (left > 1 ? 's' : '')}. Tap to renew.` : `Your ${what} has ended. Tap to renew.`, 'me')).catch(() => {});
+    await P(`UPDATE platform.companies SET reminded=COALESCE(reminded,'{}'::jsonb) || $2::jsonb WHERE id=$1`, [co.id, JSON.stringify({ [kind]: until })]); CO_CACHE.delete(co.id);
+    await inCo(co, () => pev('reminder', 'Rago', { kind, until, left, mailed: !!r.sent, to: r.to || null, why: r.why || null })).catch(() => {});
+  }
+}
+setTimeout(() => { planReminders().catch(e => console.log('reminders:', e.message)); setInterval(() => planReminders().catch(e => console.log('reminders:', e.message)), 3600e3); }, 20000);
+app.post('/api/console/reminders/run', ownerOnly, wrap(async (req, res) => { await planReminders(); res.json({ ok: true }); }));   // run now (testing)
+app.post('/api/console/payment/:oid/resend', ownerOnly, wrap(async (req, res) => { await P('UPDATE platform.payments SET mailed_at=NULL WHERE order_id=$1', [String(req.params.oid)]); const r = await payMail(String(req.params.oid)); res.json(r || { sent: false }); }));
+// ---------- delete my account (required by Google Play and the App Store) ----------
+app.post('/api/me/delete', wrap(async (req, res) => {
+  const b = req.body || {}, u = (await q('SELECT * FROM users WHERE id=$1', [req.user.id])).rows[0];
+  if (!u || !verify(String(b.password || ''), u.password_hash)) return res.status(400).json({ error: 'Wrong password' });
+  const off = 'gz=; Path=/; HttpOnly; Max-Age=0';
+  if (isSuper(u)) {
+    if (coId() === 1) return res.status(400).json({ error: 'You are the Rago owner account — this cannot be deleted here.' });
+    if (String(b.confirm || '').trim().toUpperCase() !== 'DELETE') return res.status(400).json({ error: 'Type DELETE to confirm deleting the whole company' });
+    await P(`UPDATE platform.companies SET status='deletion_requested', notes=COALESCE(notes,'')||$2 WHERE id=$1`, [coId(), `\nDeletion requested by ${u.name} on ${new Date().toISOString().slice(0, 10)}`]); CO_CACHE.delete(coId());
+    res.setHeader('Set-Cookie', off); return res.json({ ok: true, company: true });
+  }
+  await q(`UPDATE users SET name='Deleted user', email=NULL, phone=NULL, photo=NULL, photo_mime=NULL, cal_token=NULL, active=false, username=$2, password_hash=$3 WHERE id=$1`,
+    [u.id, 'deleted_' + u.id + '_' + crypto.randomBytes(4).toString('hex'), hash(crypto.randomBytes(24).toString('hex'))]);
+  await P('DELETE FROM platform.logins WHERE username=lower($1)', [u.username]);
+  for (const t of ['push_subs', 'user_mail']) await q(`DELETE FROM ${t} WHERE user_id=$1`, [u.id]).catch(() => {});
+  await q('UPDATE call_devices SET active=false WHERE user_id=$1', [u.id]).catch(() => {});
+  res.setHeader('Set-Cookie', off); res.json({ ok: true });
+}));
+app.delete('/api/platform/companies/:id', ownerOnly, wrap(async (req, res) => {   // owner: delete a company and all its data for good
+  const id = +req.params.id, co = await coById(id); if (!co || id === 1) return res.status(400).json({ error: 'Not allowed' });
+  if (String((req.body || {}).confirm || '') !== co.name) return res.status(400).json({ error: 'Type the company name exactly to confirm' });
+  await P(`DROP SCHEMA IF EXISTS "${co.schema}" CASCADE`); await P('DELETE FROM platform.logins WHERE company_id=$1', [id]);
+  await P(`UPDATE platform.companies SET status='deleted', notes=COALESCE(notes,'')||$2 WHERE id=$1`, [id, `\nDeleted on ${new Date().toISOString().slice(0, 10)}`]); CO_CACHE.delete(id);
+  res.json({ ok: true });
+}));
+
+initPlatform().then(initPlans).then(() => coById(1)).then(() => runInit({ schema: 'public', id: 1 })).then(backfillLogins)
+  .then(() => app.listen(process.env.PORT || 3000, () => console.log('Rago CRM running')))
+  .then(async () => { for (const co of await allCos()) if (co.id !== 1 && co.status !== 'deleted' && co.status !== 'deletion_requested') await ensureCo(co); })
+  .then(() => { setInterval(() => forEachCo(remindDue), 30000); forEachCo(remindDue); setInterval(() => forEachCo(holidayDue), 5 * 60000); forEachCo(holidayDue); })
   .catch(e => { console.error('DB init failed', e.message); process.exit(1); });

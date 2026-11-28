@@ -528,3 +528,204 @@ iPhone: keep using Safari → Share → Add to Home Screen. Call leads are not p
   - Senders, Domains & IPs → Domains → add your domain, and copy its DNS records into Hostinger → Domains → DNS until it shows verified.
   - SMTP & API → API keys → Generate → paste it in the CRM.
 - Other fix: move the Render service to a paid plan (mail ports open). Then no Brevo is needed.
+
+## Version 33 — Warranty & Service filters by branch, UI check of every screen
+
+**Warranty & Service**
+- **Branch tiles** (All branches / Heaven / G Media …) like Billing. The case counts follow the chosen branch, and the choice is remembered.
+- **⚲ Filter:** type (Warranty / Service), handled (on site / off site / not decided), W&S vendor, engineer, received from/to date, transport (has details / none yet).
+- **Sort:** recently updated, newest, oldest, most money due.
+- Cards show the branch (when viewing all branches) and how many transport trips are recorded.
+
+**UI fixes after checking every screen on desktop and phone**
+- **Desktop side menu:** with many menus it no longer fit the screen, and Mail, Chat, WhatsApp, Projects, Warranty, Attendance, Salary and Holidays were hidden below it. Now it shows ⌃ / ⌄ arrows when there are more menus, the open screen is always scrolled into view, and the icons are a little tighter on shorter screens.
+- Customers: the search box now uses the full width (it was cut to "Search name, company or ph…").
+- Profile on phone: the notification sound "On" button no longer squeezes the text.
+- Checked all 19 screens and the main pop-ups (lead, bill, service, warranty case, team, new invoice) at desktop and phone size: no sideways scrolling and no page errors.
+
+## Version 34 — Delete permission, call leads phone + delete
+
+- New feature switch **"Delete records"** (Team → user → features, or Roles). It covers leads, customers, service tickets, products, call logs and warranty cases.
+  - **Super Admin can always delete.**
+  - Other users can delete only when the Super Admin turns this on for them. It is off by default, also for Admin.
+  - Before, product delete was open to every billing user; now it needs this switch.
+- **Call leads:** 📞 button on every call (tap to call back) and 🗑 delete. The Ignored / Added / Already-leads tabs have **"Delete all"**. Deleting a call never deletes a lead made from it.
+- **Warranty & Service:** 🗑 Delete on a case (with the permission).
+
+## Version 35 — Company accounts (step 1 of selling Rago CRM)
+
+- Rago CRM can now hold **many separate companies**. Each company has its **own private section of the database** (a Postgres schema) with its own leads, customers, bills, staff, settings, logo, WhatsApp, mail and call leads. One company can never see another's data.
+- **Your current data is company #1** and nothing moved. All current logins, bill links, calendar links and phone apps keep working.
+- **Usernames are unique across all companies**, so staff log in normally and land in their own company. There is no company code to type.
+- Links that work without login (shared bills, calendar, Siri reminders, phone app, bill logo/seal) carry the company inside them.
+- **WhatsApp for other companies:** each company gets its own webhook address, shown in its WhatsApp setup.
+- Reminders, holiday greetings and other background jobs run for every company.
+- New menu **Companies** (only for you, the Rago owner):
+  - totals: companies, active users, paid companies;
+  - every company with owner, phone, city, users, plan and status;
+  - **＋ New company** (creates the company and its Super Admin login);
+  - **Pause / Activate** (a paused company cannot log in).
+- Next steps: modules + free plan (Attendance free up to 5 users), then signup with Razorpay.
+
+## Version 42 — Yellow & ash again, new logo, Staff report, Bike / Bus travel, two packages
+
+**Look** — back to the first Rago **yellow and ash** look everywhere (CRM, sign-up page, Console, invoices, emails). The glass designs are removed. The **logo** is now a yellow feather with an ash "Rago" (app icon, login, website).
+
+**Staff report** (menu → Staff report; for Super Admin, Admins and people with Dashboard / Team attendance)
+- Pick Today / This week / This month / Last month or any dates.
+- For every person: new leads, follow-ups, quotations (and ₹), invoices (and ₹), calls (and minutes), service tickets made, services done, field visits, km, travel claim, days present and late. Totals at the top.
+- **History ›** shows everything one person did, day by day (leads, follow-ups, bills, calls, ticket updates, visits, attendance).
+- **🖨 Print** for the whole team or for one person's history.
+
+**Field sales**
+- At **Check in**: choose **🏍 Bike** or **🚌 Bus**. Bus asks for the **ticket amount** and a **ticket photo**.
+- Bike km × ₹/km = **petrol**; bus tickets = **bus fare**; both make the day's **travel claim**. Bus trips are not counted as petrol km.
+- **End day**: enter the **km noted on the bike meter** (optional) and, if going back by bus, the return ticket.
+- The day shows **map km vs km noted by hand**; a difference of **5 km or more is flagged ⚠**. Admins can correct the noted km (＋ Add km).
+- Field month report and Staff report show petrol, bus fare and total travel.
+
+**Two packages from the same code**
+- **rago-crm-heaven** — for Heaven Automation & G Media (your existing data). `SAAS=0`: no sign-up page, no Console/Companies, no plans; everything is on. `COMPANY_NAME=Heaven Automation`, `BRANCHES=Heaven,G Media` (only used on a brand-new database — existing data is never changed).
+- **rago-crm-sale** — for selling Rago CRM module-wise (sign-up, 7-day trial, plans, Razorpay, Console). `COMPANY_NAME=Rago Infotech`.
+
+## Version 41 — Automatic 001 numbers, ₹100 Attendance, full trial for added companies
+
+**Automatic numbers (no typing)**
+- Invoice, quotation, proforma, challan, credit note and purchase numbers are made automatically: **INV-001, QT-001, PI-001, DC-001, CN-001, PUR-001**.
+- Each **branch has its own series** (branch 1 INV-001…, branch 2 also INV-001…), and each document type has its own series.
+- The editor shows the next number at the top (it can't be typed). The prefix (INV-, QT-…) and starting number can still be set by the Super Admin in Billing → Settings.
+- Purchases: the **vendor's bill number** is shown only inside the opened bill, not in the lists.
+
+**Prices**
+- Attendance & Payroll: **free for up to 5 users**; above 5 users **₹100 per user per month**. Other modules ₹199; whole CRM ₹499. Shown on the sign-up page, Choose plan screen and the website.
+- Render variable `PRICE_ATTENDANCE` (default 100).
+
+**Companies you add from Rago Console / Companies** now start with the **7-day trial with everything on** (before, they got only Attendance & Payroll).
+
+**Fixes** — sign-up page and Console were unreadable when the computer/phone is in **dark mode**; they now always use the light glass style.
+
+## Version 40 — Red Glass design
+
+The whole app now has the **Rago Red Glass** look (like the sample video, in Rago red and ash):
+- Glowing red-to-ash background, **dark glass sidebar** (on computers it now shows names, a Rago CRM title and a plan card), a full-width **glass top bar**, and one **frosted panel** holding white glass cards. On phones: a glass top bar and a glass bottom menu.
+- **Smooth animations**: each screen's cards fade and slide in one after another; tiles lift on hover; buttons and menu items move slightly when you point at them. Turned off automatically for people who choose "reduce motion" on their phone.
+- The **login screen**, **sign-up page** and **Rago Console** use the same glass style. Pop-up windows stay solid white so forms are easy to read. Dark mode keeps working.
+- Website: the **Rago CRM page** (rago-crm.html) has the same red glass design with floating, animated cards. The rest of the website is unchanged.
+
+Nothing else changed — all features work as before.
+
+## Version 39 — Rago red look, GST number, fuller Console, clean new installs
+
+**Rago red & ash look** — the app, sign-up page and Console now use the Rago Infotech colours (red #e3262b and ash grey), the same as the website. The help **?** button is ash and sits above the red **+** button on phones.
+
+**GST number (GSTIN)**
+- Sign-up page: optional **GST number** field (checked for a valid GSTIN).
+- Choose plan / Pay screen: **🧾 GST bill details** — business name, GSTIN, billing address. Saved for next time and sent with the Razorpay payment.
+- The Console shows the company's GSTIN and each payment's GST amount.
+
+**Rago Console — company details**
+- **Plan & trial**: Free trial / Paid / Trial ended, start → end date, days left with a bar, users active/allowed, branches used/allowed, monthly value, total paid, modules on, plan chosen at sign-up.
+- **Usage**: last active (and who), last login, active users today · 7 days · 30 days, logins in 30 days.
+- **Staff**: total, active, switched off, count by role.
+- **Data**: leads, customers, quotations, invoices (this month and amount), tickets, products, attendance, field visits, calls.
+- **Payments** list, and Call / WhatsApp / Email buttons. The company list shows "Trial · X days left" and "Ended → Free".
+
+**Branches**
+- A brand-new install starts with **one branch named after your company** (Render variable `COMPANY_NAME`, default "Rago Infotech"), not "Heaven" and "G Media". Existing data is not changed.
+- Profile → **Branches**: tap ✎ to **rename** a branch, ✕ to remove it.
+- Setting `COMPANY_NAME` in Render also renames your own company (company #1).
+
+**Fixes** — the "All branches" button no longer covers "Say a reminder" on the to-do page.
+
+**Invoice + email after payment**
+- Every Razorpay payment gets an **invoice number** like `RAGO/2026-27/0001` (new series every financial year from April).
+- Invoice page: Rago Infotech details and GSTIN, customer name, GSTIN and address, plan, users, months and period, SAC code, **CGST + SGST** (same state) or **IGST** (other state, from the customer's GSTIN), total paid. Print / Save PDF.
+- An **email goes to the customer** (company email + Super Admin) with the invoice number, plan details and a private link to the invoice. No login needed for the link.
+- Customers see all invoices in **Profile → Plan → Invoices**. The Console shows each payment's invoice with **Invoice** and **Resend email** buttons.
+
+**Plan ending reminders**
+- **4 days before** a plan or trial ends: an email + an in-app notification, and a **pop-up in the CRM** (once a day) for the Super Admin and Admins with a **Renew now** button.
+- When it **has ended**: one more email + notification. The Console Activity shows each reminder.
+
+**Render → Environment for emails and invoices**
+- Emails are sent with the **Brevo key saved in your own company** (Rago CRM → Profile → Email → Brevo). In Brevo, verify the sender email.
+- `MAIL_FROM` — the sender email (default `LEGAL_EMAIL`, else ragoinfotech@gmail.com). It must be verified in Brevo.
+- `LEGAL_NAME`, `LEGAL_ADDRESS`, `LEGAL_GSTIN`, `LEGAL_EMAIL`, `LEGAL_PHONE` — printed on every invoice. With `LEGAL_GSTIN` set, the title becomes **Tax Invoice**.
+- Optional: `INVOICE_PREFIX` (default RAGO), `INVOICE_SAC` (default 997331 — confirm with your auditor), `REMIND_DAYS` (default 4), `APP_URL` (default https://app.ragoinfotech.com).
+- If you are not GST registered, set `PLAN_GST` to 0 so no GST is charged.
+
+## Version 38 — Branch switcher on top, one branch per company, Razorpay payments
+
+**Branch switcher (like "Change company" in Swipe)**
+- A **🏢 All branches ▾** button at the top. Choose a branch and every screen (dashboard, leads, services, billing, attendance, payroll, warranty, reports) shows only that branch. The choice is remembered.
+- Only for users who see all branches (Super Admin / admins without a fixed branch), and only when the company has 2 or more branches. Staff tied to one branch always see their own branch.
+
+**One branch per company**
+- A client company can create **1 branch**. Trying to add a second shows "Your plan includes 1 branch. To add another branch, contact Rago Infotech."
+- Rago Console → company → Plan → **Branches**: raise it for that company (for example 2 or 3).
+- Your own company (Rago) has no limit. Render variable `BRANCH_LIMIT` changes the default.
+
+**Razorpay — pay inside the app**
+- Profile → Plan / "Choose plan" / "Renew plan": choose modules, users and **1, 3, 6 or 12 months**. It shows the price + GST 18% and a **🔒 Pay ₹…** button (UPI, cards, net banking).
+- When payment succeeds the plan switches on at once: Paid, the chosen modules and users, paid till date. Paying again adds to the end date.
+- Safe: the amount is worked out on the server, each payment is checked with Razorpay's signature, the same payment can't be counted twice, and only the Super Admin can pay.
+- You get a "💰 Payment received" notification. The Console shows every payment in Activity.
+- If Razorpay keys are not set, the app shows the WhatsApp / Email renew buttons instead (as in V37).
+
+**Render → Environment (add these — never paste them in chat or GitHub)**
+- `RAZORPAY_KEY_ID` — from Razorpay Dashboard → Account & Settings → API Keys (starts with `rzp_live_`, or `rzp_test_` for testing)
+- `RAZORPAY_KEY_SECRET` — shown once when you generate the key
+- `RAZORPAY_WEBHOOK_SECRET` — any strong password you choose, and the same one in Razorpay → Webhooks
+- Optional: `PLAN_GST` (default 18; set 0 if you don't charge GST), `BRANCH_LIMIT` (default 1)
+
+**Fixes (V38.1)**
+- A branch saved on a phone from another company no longer leaves the first screen empty.
+- When a paid plan ends, the strip says "Your plan has ended" (not "free trial").
+- Admins see "Only the Super Admin can pay" instead of a Pay button.
+
+**Razorpay webhook** (so the plan switches on even if the customer closes the app during payment)
+- Razorpay Dashboard → Account & Settings → Webhooks → Add new webhook
+- URL: `https://app.ragoinfotech.com/webhook/razorpay` (or your onrender.com address + `/webhook/razorpay`)
+- Secret: the same as `RAZORPAY_WEBHOOK_SECRET` · Events: `payment.captured` and `order.paid`
+
+## Version 37 — Sell module-wise: plans, 7-day trial, Rago Console, help bot
+
+**Prices (per user per month, GST extra)**
+- One module: ₹199. Whole CRM (Leads, Service, Billing, Attendance, Field Sales): ₹499. Picking 3 or more modules never costs more than ₹499.
+- Free plan: Attendance for up to 5 users, free forever.
+- WhatsApp & Mail is a future **add-on** — it is not part of the whole CRM. The owner can switch it on by hand from the Console.
+- Only **one Super Admin** per company.
+
+**Sign up from the website** — `/signup`
+- Customer picks Free, some modules, or the whole CRM, and the number of users, and creates their own company and login.
+- **Every new company gets 7 days with all features on.** What they chose is saved and offered when the trial ends.
+- After 7 days: Leads, Billing, Service and Field Sales lock (data is kept). Attendance stays free for 5 users. The Super Admin sees a "Renew plan" screen with the price, and can send the plan on WhatsApp or email to Rago until online payment is connected.
+
+**During the trial / free plan**
+- Quotations and invoices print with a light **"RAGO CRM" watermark** and a small "Made with Rago CRM" line at the bottom.
+- A trial strip ("X days left — Choose plan") and a small Rago CRM card show on the dashboard and to-do for the Super Admin and Admins.
+- Rago's own company never sees these.
+
+**Rago Help** — the round **?** button at the bottom right. Tap a topic or type a question ("how to make invoice") and it explains the steps and opens the right screen. It works without the internet or any AI service.
+
+**Rago Console** — `/console` (Rago owner login only)
+- Every company: plan, users, last seen, sign-ups, logins, activity, monthly revenue.
+- Change a company's plan, modules, users and paid-till date; pause, activate or delete.
+
+**Render environment (optional)** — `PRICE_MODULE` (199), `PRICE_ALL` (499), `FREE_USERS` (5), `TRIAL_DAYS` (7), `TRIAL_SEATS` (50).
+
+**Website** — new page `rago-crm.html` with modules, prices and sign-up buttons; "Rago CRM" link added to the menu and footer of every page.
+
+## Version 36 — Ready for the stores: legal pages, delete account, Play Store app
+
+- **Legal pages in Rago Infotech's name** (needed by Google Play, App Store and Razorpay):
+  - /privacy (explains every app permission), /terms, **/refund** (cancellation and refund, new), /data-deletion and **/contact** (new). No prices are written on them.
+  - Company details are set in Render Environment and can be changed without code: `LEGAL_NAME`, `LEGAL_ADDRESS`, `LEGAL_EMAIL`, `LEGAL_PHONE`, `LEGAL_GSTIN`.
+- **Profile → Delete my account** (required by both stores):
+  - Staff: the login is removed at once and name, phone, email and photo are erased. Their work records stay with the company as "Deleted user".
+  - A company's Super Admin: deletes the whole company. Logins stop at once, and you (owner) delete it for good from **Companies**.
+  - Your owner account can't be deleted by mistake.
+- **Rago CRM app 4.0**, two versions from the same code and key:
+  - **Play Store version** `com.ragoinfotech.crm` (AAB file): no call-log permission, newest Android target (15), screen fits the new edge-to-edge Android.
+  - **Website version** `com.ragoinfotech.calls` (APK, inside this zip at `public/app/rago-calls.apk`): everything including Call leads.
+- **Fast start with many companies:** the server opens straight away and updates other companies' tables in the background, only when the table design changed (and also on a company's first request after an update).
